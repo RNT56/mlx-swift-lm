@@ -441,11 +441,16 @@ public final class TurboQuantKVCache: QuantizedKVCache, TurboQuantCompressedKVCa
 }
 
 public final class RotatingTurboQuantKVCache: BaseKVCache, QuantizedKVCacheProtocol,
+    TurboQuantCompressedKVCacheProtocol,
     CustomDebugStringConvertible
 {
     private let rawCache: RotatingKVCache
     private var packedKeys: TurboQuantPackedTensor?
     private var packedValues: TurboQuantPackedTensor?
+    private var compressedKeys: TurboQuantAttentionCode?
+    private var compressedValues: TurboQuantAttentionCode?
+    private var lastAttentionPath: TurboQuantAttentionPath = .mlxPackedFallback
+    private var lastUnsupportedShape: String?
 
     public let preset: TurboQuantPreset
     public let requestedBackend: TurboQuantBackend
@@ -509,6 +514,97 @@ public final class RotatingTurboQuantKVCache: BaseKVCache, QuantizedKVCacheProto
         )
     }
 
+    public var compressedState: (TurboQuantAttentionCode, TurboQuantAttentionCode)? {
+        guard let compressedKeys, let compressedValues else { return nil }
+        return (compressedKeys, compressedValues)
+    }
+
+    public var attentionDiagnostics: TurboQuantAttentionDiagnostics {
+        TurboQuantAttentionDiagnostics(
+            metalAttentionAvailable: TurboQuantKernelAvailability.current.supportsMetalPolarQJLAttention,
+            activeAttentionPath: lastAttentionPath,
+            fallbackReason: backendFallbackReason,
+            lastUnsupportedShape: lastUnsupportedShape
+        )
+    }
+
+    public func supportsCompressedAttention(
+        queries: MLXArray,
+        keys: MLXArray,
+        values: MLXArray,
+        mask: MLXFast.ScaledDotProductAttentionMaskMode
+    ) -> Bool {
+        guard activeBackend == .metalPolarQJL,
+            TurboQuantKernelAvailability.current.supportsMetalPolarQJLAttention
+        else {
+            lastUnsupportedShape = "metal backend unavailable"
+            return false
+        }
+        guard queries.ndim == 4, keys.ndim == 4, values.ndim == 4 else {
+            lastUnsupportedShape = "queries/keys/values must be rank 4"
+            return false
+        }
+        guard queries.dim(0) == 1, keys.dim(0) == 1, values.dim(0) == 1 else {
+            lastUnsupportedShape = "batch sizes greater than 1 use packed fallback"
+            return false
+        }
+        guard [64, 80, 96, 128, 256].contains(queries.dim(3)),
+            queries.dim(3) == keys.dim(3),
+            queries.dim(3) == values.dim(3)
+        else {
+            lastUnsupportedShape = "unsupported head dimension q=\(queries.dim(3)) k=\(keys.dim(3)) v=\(values.dim(3))"
+            return false
+        }
+        guard queries.dim(1) % keys.dim(1) == 0 else {
+            lastUnsupportedShape = "query heads must be a multiple of KV heads"
+            return false
+        }
+        let keyCode = compressedKeys ?? placeholderCode(for: keys, role: .key)
+        lastAttentionPath = MLX.turboQuantMetalSupportsOnlineFusedAttention(
+            queries: queries,
+            keyCode: keyCode,
+            mask: mask
+        ) ? .onlineFused : .twoStageCompressed
+        lastUnsupportedShape = nil
+        return true
+    }
+
+    public func updateCompressed(keys: MLXArray, values: MLXArray) throws -> (
+        TurboQuantAttentionCode,
+        TurboQuantAttentionCode
+    ) {
+        let (cachedKeys, cachedValues) = rawCache.update(keys: keys, values: values)
+        offset = rawCache.offset
+
+        let keyConfiguration = TurboQuantConfiguration(
+            preset: preset,
+            role: .key,
+            groupSize: groupSize,
+            mode: mode,
+            backend: activeBackend
+        )
+        let valueConfiguration = TurboQuantConfiguration(
+            preset: preset,
+            role: .value,
+            groupSize: groupSize,
+            mode: mode,
+            backend: activeBackend
+        )
+        let encodedKeys = try MLX.turboQuantMetalEncodeAttention(
+            cachedKeys,
+            configuration: keyConfiguration
+        )
+        let encodedValues = try MLX.turboQuantMetalEncodeAttention(
+            cachedValues,
+            configuration: valueConfiguration
+        )
+        compressedKeys = encodedKeys
+        compressedValues = encodedValues
+        packedKeys = nil
+        packedValues = nil
+        return (encodedKeys, encodedValues)
+    }
+
     public override func update(keys: MLXArray, values: MLXArray) -> (MLXArray, MLXArray) {
         let result = rawCache.update(keys: keys, values: values)
         offset = rawCache.offset
@@ -522,6 +618,8 @@ public final class RotatingTurboQuantKVCache: BaseKVCache, QuantizedKVCacheProto
             offset = rawCache.offset
             packedKeys = nil
             packedValues = nil
+            compressedKeys = nil
+            compressedValues = nil
         }
     }
 
@@ -551,6 +649,8 @@ public final class RotatingTurboQuantKVCache: BaseKVCache, QuantizedKVCacheProto
         offset = rawCache.offset
         packedKeys = nil
         packedValues = nil
+        compressedKeys = nil
+        compressedValues = nil
         return trimmed
     }
 
@@ -581,8 +681,8 @@ public final class RotatingTurboQuantKVCache: BaseKVCache, QuantizedKVCacheProto
             fallbackReason: backendFallbackReason,
             metalCodecAvailable: TurboQuantKernelAvailability.current.supportsMetalPolarQJLCodec,
             metalAttentionAvailable: TurboQuantKernelAvailability.current.supportsMetalPolarQJLAttention,
-            activeAttentionPath: activeBackend == .metalPolarQJL ? .twoStageCompressed : .mlxPackedFallback,
-            lastUnsupportedShape: nil,
+            activeAttentionPath: lastAttentionPath,
+            lastUnsupportedShape: lastUnsupportedShape,
             groupSize: groupSize,
             bits: bits,
             maxSize: maxSize
@@ -591,6 +691,20 @@ public final class RotatingTurboQuantKVCache: BaseKVCache, QuantizedKVCacheProto
 
     public var debugDescription: String {
         "\(String(describing: Self.self)) offset: \(offset), maxSize: \(maxSize?.description ?? "-"), preset: \(preset.rawValue), backend: \(activeBackend.rawValue)"
+    }
+
+    private func placeholderCode(for array: MLXArray, role: TurboQuantTensorRole) -> TurboQuantAttentionCode {
+        let layout = try! MLX.turboQuantAttentionLayout(
+            for: array,
+            preset: preset,
+            groupSize: groupSize
+        )
+        return try! MLX.turboQuantEmptyAttentionCode(
+            layout: layout,
+            preset: preset,
+            role: role,
+            groupSize: groupSize
+        )
     }
 }
 
