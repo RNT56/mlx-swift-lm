@@ -225,6 +225,7 @@ extension LanguageModel where Self: KVCacheDimensionProvider {
             let preset = parameters?.turboQuantPreset ?? .turbo3_5
             let backend = parameters?.turboQuantBackend ?? .mlxPacked
             let groupSize = parameters?.kvGroupSize ?? 64
+            let seed = parameters?.turboQuantSeed ?? defaultTurboQuantSeed
             if let maxKVSize = parameters?.maxKVSize {
                 return (0 ..< numLayers).map { _ in
                     RotatingTurboQuantKVCache(
@@ -232,12 +233,13 @@ extension LanguageModel where Self: KVCacheDimensionProvider {
                         keep: 4,
                         preset: preset,
                         groupSize: groupSize,
-                        backend: backend
+                        backend: backend,
+                        seed: seed
                     )
                 }
             }
             return (0 ..< numLayers).map { _ in
-                TurboQuantKVCache(preset: preset, groupSize: groupSize, backend: backend)
+                TurboQuantKVCache(preset: preset, groupSize: groupSize, backend: backend, seed: seed)
             }
         }
 
