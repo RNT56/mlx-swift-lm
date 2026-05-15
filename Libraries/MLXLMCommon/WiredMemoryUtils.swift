@@ -110,6 +110,7 @@ public enum WiredMemoryUtils {
                 kvCacheStrategy: parameters.kvCacheStrategy,
                 turboQuantPreset: parameters.turboQuantPreset,
                 turboQuantBackend: parameters.turboQuantBackend,
+                turboQuantOptimizationPolicy: parameters.turboQuantOptimizationPolicy,
                 turboQuantSeed: parameters.turboQuantSeed
             )
             eval(result.logits)
@@ -122,6 +123,7 @@ public enum WiredMemoryUtils {
                 kvCacheStrategy: parameters.kvCacheStrategy,
                 turboQuantPreset: parameters.turboQuantPreset,
                 turboQuantBackend: parameters.turboQuantBackend,
+                turboQuantOptimizationPolicy: parameters.turboQuantOptimizationPolicy,
                 turboQuantSeed: parameters.turboQuantSeed
             )
             eval(result.logits)

@@ -129,13 +129,17 @@ func testCacheSerialization(creator: (() -> any KVCache)) async throws {
             quantizedKVStart: 0,
             kvCacheStrategy: .turboQuant,
             turboQuantPreset: .turbo3_5,
-            turboQuantBackend: .metalPolarQJL
+            turboQuantBackend: .metalPolarQJL,
+            turboQuantOptimizationPolicy: .preferThroughput
         )
 
         #expect(cache[0] is TurboQuantKVCache)
         let turbo = try #require(cache[0] as? TurboQuantKVCache)
         #expect(turbo.preset == .turbo3_5)
         #expect(turbo.requestedBackend == .metalPolarQJL)
+        #expect(turbo.optimizationPolicy == .preferThroughput)
+        #expect(turbo.diagnostics.optimizationPolicy == .preferThroughput)
+        #expect(turbo.diagnostics.selectedKernelProfile == TurboQuantKernelAvailability.current.selectedKernelProfile)
         let expectedBackend: TurboQuantBackend =
             TurboQuantKernelAvailability.current.supportsMetalPolarQJLAttention
             ? .metalPolarQJL
@@ -145,6 +149,22 @@ func testCacheSerialization(creator: (() -> any KVCache)) async throws {
             #expect(turbo.backendFallbackReason != nil)
         }
     }
+}
+
+@Test func testTurboQuantOptimizationPolicyPropagatesToPromptCaches() throws {
+    let parameters = GenerateParameters(
+        maxKVSize: 32,
+        kvCacheStrategy: .turboQuant,
+        turboQuantBackend: .metalPolarQJL,
+        turboQuantOptimizationPolicy: .conservative
+    )
+    let cache = makePromptCacheWithLayerCount(numLayers: 2, parameters: parameters)
+
+    #expect(cache.count == 2)
+    let rotating = try #require(cache[0] as? RotatingTurboQuantKVCache)
+    #expect(rotating.optimizationPolicy == .conservative)
+    #expect(rotating.attentionDiagnostics.optimizationPolicy == .conservative)
+    #expect(rotating.diagnostics.selfTestStatus == TurboQuantKernelAvailability.current.selfTestStatus)
 }
 
 @Test func testTurboQuantCompressedAttentionStateWhenAvailable() throws {
@@ -169,6 +189,25 @@ func testCacheSerialization(creator: (() -> any KVCache)) async throws {
     #expect(compressedKeys.layout.logicalLength == 2)
     #expect(compressedValues.layout.logicalLength == 2)
     #expect(cache.attentionDiagnostics.activeAttentionPath != .mlxPackedFallback)
+}
+
+@Test func testTurboQuantConservativePolicyUsesTwoStageCompressedAttentionWhenAvailable() throws {
+    guard TurboQuantKernelAvailability.current.supportsMetalPolarQJLAttention else { return }
+
+    let cache = TurboQuantKVCache(backend: .metalPolarQJL, optimizationPolicy: .conservative)
+    let keys = MLXArray.ones([1, 2, 2, 64], dtype: .float32)
+    let values = MLXArray.ones([1, 2, 2, 64], dtype: .float32)
+    let queries = MLXArray.ones([1, 4, 1, 64], dtype: .float32)
+
+    #expect(
+        cache.supportsCompressedAttention(
+            queries: queries,
+            keys: keys,
+            values: values,
+            mask: .none
+        )
+    )
+    #expect(cache.attentionDiagnostics.activeAttentionPath == .twoStageCompressed)
 }
 
 @Test func testRotatingTurboQuantCompressedStateIsRawFreeWhenAvailable() throws {

@@ -81,6 +81,9 @@ public struct GenerateParameters: Sendable {
     /// TurboQuant backend requested when ``kvCacheStrategy`` is ``KVCacheStrategy/turboQuant``.
     public var turboQuantBackend: TurboQuantBackend
 
+    /// Device-adaptive TurboQuant routing policy used after MLX runtime capability verification.
+    public var turboQuantOptimizationPolicy: TurboQuantOptimizationPolicy
+
     /// Deterministic seed for TurboQuant preconditioning, normally derived from model id and revision.
     public var turboQuantSeed: UInt64?
 
@@ -123,6 +126,7 @@ public struct GenerateParameters: Sendable {
         kvCacheStrategy: KVCacheStrategy = .mlxAffine,
         turboQuantPreset: TurboQuantPreset = .turbo3_5,
         turboQuantBackend: TurboQuantBackend = .mlxPacked,
+        turboQuantOptimizationPolicy: TurboQuantOptimizationPolicy = .auto,
         turboQuantSeed: UInt64? = nil,
         temperature: Float = 0.6,
         topP: Float = 1.0,
@@ -144,6 +148,7 @@ public struct GenerateParameters: Sendable {
         self.kvCacheStrategy = kvCacheStrategy
         self.turboQuantPreset = turboQuantPreset
         self.turboQuantBackend = turboQuantBackend
+        self.turboQuantOptimizationPolicy = turboQuantOptimizationPolicy
         self.turboQuantSeed = turboQuantSeed
         self.temperature = temperature
         self.topP = topP
@@ -559,6 +564,7 @@ public struct TokenIterator: TokenIteratorProtocol {
     let kvCacheStrategy: KVCacheStrategy
     let turboQuantPreset: TurboQuantPreset
     let turboQuantBackend: TurboQuantBackend
+    let turboQuantOptimizationPolicy: TurboQuantOptimizationPolicy
     let turboQuantSeed: UInt64?
 
     // Internal metrics
@@ -591,6 +597,7 @@ public struct TokenIterator: TokenIteratorProtocol {
         self.kvCacheStrategy = parameters.kvCacheStrategy
         self.turboQuantPreset = parameters.turboQuantPreset
         self.turboQuantBackend = parameters.turboQuantBackend
+        self.turboQuantOptimizationPolicy = parameters.turboQuantOptimizationPolicy
         self.turboQuantSeed = parameters.turboQuantSeed
 
         self.promptPrefillTime = try measure {
@@ -628,6 +635,7 @@ public struct TokenIterator: TokenIteratorProtocol {
         self.kvCacheStrategy = parameters.kvCacheStrategy
         self.turboQuantPreset = parameters.turboQuantPreset
         self.turboQuantBackend = parameters.turboQuantBackend
+        self.turboQuantOptimizationPolicy = parameters.turboQuantOptimizationPolicy
         self.turboQuantSeed = parameters.turboQuantSeed
 
         self.promptPrefillTime = try measure {
@@ -665,6 +673,7 @@ public struct TokenIterator: TokenIteratorProtocol {
         self.kvCacheStrategy = .none
         self.turboQuantPreset = .turbo3_5
         self.turboQuantBackend = .mlxPacked
+        self.turboQuantOptimizationPolicy = .auto
         self.turboQuantSeed = nil
 
         self.promptPrefillTime = try measure {
@@ -720,6 +729,7 @@ public struct TokenIterator: TokenIteratorProtocol {
             kvCacheStrategy: kvCacheStrategy,
             turboQuantPreset: turboQuantPreset,
             turboQuantBackend: turboQuantBackend,
+            turboQuantOptimizationPolicy: turboQuantOptimizationPolicy,
             turboQuantSeed: turboQuantSeed
         )
 
@@ -842,6 +852,7 @@ public struct SpeculativeTokenIterator: TokenIteratorProtocol {
                 kvCacheStrategy: parameters.kvCacheStrategy,
                 turboQuantPreset: parameters.turboQuantPreset,
                 turboQuantBackend: parameters.turboQuantBackend,
+                turboQuantOptimizationPolicy: parameters.turboQuantOptimizationPolicy,
                 turboQuantSeed: parameters.turboQuantSeed
             )
         }
