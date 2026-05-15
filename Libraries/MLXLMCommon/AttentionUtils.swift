@@ -51,6 +51,35 @@ public func attentionWithCacheUpdate(
             mask: mask
         )
     }
+    if let turboQuantCache = cache as? TurboQuantCompressedKVCacheProtocol,
+        turboQuantCache.supportsCompressedAttention(
+            queries: queries,
+            keys: keys,
+            values: values,
+            mask: mask
+        )
+    {
+        let previousOffset = turboQuantCache.offset
+        do {
+            let (compressedKeys, compressedValues) = try turboQuantCache.updateCompressed(
+                keys: keys,
+                values: values
+            )
+            return try turboQuantMetalScaledDotProductAttention(
+                queries: queries,
+                keyCode: compressedKeys,
+                valueCode: compressedValues,
+                scale: scale,
+                mask: mask
+            )
+        } catch {
+            if let baseCache = turboQuantCache as? BaseKVCache {
+                baseCache.offset = previousOffset
+            }
+            // Fall through to the packed quantized cache path. The compressed
+            // path is opportunistic and must never make generation fail.
+        }
+    }
     if let quantizedKVCache = cache as? QuantizedKVCacheProtocol {
         let (quantizedKeys, quantizedValues) = quantizedKVCache.updateQuantized(
             keys: keys, values: values)
