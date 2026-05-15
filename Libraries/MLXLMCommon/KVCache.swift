@@ -1544,6 +1544,8 @@ private func restoreCacheFromMetaState(
             throw KVCacheError(
                 message: "Failed to parse RotatingTurboQuantKVCache maxSize from: \(metaState[1])")
         }
+        let keep = Int(metaState[0]) ?? 4
+        let step = metaState.count > 2 ? Int(metaState[2]) ?? 256 : 256
         let preset = TurboQuantPreset(rawValue: metaState[5]) ?? .turbo3_5
         let groupSize = Int(metaState[6]) ?? 64
         let backend =
@@ -1551,6 +1553,8 @@ private func restoreCacheFromMetaState(
         let seed = metaState.count > 8 ? UInt64(metaState[8]) ?? defaultTurboQuantSeed : defaultTurboQuantSeed
         let cache = RotatingTurboQuantKVCache(
             maxSize: maxSize,
+            keep: keep,
+            step: step,
             preset: preset,
             groupSize: groupSize,
             backend: backend,

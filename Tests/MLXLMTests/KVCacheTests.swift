@@ -114,32 +114,36 @@ func testCacheSerialization(creator: (() -> any KVCache)) async throws {
 }
 
 @Test func testTurboQuantCacheStrategyConvertsSimpleCache() throws {
-    var cache: [KVCache] = [KVCacheSimple()]
-    let keys = MLXArray.ones([1, 8, 16, 64], dtype: .bfloat16)
-    let values = MLXArray.ones([1, 8, 16, 64], dtype: .bfloat16)
-    _ = cache[0].update(keys: keys, values: values)
+    guard TurboQuantKernelAvailability.current.supportsMetalPolarQJLCodec else { return }
 
-    maybeQuantizeKVCache(
-        cache: &cache,
-        kvBits: nil,
-        kvGroupSize: 64,
-        quantizedKVStart: 0,
-        kvCacheStrategy: .turboQuant,
-        turboQuantPreset: .turbo3_5,
-        turboQuantBackend: .metalPolarQJL
-    )
+    try Device.withDefaultDevice(.cpu) {
+        var cache: [KVCache] = [KVCacheSimple()]
+        let keys = MLXArray.ones([1, 8, 16, 64], dtype: .bfloat16)
+        let values = MLXArray.ones([1, 8, 16, 64], dtype: .bfloat16)
+        _ = cache[0].update(keys: keys, values: values)
 
-    #expect(cache[0] is TurboQuantKVCache)
-    let turbo = try #require(cache[0] as? TurboQuantKVCache)
-    #expect(turbo.preset == .turbo3_5)
-    #expect(turbo.requestedBackend == .metalPolarQJL)
-    let expectedBackend: TurboQuantBackend =
-        TurboQuantKernelAvailability.current.supportsMetalPolarQJLAttention
-        ? .metalPolarQJL
-        : .mlxPacked
-    #expect(turbo.activeBackend == expectedBackend)
-    if expectedBackend == .mlxPacked {
-        #expect(turbo.backendFallbackReason != nil)
+        maybeQuantizeKVCache(
+            cache: &cache,
+            kvBits: nil,
+            kvGroupSize: 64,
+            quantizedKVStart: 0,
+            kvCacheStrategy: .turboQuant,
+            turboQuantPreset: .turbo3_5,
+            turboQuantBackend: .metalPolarQJL
+        )
+
+        #expect(cache[0] is TurboQuantKVCache)
+        let turbo = try #require(cache[0] as? TurboQuantKVCache)
+        #expect(turbo.preset == .turbo3_5)
+        #expect(turbo.requestedBackend == .metalPolarQJL)
+        let expectedBackend: TurboQuantBackend =
+            TurboQuantKernelAvailability.current.supportsMetalPolarQJLAttention
+            ? .metalPolarQJL
+            : .mlxPacked
+        #expect(turbo.activeBackend == expectedBackend)
+        if expectedBackend == .mlxPacked {
+            #expect(turbo.backendFallbackReason != nil)
+        }
     }
 }
 
@@ -164,7 +168,25 @@ func testCacheSerialization(creator: (() -> any KVCache)) async throws {
     #expect(cache.compressedState != nil)
     #expect(compressedKeys.layout.logicalLength == 2)
     #expect(compressedValues.layout.logicalLength == 2)
-    #expect(cache.attentionDiagnostics.activeAttentionPath == .onlineFused)
+    #expect(cache.attentionDiagnostics.activeAttentionPath == .tiledOnlineFused)
+    #expect(cache.attentionDiagnostics.rawFallbackAllocated == false)
+}
+
+@Test func testRotatingTurboQuantCompressedStateIsRawFreeWhenAvailable() throws {
+    guard TurboQuantKernelAvailability.current.supportsMetalPolarQJLAttention else { return }
+
+    let cache = RotatingTurboQuantKVCache(maxSize: 8, backend: .metalPolarQJL)
+    let keys = MLXArray.ones([1, 2, 10, 64], dtype: .float32)
+    let values = MLXArray.ones([1, 2, 10, 64], dtype: .float32)
+    _ = try cache.updateCompressed(keys: keys, values: values)
+
+    let compressed = try #require(cache.compressedState)
+    #expect(cache.state.count == 10)
+    #expect(compressed.0.layout.layoutVersion == 3)
+    #expect(compressed.0.layout.capacity == 8)
+    #expect(compressed.0.layout.logicalLength == 8)
+    #expect(compressed.0.layout.pinnedPrefixLength == 4)
+    #expect(cache.diagnostics.rawFallbackAllocated == false)
 }
 
 // MARK: - MambaCache type preservation
