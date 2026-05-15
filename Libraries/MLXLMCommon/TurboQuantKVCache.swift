@@ -843,6 +843,9 @@ public final class RotatingTurboQuantKVCache: BaseKVCache, QuantizedKVCacheProto
             guard newValue.count >= 5 else { return }
             offset = Int(newValue[3]) ?? 0
             writeIndex = Int(newValue[4]) ?? nextWriteIndex(afterOffset: offset)
+            if let rawFallbackCache {
+                rawFallbackCache.metaState = Array(newValue.prefix(5))
+            }
             if newValue.count >= 13,
                 let logicalLength = Int(newValue[10]),
                 let ringOffset = Int(newValue[11]),
