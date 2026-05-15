@@ -9,6 +9,9 @@ public typealias TurboQuantKernelAvailability = MLX.TurboQuantKernelAvailability
 public typealias TurboQuantAttentionCode = MLX.TurboQuantAttentionCode
 public typealias TurboQuantAttentionPath = MLX.TurboQuantAttentionPath
 
+let defaultTurboQuantSeed: UInt64 = 0x9E37_79B9_7F4A_7C15
+private let turboQuantValueSeedSalt: UInt64 = 0xD1B5_4A32_D192_ED03
+
 public enum KVCacheStrategy: String, Codable, Sendable, CaseIterable {
     case none
     case mlxAffine
@@ -69,15 +72,18 @@ public final class TurboQuantKVCache: QuantizedKVCache, TurboQuantCompressedKVCa
     public let requestedBackend: TurboQuantBackend
     public let activeBackend: TurboQuantBackend
     public let backendFallbackReason: String?
+    public let seed: UInt64
 
     public init(
         preset: TurboQuantPreset = .turbo3_5,
         groupSize: Int = 64,
         mode: QuantizationMode = .affine,
-        backend: TurboQuantBackend = .mlxPacked
+        backend: TurboQuantBackend = .mlxPacked,
+        seed: UInt64 = 0x9E37_79B9_7F4A_7C15
     ) {
         self.preset = preset
         self.requestedBackend = backend
+        self.seed = seed
         let availability = TurboQuantKernelAvailability.current
         self.activeBackend = availability.runtimeBackend(for: backend)
         self.backendFallbackReason = availability.fallbackReason(for: backend)
@@ -86,7 +92,11 @@ public final class TurboQuantKVCache: QuantizedKVCache, TurboQuantCompressedKVCa
 
     public override var metaState: [String] {
         get {
-            var meta = super.metaState + [preset.rawValue, requestedBackend.rawValue]
+            var meta = super.metaState + [
+                preset.rawValue,
+                requestedBackend.rawValue,
+                String(seed),
+            ]
             if let compressedKeys {
                 let layout = compressedKeys.layout
                 meta += [
@@ -103,12 +113,13 @@ public final class TurboQuantKVCache: QuantizedKVCache, TurboQuantCompressedKVCa
         }
         set {
             super.metaState = Array(newValue.prefix(4))
-            if newValue.count >= 13,
-                let capacity = Int(newValue[7]),
-                let logicalLength = Int(newValue[8]),
-                let ringOffset = Int(newValue[9]),
-                let headDimension = Int(newValue[10]),
-                let kvHeadCount = Int(newValue[11])
+            let compressedBase = UInt64(newValue.dropFirst(6).first ?? "") == nil ? 6 : 7
+            if newValue.count >= compressedBase + 7,
+                let capacity = Int(newValue[compressedBase + 1]),
+                let logicalLength = Int(newValue[compressedBase + 2]),
+                let ringOffset = Int(newValue[compressedBase + 3]),
+                let headDimension = Int(newValue[compressedBase + 4]),
+                let kvHeadCount = Int(newValue[compressedBase + 5])
             {
                 offset = logicalLength
                 if var compressedKeys {
@@ -127,7 +138,7 @@ public final class TurboQuantKVCache: QuantizedKVCache, TurboQuantCompressedKVCa
                     compressedValues.layout.kvHeadCount = kvHeadCount
                     self.compressedValues = compressedValues
                 }
-                if let path = TurboQuantAttentionPath(rawValue: newValue[12]) {
+                if let path = TurboQuantAttentionPath(rawValue: newValue[compressedBase + 6]) {
                     lastAttentionPath = path
                 }
             }
@@ -181,7 +192,7 @@ public final class TurboQuantKVCache: QuantizedKVCache, TurboQuantCompressedKVCa
                     preset: preset,
                     role: .key,
                     groupSize: groupSize,
-                    seed: 0x9E37_79B9_7F4A_7C15,
+                    seed: seed,
                     packedMagnitudes: newValue[0],
                     signs: newValue[1],
                     highPrecisionMask: newValue[2],
@@ -193,7 +204,7 @@ public final class TurboQuantKVCache: QuantizedKVCache, TurboQuantCompressedKVCa
                     preset: preset,
                     role: .value,
                     groupSize: groupSize,
-                    seed: 0x9E37_79B9_7F4A_7C15,
+                    seed: seed ^ turboQuantValueSeedSalt,
                     packedMagnitudes: newValue[5],
                     signs: newValue[6],
                     highPrecisionMask: newValue[7],
@@ -289,14 +300,16 @@ public final class TurboQuantKVCache: QuantizedKVCache, TurboQuantCompressedKVCa
             role: .key,
             groupSize: groupSize,
             mode: mode,
-            backend: activeBackend
+            backend: activeBackend,
+            seed: seed
         )
         let valueConfiguration = TurboQuantConfiguration(
             preset: preset,
             role: .value,
             groupSize: groupSize,
             mode: mode,
-            backend: activeBackend
+            backend: activeBackend,
+            seed: seed ^ turboQuantValueSeedSalt
         )
         let encodedKeys = try MLX.turboQuantMetalEncodeAttention(
             keys,
@@ -342,7 +355,8 @@ public final class TurboQuantKVCache: QuantizedKVCache, TurboQuantCompressedKVCa
             preset: preset,
             groupSize: groupSize,
             mode: mode,
-            backend: requestedBackend
+            backend: requestedBackend,
+            seed: seed
         )
         let s = self.state
         if !s.isEmpty {
@@ -362,7 +376,8 @@ public final class TurboQuantKVCache: QuantizedKVCache, TurboQuantCompressedKVCa
             layout: layout,
             preset: preset,
             role: role,
-            groupSize: groupSize
+            groupSize: groupSize,
+            seed: role == .value ? seed ^ turboQuantValueSeedSalt : seed
         )
     }
 
@@ -391,13 +406,15 @@ public final class TurboQuantKVCache: QuantizedKVCache, TurboQuantCompressedKVCa
                 layout: keyLayout,
                 preset: preset,
                 role: .key,
-                groupSize: groupSize
+                groupSize: groupSize,
+                seed: seed
             )
             compressedValues = try MLX.turboQuantEmptyAttentionCode(
                 layout: valueLayout,
                 preset: preset,
                 role: .value,
-                groupSize: groupSize
+                groupSize: groupSize,
+                seed: seed ^ turboQuantValueSeedSalt
             )
             return
         }
@@ -471,6 +488,7 @@ public final class RotatingTurboQuantKVCache: BaseKVCache, QuantizedKVCacheProto
     public let groupSize: Int
     public let bits: Int
     public let mode: QuantizationMode
+    public let seed: UInt64
 
     public override var maxSize: Int? { rawCache.maxSize }
     public override var isTrimmable: Bool { rawCache.isTrimmable }
@@ -483,11 +501,13 @@ public final class RotatingTurboQuantKVCache: BaseKVCache, QuantizedKVCacheProto
         preset: TurboQuantPreset = .turbo3_5,
         groupSize: Int = 64,
         mode: QuantizationMode = .affine,
-        backend: TurboQuantBackend = .mlxPacked
+        backend: TurboQuantBackend = .mlxPacked,
+        seed: UInt64 = 0x9E37_79B9_7F4A_7C15
     ) {
         self.rawCache = RotatingKVCache(maxSize: maxSize, keep: keep, step: step)
         self.preset = preset
         self.requestedBackend = backend
+        self.seed = seed
         let availability = TurboQuantKernelAvailability.current
         self.activeBackend = availability.runtimeBackend(for: backend)
         self.backendFallbackReason = availability.fallbackReason(for: backend)
@@ -504,9 +524,21 @@ public final class RotatingTurboQuantKVCache: BaseKVCache, QuantizedKVCacheProto
         offset = rawCache.offset
 
         let keyConfiguration = TurboQuantConfiguration(
-            preset: preset, role: .key, groupSize: groupSize, mode: mode, backend: activeBackend)
+            preset: preset,
+            role: .key,
+            groupSize: groupSize,
+            mode: mode,
+            backend: activeBackend,
+            seed: seed
+        )
         let valueConfiguration = TurboQuantConfiguration(
-            preset: preset, role: .value, groupSize: groupSize, mode: mode, backend: activeBackend)
+            preset: preset,
+            role: .value,
+            groupSize: groupSize,
+            mode: mode,
+            backend: activeBackend,
+            seed: seed ^ turboQuantValueSeedSalt
+        )
         packedKeys = turboQuantized(cachedKeys, configuration: keyConfiguration)
         packedValues = turboQuantized(cachedValues, configuration: valueConfiguration)
 
@@ -593,14 +625,16 @@ public final class RotatingTurboQuantKVCache: BaseKVCache, QuantizedKVCacheProto
             role: .key,
             groupSize: groupSize,
             mode: mode,
-            backend: activeBackend
+            backend: activeBackend,
+            seed: seed
         )
         let valueConfiguration = TurboQuantConfiguration(
             preset: preset,
             role: .value,
             groupSize: groupSize,
             mode: mode,
-            backend: activeBackend
+            backend: activeBackend,
+            seed: seed ^ turboQuantValueSeedSalt
         )
         let encodedKeys = try MLX.turboQuantMetalEncodeAttention(
             cachedKeys,
@@ -650,7 +684,14 @@ public final class RotatingTurboQuantKVCache: BaseKVCache, QuantizedKVCacheProto
     }
 
     public override var metaState: [String] {
-        get { rawCache.metaState + [preset.rawValue, String(groupSize), requestedBackend.rawValue] }
+        get {
+            rawCache.metaState + [
+                preset.rawValue,
+                String(groupSize),
+                requestedBackend.rawValue,
+                String(seed),
+            ]
+        }
         set {
             rawCache.metaState = Array(newValue.prefix(5))
             offset = rawCache.offset
@@ -694,7 +735,8 @@ public final class RotatingTurboQuantKVCache: BaseKVCache, QuantizedKVCacheProto
             preset: preset,
             groupSize: groupSize,
             mode: mode,
-            backend: requestedBackend
+            backend: requestedBackend,
+            seed: seed
         )
         let s = state
         if !s.isEmpty {
@@ -734,7 +776,8 @@ public final class RotatingTurboQuantKVCache: BaseKVCache, QuantizedKVCacheProto
             layout: layout,
             preset: preset,
             role: role,
-            groupSize: groupSize
+            groupSize: groupSize,
+            seed: role == .value ? seed ^ turboQuantValueSeedSalt : seed
         )
     }
 }
@@ -744,13 +787,15 @@ public extension KVCacheSimple {
         preset: TurboQuantPreset = .turbo3_5,
         groupSize: Int = 64,
         mode: QuantizationMode = .affine,
-        backend: TurboQuantBackend = .mlxPacked
+        backend: TurboQuantBackend = .mlxPacked,
+        seed: UInt64 = 0x9E37_79B9_7F4A_7C15
     ) -> TurboQuantKVCache {
         let cache = TurboQuantKVCache(
             preset: preset,
             groupSize: groupSize,
             mode: mode,
-            backend: backend
+            backend: backend,
+            seed: seed
         )
         cache.offset = self.offset
 
@@ -761,14 +806,16 @@ public extension KVCacheSimple {
                 role: .key,
                 groupSize: groupSize,
                 mode: mode,
-                backend: cache.activeBackend
+                backend: cache.activeBackend,
+                seed: seed
             )
             let valueConfiguration = TurboQuantConfiguration(
                 preset: preset,
                 role: .value,
                 groupSize: groupSize,
                 mode: mode,
-                backend: cache.activeBackend
+                backend: cache.activeBackend,
+                seed: seed ^ turboQuantValueSeedSalt
             )
             let keys = turboQuantized(currentState[0], configuration: keyConfiguration)
             let values = turboQuantized(currentState[1], configuration: valueConfiguration)
