@@ -21,6 +21,7 @@ public struct TurboQuantAttentionDiagnostics: Equatable, Codable, Sendable {
     public var activeAttentionPath: TurboQuantAttentionPath
     public var fallbackReason: String?
     public var lastUnsupportedShape: String?
+    public var rawFallbackAllocated: Bool
 }
 
 public struct TurboQuantKVCacheDiagnostics: Equatable, Codable, Sendable {
@@ -35,6 +36,7 @@ public struct TurboQuantKVCacheDiagnostics: Equatable, Codable, Sendable {
     public var groupSize: Int
     public var bits: Int
     public var maxSize: Int?
+    public var rawFallbackAllocated: Bool
 }
 
 public protocol TurboQuantCompressedKVCacheProtocol: KVCache {
@@ -59,12 +61,22 @@ public protocol TurboQuantCompressedKVCacheProtocol: KVCache {
     func recordCompressedAttentionFailure(_ message: String)
 }
 
+private struct RestoredAttentionLayoutMetadata {
+    var capacity: Int?
+    var logicalLength: Int
+    var ringOffset: Int
+    var pinnedPrefixLength: Int
+    var headDimension: Int?
+    var kvHeadCount: Int?
+}
+
 public final class TurboQuantKVCache: QuantizedKVCache, TurboQuantCompressedKVCacheProtocol {
     private var compressedKeys: TurboQuantAttentionCode?
     private var compressedValues: TurboQuantAttentionCode?
     private var compressedStep: Int = 256
     private var lastAttentionPath: TurboQuantAttentionPath = .mlxPackedFallback
     private var lastUnsupportedShape: String?
+    private var restoredLayoutMetadata: RestoredAttentionLayoutMetadata?
 
     public let preset: TurboQuantPreset
     public let requestedBackend: TurboQuantBackend
@@ -120,6 +132,14 @@ public final class TurboQuantKVCache: QuantizedKVCache, TurboQuantCompressedKVCa
                 let kvHeadCount = Int(newValue[compressedBase + 5])
             {
                 offset = logicalLength
+                restoredLayoutMetadata = RestoredAttentionLayoutMetadata(
+                    capacity: capacity,
+                    logicalLength: logicalLength,
+                    ringOffset: ringOffset,
+                    pinnedPrefixLength: 0,
+                    headDimension: headDimension,
+                    kvHeadCount: kvHeadCount
+                )
                 if var compressedKeys {
                     compressedKeys.layout.capacity = capacity
                     compressedKeys.layout.logicalLength = logicalLength
@@ -171,15 +191,18 @@ public final class TurboQuantKVCache: QuantizedKVCache, TurboQuantCompressedKVCa
                 return
             }
             if activeBackend == .metalPolarQJL, newValue.count == 10 {
-                let capacity = newValue[0].dim(2)
-                let headDimension = max(groupSize, (newValue[0].dim(3) * groupSize))
-                let logicalLength = offset > 0 ? min(offset, capacity) : capacity
+                let capacity = restoredLayoutMetadata?.capacity ?? newValue[0].dim(2)
+                let headDimension = restoredLayoutMetadata?.headDimension
+                    ?? max(groupSize, (newValue[0].dim(3) * groupSize))
+                let logicalLength = restoredLayoutMetadata?.logicalLength
+                    ?? (offset > 0 ? min(offset, capacity) : capacity)
                 let layout = MLX.TurboQuantAttentionLayout(
                     batchSize: newValue[0].dim(0),
-                    kvHeadCount: newValue[0].dim(1),
+                    kvHeadCount: restoredLayoutMetadata?.kvHeadCount ?? newValue[0].dim(1),
                     capacity: capacity,
                     logicalLength: logicalLength,
-                    ringOffset: 0,
+                    ringOffset: restoredLayoutMetadata?.ringOffset ?? 0,
+                    pinnedPrefixLength: restoredLayoutMetadata?.pinnedPrefixLength ?? 0,
                     headDimension: headDimension,
                     groupsPerVector: newValue[0].dim(3),
                     magnitudeWordsPerGroup: newValue[0].dim(4),
@@ -225,7 +248,8 @@ public final class TurboQuantKVCache: QuantizedKVCache, TurboQuantCompressedKVCa
             metalAttentionAvailable: TurboQuantKernelAvailability.current.supportsMetalPolarQJLAttention,
             activeAttentionPath: lastAttentionPath,
             fallbackReason: backendFallbackReason,
-            lastUnsupportedShape: lastUnsupportedShape
+            lastUnsupportedShape: lastUnsupportedShape,
+            rawFallbackAllocated: false
         )
     }
 
@@ -241,7 +265,8 @@ public final class TurboQuantKVCache: QuantizedKVCache, TurboQuantCompressedKVCa
             lastUnsupportedShape: lastUnsupportedShape,
             groupSize: groupSize,
             bits: bits,
-            maxSize: nil
+            maxSize: nil,
+            rawFallbackAllocated: false
         )
     }
 
@@ -280,7 +305,7 @@ public final class TurboQuantKVCache: QuantizedKVCache, TurboQuantCompressedKVCa
             queries: queries,
             keyCode: compressedKeys ?? placeholderCode(for: keys, role: .key),
             mask: mask
-        ) ? .onlineFused : .twoStageCompressed
+        ) ? .tiledOnlineFused : .twoStageCompressed
         lastUnsupportedShape = nil
         return true
     }
@@ -471,13 +496,18 @@ public final class RotatingTurboQuantKVCache: BaseKVCache, QuantizedKVCacheProto
     TurboQuantCompressedKVCacheProtocol,
     CustomDebugStringConvertible
 {
-    private var rawCache: RotatingKVCache
+    private var rawFallbackCache: RotatingKVCache?
     private var packedKeys: TurboQuantPackedTensor?
     private var packedValues: TurboQuantPackedTensor?
     private var compressedKeys: TurboQuantAttentionCode?
     private var compressedValues: TurboQuantAttentionCode?
     private var lastAttentionPath: TurboQuantAttentionPath = .mlxPackedFallback
     private var lastUnsupportedShape: String?
+    private var restoredLayoutMetadata: RestoredAttentionLayoutMetadata?
+    private let keep: Int
+    private let step: Int
+    private let maxCacheSize: Int
+    private var writeIndex: Int
 
     public let preset: TurboQuantPreset
     public let requestedBackend: TurboQuantBackend
@@ -488,9 +518,8 @@ public final class RotatingTurboQuantKVCache: BaseKVCache, QuantizedKVCacheProto
     public let mode: QuantizationMode
     public let seed: UInt64
 
-    public override var maxSize: Int? { rawCache.maxSize }
-    public override var isTrimmable: Bool { rawCache.isTrimmable }
-    public var ropeOffset: RoPEOffset { rawCache.ropeOffset }
+    public override var maxSize: Int? { maxCacheSize }
+    public override var isTrimmable: Bool { offset < maxCacheSize }
 
     public init(
         maxSize: Int,
@@ -502,7 +531,10 @@ public final class RotatingTurboQuantKVCache: BaseKVCache, QuantizedKVCacheProto
         backend: TurboQuantBackend = .mlxPacked,
         seed: UInt64 = 0x9E37_79B9_7F4A_7C15
     ) {
-        self.rawCache = RotatingKVCache(maxSize: maxSize, keep: keep, step: step)
+        self.keep = max(0, min(keep, maxSize))
+        self.step = step
+        self.maxCacheSize = maxSize
+        self.writeIndex = self.keep
         self.preset = preset
         self.requestedBackend = backend
         self.seed = seed
@@ -513,13 +545,18 @@ public final class RotatingTurboQuantKVCache: BaseKVCache, QuantizedKVCacheProto
         self.bits = preset.effectiveBits
         self.mode = mode
         super.init()
+        if self.activeBackend != .metalPolarQJL {
+            self.rawFallbackCache = RotatingKVCache(maxSize: maxSize, keep: self.keep, step: step)
+        }
     }
 
     public func updateQuantized(keys: MLXArray, values: MLXArray) -> (
         (MLXArray, MLXArray, MLXArray?), (MLXArray, MLXArray, MLXArray?)
     ) {
+        let rawCache = materializedRawFallbackCache()
         let (cachedKeys, cachedValues) = rawCache.update(keys: keys, values: values)
         offset = rawCache.offset
+        writeIndex = currentWriteIndexFromRawMeta(rawCache.metaState)
 
         let keyConfiguration = TurboQuantConfiguration(
             preset: preset,
@@ -566,7 +603,8 @@ public final class RotatingTurboQuantKVCache: BaseKVCache, QuantizedKVCacheProto
             metalAttentionAvailable: TurboQuantKernelAvailability.current.supportsMetalPolarQJLAttention,
             activeAttentionPath: lastAttentionPath,
             fallbackReason: backendFallbackReason,
-            lastUnsupportedShape: lastUnsupportedShape
+            lastUnsupportedShape: lastUnsupportedShape,
+            rawFallbackAllocated: rawFallbackCache != nil
         )
     }
 
@@ -606,7 +644,7 @@ public final class RotatingTurboQuantKVCache: BaseKVCache, QuantizedKVCacheProto
             queries: queries,
             keyCode: keyCode,
             mask: mask
-        ) ? .onlineFused : .twoStageCompressed
+        ) ? .tiledOnlineFused : .twoStageCompressed
         lastUnsupportedShape = nil
         return true
     }
@@ -615,9 +653,6 @@ public final class RotatingTurboQuantKVCache: BaseKVCache, QuantizedKVCacheProto
         TurboQuantAttentionCode,
         TurboQuantAttentionCode
     ) {
-        let (cachedKeys, cachedValues) = rawCache.update(keys: keys, values: values)
-        offset = rawCache.offset
-
         let keyConfiguration = TurboQuantConfiguration(
             preset: preset,
             role: .key,
@@ -635,69 +670,225 @@ public final class RotatingTurboQuantKVCache: BaseKVCache, QuantizedKVCacheProto
             seed: seed ^ turboQuantValueSeedSalt
         )
         let encodedKeys = try MLX.turboQuantMetalEncodeAttention(
-            cachedKeys,
+            keys,
             configuration: keyConfiguration
         )
         let encodedValues = try MLX.turboQuantMetalEncodeAttention(
-            cachedValues,
+            values,
             configuration: valueConfiguration
         )
-        compressedKeys = encodedKeys
-        compressedValues = encodedValues
+        try ensureCompressedStorage(keys: keys, values: values)
+
+        var currentKeys = compressedKeys!
+        var currentValues = compressedValues!
+        for token in 0 ..< keys.dim(2) {
+            let physical = physicalSlot(forAbsoluteToken: offset + token)
+            let source = token ..< (token + 1)
+            let target = physical ..< (physical + 1)
+            currentKeys.packedMagnitudes[.ellipsis, target, 0..., 0...] =
+                encodedKeys.packedMagnitudes[.ellipsis, source, 0..., 0...]
+            currentKeys.signs[.ellipsis, target, 0..., 0...] =
+                encodedKeys.signs[.ellipsis, source, 0..., 0...]
+            currentKeys.highPrecisionMask[.ellipsis, target, 0..., 0...] =
+                encodedKeys.highPrecisionMask[.ellipsis, source, 0..., 0...]
+            currentKeys.residualSigns[.ellipsis, target, 0..., 0...] =
+                encodedKeys.residualSigns[.ellipsis, source, 0..., 0...]
+            currentKeys.scales[.ellipsis, target, 0..., 0...] =
+                encodedKeys.scales[.ellipsis, source, 0..., 0...]
+
+            currentValues.packedMagnitudes[.ellipsis, target, 0..., 0...] =
+                encodedValues.packedMagnitudes[.ellipsis, source, 0..., 0...]
+            currentValues.signs[.ellipsis, target, 0..., 0...] =
+                encodedValues.signs[.ellipsis, source, 0..., 0...]
+            currentValues.highPrecisionMask[.ellipsis, target, 0..., 0...] =
+                encodedValues.highPrecisionMask[.ellipsis, source, 0..., 0...]
+            currentValues.residualSigns[.ellipsis, target, 0..., 0...] =
+                encodedValues.residualSigns[.ellipsis, source, 0..., 0...]
+            currentValues.scales[.ellipsis, target, 0..., 0...] =
+                encodedValues.scales[.ellipsis, source, 0..., 0...]
+        }
+
+        offset += keys.dim(2)
+        writeIndex = nextWriteIndex(afterOffset: offset)
+        updateCompressedLayouts(keys: &currentKeys, values: &currentValues)
+        compressedKeys = currentKeys
+        compressedValues = currentValues
         packedKeys = nil
         packedValues = nil
-        return (encodedKeys, encodedValues)
+        return (currentKeys, currentValues)
     }
 
     public override func update(keys: MLXArray, values: MLXArray) -> (MLXArray, MLXArray) {
+        let rawCache = materializedRawFallbackCache()
         let result = rawCache.update(keys: keys, values: values)
         offset = rawCache.offset
+        writeIndex = currentWriteIndexFromRawMeta(rawCache.metaState)
         return result
     }
 
     public override var state: [MLXArray] {
-        get { rawCache.state }
+        get {
+            if activeBackend == .metalPolarQJL,
+                let compressedKeys,
+                let compressedValues
+            {
+                return [
+                    compressedKeys.packedMagnitudes,
+                    compressedKeys.signs,
+                    compressedKeys.highPrecisionMask,
+                    compressedKeys.residualSigns,
+                    compressedKeys.scales,
+                    compressedValues.packedMagnitudes,
+                    compressedValues.signs,
+                    compressedValues.highPrecisionMask,
+                    compressedValues.residualSigns,
+                    compressedValues.scales,
+                ]
+            }
+            return rawFallbackCache?.state ?? []
+        }
         set {
             if newValue.isEmpty {
-                let meta = rawCache.metaState
-                let keep = Int(meta[0]) ?? 4
-                let maxSize = Int(meta[1]) ?? self.maxSize ?? 0
-                let step = Int(meta[2]) ?? 256
-                rawCache = RotatingKVCache(maxSize: maxSize, keep: keep, step: step)
-                rawCache.metaState = meta
-                offset = rawCache.offset
                 packedKeys = nil
                 packedValues = nil
                 compressedKeys = nil
                 compressedValues = nil
+                rawFallbackCache = nil
                 return
             }
-            rawCache.state = newValue
-            offset = rawCache.offset
+            if activeBackend == .metalPolarQJL, newValue.count == 10 {
+                let capacity = restoredLayoutMetadata?.capacity ?? newValue[0].dim(2)
+                let headDimension = restoredLayoutMetadata?.headDimension
+                    ?? max(groupSize, (newValue[0].dim(3) * groupSize))
+                let logicalLength = restoredLayoutMetadata?.logicalLength ?? min(offset, capacity)
+                let layout = MLX.TurboQuantAttentionLayout(
+                    batchSize: newValue[0].dim(0),
+                    kvHeadCount: restoredLayoutMetadata?.kvHeadCount ?? newValue[0].dim(1),
+                    capacity: capacity,
+                    logicalLength: logicalLength,
+                    ringOffset: restoredLayoutMetadata?.ringOffset ?? ringOffset(forOffset: offset),
+                    pinnedPrefixLength: restoredLayoutMetadata?.pinnedPrefixLength ?? min(keep, capacity),
+                    headDimension: headDimension,
+                    groupsPerVector: newValue[0].dim(3),
+                    magnitudeWordsPerGroup: newValue[0].dim(4),
+                    bitsetWordsPerGroup: newValue[1].dim(4)
+                )
+                compressedKeys = TurboQuantAttentionCode(
+                    layout: layout,
+                    preset: preset,
+                    role: .key,
+                    groupSize: groupSize,
+                    seed: seed,
+                    packedMagnitudes: newValue[0],
+                    signs: newValue[1],
+                    highPrecisionMask: newValue[2],
+                    residualSigns: newValue[3],
+                    scales: newValue[4]
+                )
+                compressedValues = TurboQuantAttentionCode(
+                    layout: layout,
+                    preset: preset,
+                    role: .value,
+                    groupSize: groupSize,
+                    seed: seed ^ turboQuantValueSeedSalt,
+                    packedMagnitudes: newValue[5],
+                    signs: newValue[6],
+                    highPrecisionMask: newValue[7],
+                    residualSigns: newValue[8],
+                    scales: newValue[9]
+                )
+            } else {
+                let rawCache = materializedRawFallbackCache()
+                rawCache.state = newValue
+                offset = rawCache.offset
+                writeIndex = currentWriteIndexFromRawMeta(rawCache.metaState)
+                compressedKeys = nil
+                compressedValues = nil
+            }
             packedKeys = nil
             packedValues = nil
-            compressedKeys = nil
-            compressedValues = nil
         }
     }
 
     public override var metaState: [String] {
         get {
-            rawCache.metaState + [
+            var meta = [
+                String(keep),
+                String(maxCacheSize),
+                String(step),
+                String(offset),
+                String(writeIndex),
                 preset.rawValue,
                 String(groupSize),
                 requestedBackend.rawValue,
                 String(seed),
             ]
+            if let compressedKeys {
+                let layout = compressedKeys.layout
+                meta += [
+                    "turboq-rot-v\(layout.layoutVersion)",
+                    String(layout.logicalLength),
+                    String(layout.ringOffset),
+                    String(layout.pinnedPrefixLength),
+                    String(layout.headDimension),
+                    lastAttentionPath.rawValue,
+                    rawFallbackCache == nil ? "raw-free" : "raw-fallback",
+                ]
+            }
+            return meta
         }
         set {
-            rawCache.metaState = Array(newValue.prefix(5))
-            offset = rawCache.offset
+            guard newValue.count >= 5 else { return }
+            offset = Int(newValue[3]) ?? 0
+            writeIndex = Int(newValue[4]) ?? nextWriteIndex(afterOffset: offset)
+            if newValue.count >= 13,
+                let logicalLength = Int(newValue[10]),
+                let ringOffset = Int(newValue[11]),
+                let pinnedPrefixLength = Int(newValue[12])
+            {
+                var headDimension: Int?
+                var pathIndex = 13
+                if newValue.count > 14, let parsedHeadDimension = Int(newValue[13]) {
+                    headDimension = parsedHeadDimension
+                    pathIndex = 14
+                }
+                restoredLayoutMetadata = RestoredAttentionLayoutMetadata(
+                    capacity: maxCacheSize,
+                    logicalLength: logicalLength,
+                    ringOffset: ringOffset,
+                    pinnedPrefixLength: pinnedPrefixLength,
+                    headDimension: headDimension,
+                    kvHeadCount: nil
+                )
+                if var compressedKeys {
+                    compressedKeys.layout.logicalLength = logicalLength
+                    compressedKeys.layout.ringOffset = ringOffset
+                    compressedKeys.layout.pinnedPrefixLength = pinnedPrefixLength
+                    if let headDimension {
+                        compressedKeys.layout.headDimension = headDimension
+                    }
+                    self.compressedKeys = compressedKeys
+                }
+                if var compressedValues {
+                    compressedValues.layout.logicalLength = logicalLength
+                    compressedValues.layout.ringOffset = ringOffset
+                    compressedValues.layout.pinnedPrefixLength = pinnedPrefixLength
+                    if let headDimension {
+                        compressedValues.layout.headDimension = headDimension
+                    }
+                    self.compressedValues = compressedValues
+                }
+                if pathIndex < newValue.count,
+                    let path = TurboQuantAttentionPath(rawValue: newValue[pathIndex])
+                {
+                    lastAttentionPath = path
+                }
+            }
         }
     }
 
     public override func innerState() -> [MLXArray] {
-        rawCache.innerState()
+        state
     }
 
     public override func makeMask(
@@ -705,17 +896,40 @@ public final class RotatingTurboQuantKVCache: BaseKVCache, QuantizedKVCacheProto
         windowSize: Int?,
         returnArray: Bool
     ) -> MLXFast.ScaledDotProductAttentionMaskMode {
-        rawCache.makeMask(n: n, windowSize: windowSize, returnArray: returnArray)
+        if activeBackend != .metalPolarQJL, let rawFallbackCache {
+            return rawFallbackCache.makeMask(n: n, windowSize: windowSize, returnArray: returnArray)
+        }
+        if n > 1 {
+            let actualWindowSize = windowSize ?? maxCacheSize
+            let cappedOffset = min(maxCacheSize - 1, offset)
+            if cappedOffset + n > actualWindowSize || returnArray {
+                return .array(createCausalMask(n: n, offset: cappedOffset, windowSize: actualWindowSize))
+            }
+            return .causal
+        }
+        guard let windowSize else { return .none }
+        if offset >= windowSize, maxCacheSize > windowSize {
+            let maskSize = offset < maxCacheSize ? offset + 1 : maxCacheSize
+            return .array(MLXArray(0 ..< Int32(maskSize)) .>= Int32(maskSize - windowSize))
+        }
+        return .none
     }
 
     @discardableResult
     public override func trim(_ n: Int) -> Int {
-        let trimmed = rawCache.trim(n)
-        offset = rawCache.offset
+        let trimmed = min(offset, n)
+        offset -= trimmed
+        writeIndex = nextWriteIndex(afterOffset: offset)
+        if let rawFallbackCache {
+            _ = rawFallbackCache.trim(n)
+        }
+        if var compressedKeys, var compressedValues {
+            updateCompressedLayouts(keys: &compressedKeys, values: &compressedValues)
+            self.compressedKeys = compressedKeys
+            self.compressedValues = compressedValues
+        }
         packedKeys = nil
         packedValues = nil
-        compressedKeys = nil
-        compressedValues = nil
         return trimmed
     }
 
@@ -730,6 +944,8 @@ public final class RotatingTurboQuantKVCache: BaseKVCache, QuantizedKVCacheProto
         }
         let new = RotatingTurboQuantKVCache(
             maxSize: maxSize,
+            keep: keep,
+            step: step,
             preset: preset,
             groupSize: groupSize,
             mode: mode,
@@ -756,19 +972,24 @@ public final class RotatingTurboQuantKVCache: BaseKVCache, QuantizedKVCacheProto
             lastUnsupportedShape: lastUnsupportedShape,
             groupSize: groupSize,
             bits: bits,
-            maxSize: maxSize
+            maxSize: maxSize,
+            rawFallbackAllocated: rawFallbackCache != nil
         )
     }
 
     public var debugDescription: String {
-        "\(String(describing: Self.self)) offset: \(offset), maxSize: \(maxSize?.description ?? "-"), preset: \(preset.rawValue), backend: \(activeBackend.rawValue)"
+        "\(String(describing: Self.self)) offset: \(offset), maxSize: \(maxSize?.description ?? "-"), preset: \(preset.rawValue), backend: \(activeBackend.rawValue), rawFallback: \(rawFallbackCache != nil)"
     }
 
     private func placeholderCode(for array: MLXArray, role: TurboQuantTensorRole) -> TurboQuantAttentionCode {
         let layout = try! MLX.turboQuantAttentionLayout(
             for: array,
             preset: preset,
-            groupSize: groupSize
+            groupSize: groupSize,
+            capacity: maxCacheSize,
+            logicalLength: min(offset + array.dim(2), maxCacheSize),
+            ringOffset: ringOffset(forOffset: offset + array.dim(2)),
+            pinnedPrefixLength: min(keep, maxCacheSize)
         )
         return try! MLX.turboQuantEmptyAttentionCode(
             layout: layout,
@@ -777,6 +998,116 @@ public final class RotatingTurboQuantKVCache: BaseKVCache, QuantizedKVCacheProto
             groupSize: groupSize,
             seed: role == .value ? seed ^ turboQuantValueSeedSalt : seed
         )
+    }
+
+    private func ensureCompressedStorage(keys: MLXArray, values: MLXArray) throws {
+        if compressedKeys != nil, compressedValues != nil { return }
+        let logicalLength = min(offset, maxCacheSize)
+        let keyLayout = try MLX.turboQuantAttentionLayout(
+            for: keys,
+            preset: preset,
+            groupSize: groupSize,
+            capacity: maxCacheSize,
+            logicalLength: logicalLength,
+            ringOffset: ringOffset(forOffset: offset),
+            pinnedPrefixLength: min(keep, maxCacheSize)
+        )
+        let valueLayout = try MLX.turboQuantAttentionLayout(
+            for: values,
+            preset: preset,
+            groupSize: groupSize,
+            capacity: maxCacheSize,
+            logicalLength: logicalLength,
+            ringOffset: ringOffset(forOffset: offset),
+            pinnedPrefixLength: min(keep, maxCacheSize)
+        )
+        compressedKeys = try MLX.turboQuantEmptyAttentionCode(
+            layout: keyLayout,
+            preset: preset,
+            role: .key,
+            groupSize: groupSize,
+            seed: seed
+        )
+        compressedValues = try MLX.turboQuantEmptyAttentionCode(
+            layout: valueLayout,
+            preset: preset,
+            role: .value,
+            groupSize: groupSize,
+            seed: seed ^ turboQuantValueSeedSalt
+        )
+    }
+
+    private func updateCompressedLayouts(
+        keys: inout TurboQuantAttentionCode,
+        values: inout TurboQuantAttentionCode
+    ) {
+        let logicalLength = min(offset, maxCacheSize)
+        let ringOffset = ringOffset(forOffset: offset)
+        keys.layout.logicalLength = logicalLength
+        keys.layout.ringOffset = ringOffset
+        keys.layout.pinnedPrefixLength = min(keep, maxCacheSize)
+        values.layout.logicalLength = logicalLength
+        values.layout.ringOffset = ringOffset
+        values.layout.pinnedPrefixLength = min(keep, maxCacheSize)
+    }
+
+    private func physicalSlot(forAbsoluteToken absolute: Int) -> Int {
+        if absolute < keep { return absolute }
+        let ringCapacity = max(1, maxCacheSize - keep)
+        return keep + ((absolute - keep) % ringCapacity)
+    }
+
+    private func ringOffset(forOffset offset: Int) -> Int {
+        let pinned = min(keep, maxCacheSize)
+        let ringCapacity = maxCacheSize - pinned
+        guard ringCapacity > 0, offset > pinned else { return 0 }
+        let activeRing = min(offset - pinned, ringCapacity)
+        return (offset - pinned - activeRing) % ringCapacity
+    }
+
+    private func nextWriteIndex(afterOffset offset: Int) -> Int {
+        if offset < keep { return offset }
+        let ringCapacity = max(1, maxCacheSize - keep)
+        return keep + ((offset - keep) % ringCapacity)
+    }
+
+    private func rawFallbackWriteIndex(forOffset offset: Int) -> Int {
+        if offset <= maxCacheSize { return min(offset, maxCacheSize) }
+        return nextWriteIndex(afterOffset: offset)
+    }
+
+    private func materializedRawFallbackCache() -> RotatingKVCache {
+        if let rawFallbackCache { return rawFallbackCache }
+        let rawCache = RotatingKVCache(maxSize: maxCacheSize, keep: keep, step: step)
+        if let compressedKeys, let compressedValues {
+            do {
+                let decodedKeys = try MLX.turboQuantMetalDecodeAttention(
+                    compressedKeys,
+                    outputDType: .float32
+                )
+                let decodedValues = try MLX.turboQuantMetalDecodeAttention(
+                    compressedValues,
+                    outputDType: .float32
+                )
+                rawCache.state = [decodedKeys, decodedValues]
+            } catch {
+                lastUnsupportedShape = "failed to materialize raw fallback: \(error)"
+            }
+        }
+        rawCache.metaState = [
+            String(keep),
+            String(maxCacheSize),
+            String(step),
+            String(offset),
+            String(rawFallbackWriteIndex(forOffset: offset)),
+        ]
+        rawFallbackCache = rawCache
+        return rawCache
+    }
+
+    private func currentWriteIndexFromRawMeta(_ meta: [String]) -> Int {
+        guard meta.count >= 5 else { return nextWriteIndex(afterOffset: offset) }
+        return Int(meta[4]) ?? nextWriteIndex(afterOffset: offset)
     }
 }
 
