@@ -72,7 +72,9 @@ public func attentionWithCacheUpdate(
                 keyCode: compressedKeys,
                 valueCode: compressedValues,
                 scale: scale,
-                mask: mask
+                mask: mask,
+                preferOnlineFused: turboQuantCache.prefersOnlineFusedAttention,
+                kernelProfile: turboQuantCache.attentionDiagnostics.selectedKernelProfile
             )
         } catch {
             turboQuantCache.metaState = previousMetaState

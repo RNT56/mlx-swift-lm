@@ -8,6 +8,10 @@ public typealias TurboQuantBackend = MLX.TurboQuantBackend
 public typealias TurboQuantKernelAvailability = MLX.TurboQuantKernelAvailability
 public typealias TurboQuantAttentionCode = MLX.TurboQuantAttentionCode
 public typealias TurboQuantAttentionPath = MLX.TurboQuantAttentionPath
+public typealias TurboQuantKernelProfile = MLX.TurboQuantKernelProfile
+public typealias TurboQuantDeviceCapabilities = MLX.TurboQuantDeviceCapabilities
+public typealias TurboQuantRuntimeProbeResult = MLX.TurboQuantRuntimeProbeResult
+public typealias TurboQuantRuntimeSelfTestStatus = MLX.TurboQuantRuntimeSelfTestStatus
 
 let defaultTurboQuantSeed: UInt64 = 0x9E37_79B9_7F4A_7C15
 private let turboQuantValueSeedSalt: UInt64 = 0xD1B5_4A32_D192_ED03
@@ -18,9 +22,20 @@ public enum KVCacheStrategy: String, Codable, Sendable, CaseIterable {
     case turboQuant
 }
 
+public enum TurboQuantOptimizationPolicy: String, Codable, Sendable, CaseIterable {
+    case auto
+    case conservative
+    case preferMemory
+    case preferThroughput
+}
+
 public struct TurboQuantAttentionDiagnostics: Equatable, Codable, Sendable {
     public var metalAttentionAvailable: Bool
     public var activeAttentionPath: TurboQuantAttentionPath
+    public var selectedKernelProfile: TurboQuantKernelProfile
+    public var selfTestStatus: TurboQuantRuntimeSelfTestStatus
+    public var selfTestFailureReason: String?
+    public var optimizationPolicy: TurboQuantOptimizationPolicy
     public var fallbackReason: String?
     public var lastUnsupportedShape: String?
     public var rawFallbackAllocated: Bool
@@ -34,6 +49,10 @@ public struct TurboQuantKVCacheDiagnostics: Equatable, Codable, Sendable {
     public var metalCodecAvailable: Bool
     public var metalAttentionAvailable: Bool
     public var activeAttentionPath: TurboQuantAttentionPath
+    public var selectedKernelProfile: TurboQuantKernelProfile
+    public var selfTestStatus: TurboQuantRuntimeSelfTestStatus
+    public var selfTestFailureReason: String?
+    public var optimizationPolicy: TurboQuantOptimizationPolicy
     public var lastUnsupportedShape: String?
     public var groupSize: Int
     public var bits: Int
@@ -45,6 +64,7 @@ public protocol TurboQuantCompressedKVCacheProtocol: KVCache {
     var preset: TurboQuantPreset { get }
     var requestedBackend: TurboQuantBackend { get }
     var activeBackend: TurboQuantBackend { get }
+    var optimizationPolicy: TurboQuantOptimizationPolicy { get }
     var attentionDiagnostics: TurboQuantAttentionDiagnostics { get }
     var compressedState: (TurboQuantAttentionCode, TurboQuantAttentionCode)? { get }
 
@@ -61,6 +81,12 @@ public protocol TurboQuantCompressedKVCacheProtocol: KVCache {
     )
 
     func recordCompressedAttentionFailure(_ message: String)
+}
+
+public extension TurboQuantCompressedKVCacheProtocol {
+    var prefersOnlineFusedAttention: Bool {
+        optimizationPolicy != .conservative
+    }
 }
 
 private struct RestoredAttentionLayoutMetadata {
@@ -84,6 +110,7 @@ public final class TurboQuantKVCache: QuantizedKVCache, TurboQuantCompressedKVCa
     public let requestedBackend: TurboQuantBackend
     public let activeBackend: TurboQuantBackend
     public let backendFallbackReason: String?
+    public let optimizationPolicy: TurboQuantOptimizationPolicy
     public let seed: UInt64
 
     public init(
@@ -91,10 +118,12 @@ public final class TurboQuantKVCache: QuantizedKVCache, TurboQuantCompressedKVCa
         groupSize: Int = 64,
         mode: QuantizationMode = .affine,
         backend: TurboQuantBackend = .mlxPacked,
+        optimizationPolicy: TurboQuantOptimizationPolicy = .auto,
         seed: UInt64 = 0x9E37_79B9_7F4A_7C15
     ) {
         self.preset = preset
         self.requestedBackend = backend
+        self.optimizationPolicy = optimizationPolicy
         self.seed = seed
         let availability = TurboQuantKernelAvailability.current
         self.activeBackend = availability.runtimeBackend(for: backend)
@@ -246,9 +275,14 @@ public final class TurboQuantKVCache: QuantizedKVCache, TurboQuantCompressedKVCa
     }
 
     public var attentionDiagnostics: TurboQuantAttentionDiagnostics {
-        TurboQuantAttentionDiagnostics(
-            metalAttentionAvailable: TurboQuantKernelAvailability.current.supportsMetalPolarQJLAttention,
+        let availability = TurboQuantKernelAvailability.current
+        return TurboQuantAttentionDiagnostics(
+            metalAttentionAvailable: availability.supportsMetalPolarQJLAttention,
             activeAttentionPath: lastAttentionPath,
+            selectedKernelProfile: availability.selectedKernelProfile,
+            selfTestStatus: availability.selfTestStatus,
+            selfTestFailureReason: availability.selfTestFailureReason,
+            optimizationPolicy: optimizationPolicy,
             fallbackReason: backendFallbackReason,
             lastUnsupportedShape: lastUnsupportedShape,
             rawFallbackAllocated: false
@@ -256,14 +290,19 @@ public final class TurboQuantKVCache: QuantizedKVCache, TurboQuantCompressedKVCa
     }
 
     public var diagnostics: TurboQuantKVCacheDiagnostics {
-        TurboQuantKVCacheDiagnostics(
+        let availability = TurboQuantKernelAvailability.current
+        return TurboQuantKVCacheDiagnostics(
             preset: preset,
             requestedBackend: requestedBackend,
             activeBackend: activeBackend,
             fallbackReason: backendFallbackReason,
-            metalCodecAvailable: TurboQuantKernelAvailability.current.supportsMetalPolarQJLCodec,
-            metalAttentionAvailable: TurboQuantKernelAvailability.current.supportsMetalPolarQJLAttention,
+            metalCodecAvailable: availability.supportsMetalPolarQJLCodec,
+            metalAttentionAvailable: availability.supportsMetalPolarQJLAttention,
             activeAttentionPath: lastAttentionPath,
+            selectedKernelProfile: availability.selectedKernelProfile,
+            selfTestStatus: availability.selfTestStatus,
+            selfTestFailureReason: availability.selfTestFailureReason,
+            optimizationPolicy: optimizationPolicy,
             lastUnsupportedShape: lastUnsupportedShape,
             groupSize: groupSize,
             bits: bits,
@@ -303,11 +342,12 @@ public final class TurboQuantKVCache: QuantizedKVCache, TurboQuantCompressedKVCa
             lastUnsupportedShape = "query heads must be a multiple of KV heads"
             return false
         }
-        lastAttentionPath = MLX.turboQuantMetalSupportsOnlineFusedAttention(
+        let supportsTiled = prefersOnlineFusedAttention && MLX.turboQuantMetalSupportsOnlineFusedAttention(
             queries: queries,
             keyCode: compressedKeys ?? placeholderCode(for: keys, role: .key),
             mask: mask
-        ) ? .tiledOnlineFused : .twoStageCompressed
+        )
+        lastAttentionPath = supportsTiled ? .tiledOnlineFused : .twoStageCompressed
         lastUnsupportedShape = nil
         return true
     }
@@ -381,6 +421,7 @@ public final class TurboQuantKVCache: QuantizedKVCache, TurboQuantCompressedKVCa
             groupSize: groupSize,
             mode: mode,
             backend: requestedBackend,
+            optimizationPolicy: optimizationPolicy,
             seed: seed
         )
         let s = self.state
@@ -515,6 +556,7 @@ public final class RotatingTurboQuantKVCache: BaseKVCache, QuantizedKVCacheProto
     public let requestedBackend: TurboQuantBackend
     public let activeBackend: TurboQuantBackend
     public let backendFallbackReason: String?
+    public let optimizationPolicy: TurboQuantOptimizationPolicy
     public let groupSize: Int
     public let bits: Int
     public let mode: QuantizationMode
@@ -531,6 +573,7 @@ public final class RotatingTurboQuantKVCache: BaseKVCache, QuantizedKVCacheProto
         groupSize: Int = 64,
         mode: QuantizationMode = .affine,
         backend: TurboQuantBackend = .mlxPacked,
+        optimizationPolicy: TurboQuantOptimizationPolicy = .auto,
         seed: UInt64 = 0x9E37_79B9_7F4A_7C15
     ) {
         self.keep = max(0, min(keep, maxSize))
@@ -539,6 +582,7 @@ public final class RotatingTurboQuantKVCache: BaseKVCache, QuantizedKVCacheProto
         self.writeIndex = self.keep
         self.preset = preset
         self.requestedBackend = backend
+        self.optimizationPolicy = optimizationPolicy
         self.seed = seed
         let availability = TurboQuantKernelAvailability.current
         self.activeBackend = availability.runtimeBackend(for: backend)
@@ -601,9 +645,14 @@ public final class RotatingTurboQuantKVCache: BaseKVCache, QuantizedKVCacheProto
     }
 
     public var attentionDiagnostics: TurboQuantAttentionDiagnostics {
-        TurboQuantAttentionDiagnostics(
-            metalAttentionAvailable: TurboQuantKernelAvailability.current.supportsMetalPolarQJLAttention,
+        let availability = TurboQuantKernelAvailability.current
+        return TurboQuantAttentionDiagnostics(
+            metalAttentionAvailable: availability.supportsMetalPolarQJLAttention,
             activeAttentionPath: lastAttentionPath,
+            selectedKernelProfile: availability.selectedKernelProfile,
+            selfTestStatus: availability.selfTestStatus,
+            selfTestFailureReason: availability.selfTestFailureReason,
+            optimizationPolicy: optimizationPolicy,
             fallbackReason: backendFallbackReason,
             lastUnsupportedShape: lastUnsupportedShape,
             rawFallbackAllocated: rawFallbackCache != nil
@@ -642,11 +691,12 @@ public final class RotatingTurboQuantKVCache: BaseKVCache, QuantizedKVCacheProto
             return false
         }
         let keyCode = compressedKeys ?? placeholderCode(for: keys, role: .key)
-        lastAttentionPath = MLX.turboQuantMetalSupportsOnlineFusedAttention(
+        let supportsTiled = prefersOnlineFusedAttention && MLX.turboQuantMetalSupportsOnlineFusedAttention(
             queries: queries,
             keyCode: keyCode,
             mask: mask
-        ) ? .tiledOnlineFused : .twoStageCompressed
+        )
+        lastAttentionPath = supportsTiled ? .tiledOnlineFused : .twoStageCompressed
         lastUnsupportedShape = nil
         return true
     }
@@ -955,6 +1005,7 @@ public final class RotatingTurboQuantKVCache: BaseKVCache, QuantizedKVCacheProto
             groupSize: groupSize,
             mode: mode,
             backend: requestedBackend,
+            optimizationPolicy: optimizationPolicy,
             seed: seed
         )
         let s = state
@@ -966,14 +1017,19 @@ public final class RotatingTurboQuantKVCache: BaseKVCache, QuantizedKVCacheProto
     }
 
     public var diagnostics: TurboQuantKVCacheDiagnostics {
-        TurboQuantKVCacheDiagnostics(
+        let availability = TurboQuantKernelAvailability.current
+        return TurboQuantKVCacheDiagnostics(
             preset: preset,
             requestedBackend: requestedBackend,
             activeBackend: activeBackend,
             fallbackReason: backendFallbackReason,
-            metalCodecAvailable: TurboQuantKernelAvailability.current.supportsMetalPolarQJLCodec,
-            metalAttentionAvailable: TurboQuantKernelAvailability.current.supportsMetalPolarQJLAttention,
+            metalCodecAvailable: availability.supportsMetalPolarQJLCodec,
+            metalAttentionAvailable: availability.supportsMetalPolarQJLAttention,
             activeAttentionPath: lastAttentionPath,
+            selectedKernelProfile: availability.selectedKernelProfile,
+            selfTestStatus: availability.selfTestStatus,
+            selfTestFailureReason: availability.selfTestFailureReason,
+            optimizationPolicy: optimizationPolicy,
             lastUnsupportedShape: lastUnsupportedShape,
             groupSize: groupSize,
             bits: bits,
@@ -1122,6 +1178,7 @@ public extension KVCacheSimple {
         groupSize: Int = 64,
         mode: QuantizationMode = .affine,
         backend: TurboQuantBackend = .mlxPacked,
+        optimizationPolicy: TurboQuantOptimizationPolicy = .auto,
         seed: UInt64 = 0x9E37_79B9_7F4A_7C15
     ) -> TurboQuantKVCache {
         let cache = TurboQuantKVCache(
@@ -1129,6 +1186,7 @@ public extension KVCacheSimple {
             groupSize: groupSize,
             mode: mode,
             backend: backend,
+            optimizationPolicy: optimizationPolicy,
             seed: seed
         )
         cache.offset = self.offset

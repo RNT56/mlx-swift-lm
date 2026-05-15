@@ -1530,7 +1530,12 @@ private func restoreCacheFromMetaState(
         let backend =
             metaState.count > 5 ? TurboQuantBackend(rawValue: metaState[5]) ?? .mlxPacked : .mlxPacked
         let seed = metaState.count > 6 ? UInt64(metaState[6]) ?? defaultTurboQuantSeed : defaultTurboQuantSeed
-        let cache = TurboQuantKVCache(preset: preset, backend: backend, seed: seed)
+        let cache = TurboQuantKVCache(
+            preset: preset,
+            backend: backend,
+            optimizationPolicy: .auto,
+            seed: seed
+        )
         cache.state = state
         cache.metaState = metaState
         return cache
@@ -1558,6 +1563,7 @@ private func restoreCacheFromMetaState(
             preset: preset,
             groupSize: groupSize,
             backend: backend,
+            optimizationPolicy: .auto,
             seed: seed
         )
         cache.state = state
@@ -1704,6 +1710,7 @@ public func makePromptCacheWithLayerCount(
         let preset = parameters?.turboQuantPreset ?? .turbo3_5
         let backend = parameters?.turboQuantBackend ?? .mlxPacked
         let groupSize = parameters?.kvGroupSize ?? 64
+        let policy = parameters?.turboQuantOptimizationPolicy ?? .auto
         let seed = parameters?.turboQuantSeed ?? defaultTurboQuantSeed
         if let maxKVSize = parameters?.maxKVSize ?? maxKVSize {
             return (0 ..< numLayers).map { _ in
@@ -1712,12 +1719,19 @@ public func makePromptCacheWithLayerCount(
                     preset: preset,
                     groupSize: groupSize,
                     backend: backend,
+                    optimizationPolicy: policy,
                     seed: seed
                 )
             }
         }
         return (0 ..< numLayers).map { _ in
-            TurboQuantKVCache(preset: preset, groupSize: groupSize, backend: backend, seed: seed)
+            TurboQuantKVCache(
+                preset: preset,
+                groupSize: groupSize,
+                backend: backend,
+                optimizationPolicy: policy,
+                seed: seed
+            )
         }
     }
 
@@ -1865,6 +1879,7 @@ public func maybeQuantizeKVCache(
     kvCacheStrategy: KVCacheStrategy = .mlxAffine,
     turboQuantPreset: TurboQuantPreset = .turbo3_5,
     turboQuantBackend: TurboQuantBackend = .mlxPacked,
+    turboQuantOptimizationPolicy: TurboQuantOptimizationPolicy = .auto,
     turboQuantSeed: UInt64? = nil
 ) {
     guard !cache.isEmpty else { return }
@@ -1888,6 +1903,7 @@ public func maybeQuantizeKVCache(
                     preset: turboQuantPreset,
                     groupSize: kvGroupSize,
                     backend: turboQuantBackend,
+                    optimizationPolicy: turboQuantOptimizationPolicy,
                     seed: turboQuantSeed ?? defaultTurboQuantSeed
                 )
             } else {
