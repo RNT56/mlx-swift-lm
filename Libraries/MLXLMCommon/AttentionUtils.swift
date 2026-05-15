@@ -51,7 +51,7 @@ public func attentionWithCacheUpdate(
             mask: mask
         )
     }
-    if let turboQuantCache = cache as? TurboQuantCompressedKVCacheProtocol,
+    if var turboQuantCache = cache as? TurboQuantCompressedKVCacheProtocol,
         turboQuantCache.supportsCompressedAttention(
             queries: queries,
             keys: keys,
@@ -60,6 +60,8 @@ public func attentionWithCacheUpdate(
         )
     {
         let previousOffset = turboQuantCache.offset
+        let previousState = turboQuantCache.state.map { $0[.ellipsis] }
+        let previousMetaState = turboQuantCache.metaState
         do {
             let (compressedKeys, compressedValues) = try turboQuantCache.updateCompressed(
                 keys: keys,
@@ -73,9 +75,12 @@ public func attentionWithCacheUpdate(
                 mask: mask
             )
         } catch {
+            turboQuantCache.metaState = previousMetaState
+            turboQuantCache.state = previousState
             if let baseCache = turboQuantCache as? BaseKVCache {
                 baseCache.offset = previousOffset
             }
+            turboQuantCache.recordCompressedAttentionFailure(String(describing: error))
             // Fall through to the packed quantized cache path. The compressed
             // path is opportunistic and must never make generation fail.
         }
