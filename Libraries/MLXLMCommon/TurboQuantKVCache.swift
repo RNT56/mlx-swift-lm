@@ -54,6 +54,8 @@ public protocol TurboQuantCompressedKVCacheProtocol: KVCache {
         TurboQuantAttentionCode,
         TurboQuantAttentionCode
     )
+
+    func recordCompressedAttentionFailure(_ message: String)
 }
 
 public final class TurboQuantKVCache: QuantizedKVCache, TurboQuantCompressedKVCacheProtocol {
@@ -154,6 +156,11 @@ public final class TurboQuantKVCache: QuantizedKVCache, TurboQuantCompressedKVCa
             return super.state
         }
         set {
+            if activeBackend == .metalPolarQJL, newValue.isEmpty {
+                compressedKeys = nil
+                compressedValues = nil
+                return
+            }
             if activeBackend == .metalPolarQJL, newValue.count == 10 {
                 let capacity = newValue[0].dim(2)
                 let headDimension = max(groupSize, (newValue[0].dim(3) * groupSize))
@@ -325,6 +332,11 @@ public final class TurboQuantKVCache: QuantizedKVCache, TurboQuantCompressedKVCa
         return (currentKeys, currentValues)
     }
 
+    public func recordCompressedAttentionFailure(_ message: String) {
+        lastAttentionPath = .mlxPackedFallback
+        lastUnsupportedShape = "compressed attention failed: \(message)"
+    }
+
     public override func copy() -> any KVCache {
         let new = TurboQuantKVCache(
             preset: preset,
@@ -444,7 +456,7 @@ public final class RotatingTurboQuantKVCache: BaseKVCache, QuantizedKVCacheProto
     TurboQuantCompressedKVCacheProtocol,
     CustomDebugStringConvertible
 {
-    private let rawCache: RotatingKVCache
+    private var rawCache: RotatingKVCache
     private var packedKeys: TurboQuantPackedTensor?
     private var packedValues: TurboQuantPackedTensor?
     private var compressedKeys: TurboQuantAttentionCode?
@@ -614,6 +626,20 @@ public final class RotatingTurboQuantKVCache: BaseKVCache, QuantizedKVCacheProto
     public override var state: [MLXArray] {
         get { rawCache.state }
         set {
+            if newValue.isEmpty {
+                let meta = rawCache.metaState
+                let keep = Int(meta[0]) ?? 4
+                let maxSize = Int(meta[1]) ?? self.maxSize ?? 0
+                let step = Int(meta[2]) ?? 256
+                rawCache = RotatingKVCache(maxSize: maxSize, keep: keep, step: step)
+                rawCache.metaState = meta
+                offset = rawCache.offset
+                packedKeys = nil
+                packedValues = nil
+                compressedKeys = nil
+                compressedValues = nil
+                return
+            }
             rawCache.state = newValue
             offset = rawCache.offset
             packedKeys = nil
@@ -652,6 +678,11 @@ public final class RotatingTurboQuantKVCache: BaseKVCache, QuantizedKVCacheProto
         compressedKeys = nil
         compressedValues = nil
         return trimmed
+    }
+
+    public func recordCompressedAttentionFailure(_ message: String) {
+        lastAttentionPath = .mlxPackedFallback
+        lastUnsupportedShape = "compressed attention failed: \(message)"
     }
 
     public override func copy() -> any KVCache {
