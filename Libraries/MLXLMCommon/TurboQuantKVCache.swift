@@ -358,9 +358,18 @@ public final class TurboQuantKVCache: QuantizedKVCache, TurboQuantCompressedKVCa
             lastUnsupportedShape = "query heads must be a multiple of KV heads"
             return false
         }
+        let keyCode: TurboQuantAttentionCode
+        if let compressedKeys {
+            keyCode = compressedKeys
+        } else if let placeholder = try? placeholderCode(for: keys, role: .key) {
+            keyCode = placeholder
+        } else {
+            lastUnsupportedShape = "failed to create compressed attention placeholder"
+            return false
+        }
         let supportsTiled = prefersOnlineFusedAttention && MLX.turboQuantMetalSupportsOnlineFusedAttention(
             queries: queries,
-            keyCode: compressedKeys ?? placeholderCode(for: keys, role: .key),
+            keyCode: keyCode,
             mask: mask
         )
         lastAttentionPath = supportsTiled ? .tiledOnlineFused : .twoStageCompressed
@@ -448,13 +457,13 @@ public final class TurboQuantKVCache: QuantizedKVCache, TurboQuantCompressedKVCa
         return new
     }
 
-    private func placeholderCode(for array: MLXArray, role: TurboQuantTensorRole) -> TurboQuantAttentionCode {
-        let layout = try! MLX.turboQuantAttentionLayout(
+    private func placeholderCode(for array: MLXArray, role: TurboQuantTensorRole) throws -> TurboQuantAttentionCode {
+        let layout = try MLX.turboQuantAttentionLayout(
             for: array,
             preset: preset,
             groupSize: groupSize
         )
-        return try! MLX.turboQuantEmptyAttentionCode(
+        return try MLX.turboQuantEmptyAttentionCode(
             layout: layout,
             preset: preset,
             role: role,
@@ -761,7 +770,15 @@ public final class RotatingTurboQuantKVCache: BaseKVCache, QuantizedKVCacheProto
             lastUnsupportedShape = "raw fallback cache already owns previous rotating context"
             return false
         }
-        let keyCode = compressedKeys ?? placeholderCode(for: keys, role: .key)
+        let keyCode: TurboQuantAttentionCode
+        if let compressedKeys {
+            keyCode = compressedKeys
+        } else if let placeholder = try? placeholderCode(for: keys, role: .key) {
+            keyCode = placeholder
+        } else {
+            lastUnsupportedShape = "failed to create compressed attention placeholder"
+            return false
+        }
         let supportsTiled = prefersOnlineFusedAttention && MLX.turboQuantMetalSupportsOnlineFusedAttention(
             queries: queries,
             keyCode: keyCode,
@@ -1068,11 +1085,8 @@ public final class RotatingTurboQuantKVCache: BaseKVCache, QuantizedKVCacheProto
     }
 
     public override func copy() -> any KVCache {
-        guard let maxSize else {
-            fatalError("RotatingTurboQuantKVCache requires maxSize")
-        }
         let new = RotatingTurboQuantKVCache(
-            maxSize: maxSize,
+            maxSize: maxCacheSize,
             keep: keep,
             step: step,
             preset: preset,
@@ -1116,8 +1130,8 @@ public final class RotatingTurboQuantKVCache: BaseKVCache, QuantizedKVCacheProto
         "\(String(describing: Self.self)) offset: \(offset), maxSize: \(maxSize?.description ?? "-"), preset: \(preset.rawValue), backend: \(activeBackend.rawValue), rawFallback: \(rawFallbackCache != nil)"
     }
 
-    private func placeholderCode(for array: MLXArray, role: TurboQuantTensorRole) -> TurboQuantAttentionCode {
-        let layout = try! MLX.turboQuantAttentionLayout(
+    private func placeholderCode(for array: MLXArray, role: TurboQuantTensorRole) throws -> TurboQuantAttentionCode {
+        let layout = try MLX.turboQuantAttentionLayout(
             for: array,
             preset: preset,
             groupSize: groupSize,
@@ -1126,7 +1140,7 @@ public final class RotatingTurboQuantKVCache: BaseKVCache, QuantizedKVCacheProto
             ringOffset: ringOffset(forOffset: offset + array.dim(2)),
             pinnedPrefixLength: min(keep, maxCacheSize)
         )
-        return try! MLX.turboQuantEmptyAttentionCode(
+        return try MLX.turboQuantEmptyAttentionCode(
             layout: layout,
             preset: preset,
             role: role,
@@ -1260,12 +1274,9 @@ public extension RotatingKVCache {
         optimizationPolicy: TurboQuantOptimizationPolicy = .auto,
         seed: UInt64 = 0x9E37_79B9_7F4A_7C15
     ) -> RotatingTurboQuantKVCache {
-        guard let maxSize else {
-            fatalError("RotatingKVCache requires maxSize for TurboQuant conversion")
-        }
-
+        let capacity = maxSize ?? rotatingStep
         let cache = RotatingTurboQuantKVCache(
-            maxSize: maxSize,
+            maxSize: capacity,
             keep: rotatingKeep,
             step: rotatingStep,
             preset: preset,
@@ -1301,14 +1312,14 @@ public extension RotatingKVCache {
                     backend: cache.activeBackend,
                     seed: seed ^ turboQuantValueSeedSalt
                 )
-                let keys = turboQuantPhysicalizedState(currentState[0], maxSize: maxSize)
-                let values = turboQuantPhysicalizedState(currentState[1], maxSize: maxSize)
-                let logicalLength = min(offset, maxSize)
-                let pinnedPrefixLength = min(rotatingKeep, maxSize)
+                let keys = turboQuantPhysicalizedState(currentState[0], maxSize: capacity)
+                let values = turboQuantPhysicalizedState(currentState[1], maxSize: capacity)
+                let logicalLength = min(offset, capacity)
+                let pinnedPrefixLength = min(rotatingKeep, capacity)
                 let keyCode = try MLX.turboQuantMetalEncodeAttention(
                     keys,
                     configuration: keyConfiguration,
-                    capacity: maxSize,
+                    capacity: capacity,
                     logicalLength: logicalLength,
                     ringOffset: rotatingRingOffset,
                     pinnedPrefixLength: pinnedPrefixLength
@@ -1316,7 +1327,7 @@ public extension RotatingKVCache {
                 let valueCode = try MLX.turboQuantMetalEncodeAttention(
                     values,
                     configuration: valueConfiguration,
-                    capacity: maxSize,
+                    capacity: capacity,
                     logicalLength: logicalLength,
                     ringOffset: rotatingRingOffset,
                     pinnedPrefixLength: pinnedPrefixLength

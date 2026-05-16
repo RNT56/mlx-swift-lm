@@ -736,18 +736,25 @@ public class RotatingKVCache: BaseKVCache, CustomDebugStringConvertible {
 
     /// Convert to quantized cache
     /// Note: This is complex due to the rotating nature and temporal ordering
-    public func toQuantized(groupSize: Int = 64, bits: Int = 4) -> QuantizedKVCache {
-        // For now, throw an error like the Python version does
-        // A full implementation would need to handle the temporal ordering correctly
-        fatalError(
-            "RotatingKVCache quantization not yet implemented - temporal ordering makes this complex"
+    public func toQuantized(
+        groupSize: Int = 64,
+        bits: Int = 4,
+        mode: QuantizationMode = .affine
+    ) -> QuantizedKVCache {
+        let cache = RotatingQuantizedKVCache(
+            maxSize: maxCacheSize,
+            keep: keep,
+            step: step,
+            groupSize: groupSize,
+            bits: bits,
+            mode: mode
         )
-
-        // Future implementation would need to:
-        // 1. Put keys/values in temporal order using temporalOrder()
-        // 2. Quantize the temporally ordered arrays
-        // 3. Store metadata about rotation state
-        // 4. Implement corresponding dequantization with rotation restoration
+        let s = state
+        if !s.isEmpty {
+            cache.setUnquantizedState(keys: s[0], values: s[1], offset: offset, writeIndex: idx)
+        }
+        cache.metaState = metaState
+        return cache
     }
 }
 
@@ -1011,6 +1018,339 @@ public class QuantizedKVCache: BaseKVCache, QuantizedKVCacheProtocol {
         }
 
         return simpleCache
+    }
+}
+
+/// Rotating quantized KV cache for sliding-window attention.
+///
+/// Storage keeps the same rotating metadata as ``RotatingKVCache`` while
+/// `updateQuantized` returns tuples in temporal order for quantized attention.
+public class RotatingQuantizedKVCache: QuantizedKVCache {
+    private typealias QuantizedTuple = (MLXArray, MLXArray, MLXArray?)
+
+    private var keys: QuantizedTuple?
+    private var values: QuantizedTuple?
+    private var keep: Int
+    private var step: Int
+    private var maxCacheSize: Int
+    private var writeIndex: Int = 0
+
+    public override var maxSize: Int? { maxCacheSize }
+    public override var isTrimmable: Bool { offset < maxCacheSize }
+    public var ropeOffset: RoPEOffset { .scalar(offset) }
+
+    public init(
+        maxSize: Int,
+        keep: Int = 0,
+        step: Int = 256,
+        groupSize: Int = 64,
+        bits: Int = 4,
+        mode: QuantizationMode = .affine
+    ) {
+        self.maxCacheSize = maxSize
+        self.keep = keep
+        self.step = step
+        super.init(groupSize: groupSize, bits: bits, mode: mode)
+    }
+
+    public override func innerState() -> [MLXArray] {
+        var arrays: [MLXArray] = []
+        if let keys {
+            arrays.append(contentsOf: [keys.0, keys.1, keys.2].compactMap { $0 })
+        }
+        if let values {
+            arrays.append(contentsOf: [values.0, values.1, values.2].compactMap { $0 })
+        }
+        return arrays
+    }
+
+    internal func setUnquantizedState(
+        keys: MLXArray,
+        values: MLXArray,
+        offset: Int,
+        writeIndex: Int
+    ) {
+        self.keys = quantizedTuple(keys)
+        self.values = quantizedTuple(values)
+        self.offset = offset
+        self.writeIndex = writeIndex
+    }
+
+    private func quantizedTuple(_ array: MLXArray) -> QuantizedTuple {
+        let q = quantized(array, groupSize: groupSize, bits: bits)
+        return (q.wq, q.scales, q.biases)
+    }
+
+    private func initQuant(dim: Int, shape: [Int], dtype: DType) -> QuantizedTuple {
+        quantizedTuple(MLXArray.zeros(shape + [dim], dtype: dtype))
+    }
+
+    private func tupleLength(_ tuple: QuantizedTuple) -> Int {
+        tuple.0.dim(-2)
+    }
+
+    private func mapTuple(_ tuple: QuantizedTuple, _ transform: (MLXArray) -> MLXArray)
+        -> QuantizedTuple
+    {
+        (transform(tuple.0), transform(tuple.1), tuple.2.map(transform))
+    }
+
+    private func concatTuple(_ lhs: QuantizedTuple, _ rhs: QuantizedTuple) -> QuantizedTuple {
+        let biases: MLXArray?
+        if let leftBiases = lhs.2, let rightBiases = rhs.2 {
+            biases = concatenated([leftBiases, rightBiases], axis: -2)
+        } else {
+            biases = nil
+        }
+        return (
+            concatenated([lhs.0, rhs.0], axis: -2),
+            concatenated([lhs.1, rhs.1], axis: -2),
+            biases
+        )
+    }
+
+    private func sliceTuple(_ tuple: QuantizedTuple, _ range: Range<Int>) -> QuantizedTuple {
+        mapTuple(tuple) { $0[.ellipsis, range, 0...] }
+    }
+
+    private func temporalOrder(_ tuple: QuantizedTuple) -> QuantizedTuple {
+        let length = tupleLength(tuple)
+        if writeIndex == length {
+            return tuple
+        } else if writeIndex < offset {
+            let prefix = sliceTuple(tuple, 0 ..< min(keep, length))
+            let tail = sliceTuple(tuple, writeIndex ..< length)
+            let middle = writeIndex > keep ? sliceTuple(tuple, keep ..< writeIndex) : nil
+            return middle.map { concatTuple(concatTuple(prefix, tail), $0) }
+                ?? concatTuple(prefix, tail)
+        } else {
+            return sliceTuple(tuple, 0 ..< writeIndex)
+        }
+    }
+
+    private func trimTuple(
+        trimSize: Int,
+        _ tuple: QuantizedTuple,
+        append: QuantizedTuple? = nil
+    ) -> QuantizedTuple {
+        let trimmed: QuantizedTuple
+        if trimSize > 0 {
+            let prefix = sliceTuple(tuple, 0 ..< keep)
+            let suffix = sliceTuple(tuple, (trimSize + keep) ..< tupleLength(tuple))
+            trimmed = concatTuple(prefix, suffix)
+        } else {
+            trimmed = tuple
+        }
+        if let append {
+            return concatTuple(trimmed, append)
+        }
+        return trimmed
+    }
+
+    private func expandTuple(_ tuple: QuantizedTuple, newShape: [Int]) -> QuantizedTuple {
+        mapTuple(tuple) { array in
+            concatenated(
+                [array, MLXArray.zeros(newShape + [array.dim(-1)], dtype: array.dtype)],
+                axis: -2
+            )
+        }
+    }
+
+    private func assign(_ update: QuantizedTuple, to storage: inout QuantizedTuple, range: Range<Int>) {
+        storage.0[.ellipsis, range, 0...] = update.0
+        storage.1[.ellipsis, range, 0...] = update.1
+        if let updateBiases = update.2 {
+            storage.2![.ellipsis, range, 0...] = updateBiases
+        }
+    }
+
+    private func temporalQuantizedState() -> (QuantizedTuple, QuantizedTuple)? {
+        guard let keys, let values else { return nil }
+        let orderedKeys = temporalOrder(keys)
+        let orderedValues = temporalOrder(values)
+        let activeLength = min(tupleLength(orderedKeys), max(0, min(offset, maxCacheSize)))
+        guard activeLength > 0 else { return nil }
+        return (
+            sliceTuple(orderedKeys, 0 ..< activeLength),
+            sliceTuple(orderedValues, 0 ..< activeLength)
+        )
+    }
+
+    public override func getQuantizedState() -> (
+        (MLXArray, MLXArray, MLXArray?), (MLXArray, MLXArray, MLXArray?)
+    )? {
+        temporalQuantizedState()
+    }
+
+    public override func updateQuantized(keys: MLXArray, values: MLXArray) -> (
+        (MLXArray, MLXArray, MLXArray?), (MLXArray, MLXArray, MLXArray?)
+    ) {
+        let B = keys.dim(0)
+        let nKVHeads = keys.dim(1)
+        let steps = keys.dim(2)
+        let keyDim = keys.dim(3)
+        let valueDim = values.dim(3)
+        let keyUpdate = quantizedTuple(keys)
+        let valueUpdate = quantizedTuple(values)
+
+        if steps == 1 {
+            if self.keys == nil
+                || (offset >= tupleLength(self.keys!) && tupleLength(self.keys!) < maxCacheSize)
+            {
+                let growBy = min(step, maxCacheSize - min(offset, maxCacheSize))
+                let newShape = [B, nKVHeads, growBy]
+                if let currentKeys = self.keys, let currentValues = self.values {
+                    self.keys = expandTuple(currentKeys, newShape: newShape)
+                    self.values = expandTuple(currentValues, newShape: newShape)
+                } else {
+                    self.keys = initQuant(dim: keyDim, shape: newShape, dtype: keys.dtype)
+                    self.values = initQuant(dim: valueDim, shape: newShape, dtype: values.dtype)
+                }
+                writeIndex = min(offset, maxCacheSize)
+            }
+
+            if tupleLength(self.keys!) > maxCacheSize {
+                let trimSize = tupleLength(self.keys!) - maxCacheSize
+                self.keys = trimTuple(trimSize: trimSize, self.keys!)
+                self.values = trimTuple(trimSize: trimSize, self.values!)
+                writeIndex = maxCacheSize
+            }
+
+            if writeIndex == maxCacheSize {
+                writeIndex = min(keep, maxCacheSize)
+            }
+
+            var currentKeys = self.keys!
+            var currentValues = self.values!
+            let range = writeIndex ..< (writeIndex + steps)
+            assign(keyUpdate, to: &currentKeys, range: range)
+            assign(valueUpdate, to: &currentValues, range: range)
+            self.keys = currentKeys
+            self.values = currentValues
+            offset += steps
+            writeIndex += steps
+        } else {
+            if let currentKeys = self.keys, let currentValues = self.values {
+                var orderedKeys = temporalOrder(currentKeys)
+                var orderedValues = temporalOrder(currentValues)
+                writeIndex = tupleLength(orderedKeys)
+                let trimSize = writeIndex - maxCacheSize + 1
+                orderedKeys = trimTuple(trimSize: trimSize, orderedKeys, append: keyUpdate)
+                orderedValues = trimTuple(trimSize: trimSize, orderedValues, append: valueUpdate)
+                self.keys = orderedKeys
+                self.values = orderedValues
+            } else {
+                self.keys = keyUpdate
+                self.values = valueUpdate
+            }
+            offset += steps
+            writeIndex = tupleLength(self.keys!)
+        }
+
+        return temporalQuantizedState()!
+    }
+
+    public override func update(keys: MLXArray, values: MLXArray) -> (MLXArray, MLXArray) {
+        let (qKeys, qValues) = updateQuantized(keys: keys, values: values)
+        return (
+            dequantized(qKeys.0, scales: qKeys.1, biases: qKeys.2, groupSize: groupSize, bits: bits, mode: mode),
+            dequantized(qValues.0, scales: qValues.1, biases: qValues.2, groupSize: groupSize, bits: bits, mode: mode)
+        )
+    }
+
+    public override var state: [MLXArray] {
+        get {
+            guard let keys, let values else { return [] }
+            return [keys.0, keys.1, keys.2, values.0, values.1, values.2].compactMap { $0 }
+        }
+        set {
+            switch newValue.count {
+            case 4:
+                keys = (newValue[0], newValue[1], nil)
+                values = (newValue[2], newValue[3], nil)
+            case 6:
+                keys = (newValue[0], newValue[1], newValue[2])
+                values = (newValue[3], newValue[4], newValue[5])
+            default:
+                return
+            }
+        }
+    }
+
+    public override var metaState: [String] {
+        get {
+            [
+                String(keep), String(maxCacheSize), String(step), String(offset),
+                String(writeIndex), String(groupSize), String(bits), mode.rawValue,
+            ]
+        }
+        set {
+            guard newValue.count >= 5,
+                let keepValue = Int(newValue[0]),
+                let maxSizeValue = Int(newValue[1]),
+                let stepValue = Int(newValue[2]),
+                let offsetValue = Int(newValue[3]),
+                let writeIndexValue = Int(newValue[4])
+            else {
+                return
+            }
+            keep = keepValue
+            maxCacheSize = maxSizeValue
+            step = stepValue
+            offset = offsetValue
+            writeIndex = writeIndexValue
+        }
+    }
+
+    @discardableResult
+    public override func trim(_ n: Int) -> Int {
+        let trimmed = min(offset, n)
+        offset -= trimmed
+        writeIndex = min(writeIndex, max(0, writeIndex - trimmed))
+        return trimmed
+    }
+
+    public override func makeMask(
+        n: Int,
+        windowSize: Int?,
+        returnArray: Bool
+    ) -> MLXFast.ScaledDotProductAttentionMaskMode {
+        if n == 1 {
+            return .none
+        }
+        let contextLength = min(offset, maxCacheSize)
+        if returnArray || (windowSize != nil && contextLength + n > windowSize!) {
+            return .array(createCausalMask(n: n, offset: contextLength, windowSize: windowSize))
+        }
+        return .causal
+    }
+
+    public override func copy() -> any KVCache {
+        let new = RotatingQuantizedKVCache(
+            maxSize: maxCacheSize,
+            keep: keep,
+            step: step,
+            groupSize: groupSize,
+            bits: bits,
+            mode: mode
+        )
+        let s = state
+        if !s.isEmpty {
+            new.state = s.map { $0[.ellipsis] }
+        }
+        new.metaState = metaState
+        return new
+    }
+
+    public override func toUnquantized() -> KVCacheSimple {
+        let cache = KVCacheSimple()
+        guard let (keys, values) = temporalQuantizedState() else { return cache }
+        let decodedKeys = dequantized(
+            keys.0, scales: keys.1, biases: keys.2, groupSize: groupSize, bits: bits, mode: mode)
+        let decodedValues = dequantized(
+            values.0, scales: values.1, biases: values.2, groupSize: groupSize, bits: bits, mode: mode)
+        cache.state = [decodedKeys, decodedValues]
+        return cache
     }
 }
 
@@ -1964,7 +2304,7 @@ public func maybeQuantizeKVCache(
         if item is KVCacheSimple {
             return item.offset > quantizedKVStart
         }
-        if kvCacheStrategy == .turboQuant, item is RotatingKVCache {
+        if item is RotatingKVCache {
             return item.offset > quantizedKVStart
         }
         return false
@@ -1998,6 +2338,9 @@ public func maybeQuantizeKVCache(
                 optimizationPolicy: turboQuantOptimizationPolicy,
                 seed: turboQuantSeed ?? defaultTurboQuantSeed
             )
+        }
+        if let rotatingCache = item as? RotatingKVCache {
+            return rotatingCache.toQuantized(groupSize: kvGroupSize, bits: kvBits)
         }
         return item
     }
