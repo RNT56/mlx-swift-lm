@@ -468,6 +468,16 @@ public class RotatingKVCache: BaseKVCache, CustomDebugStringConvertible {
     private var idx: Int = 0
 
     public override var maxSize: Int? { maxCacheSize }
+    internal var rotatingKeep: Int { keep }
+    internal var rotatingStep: Int { step }
+    internal var rotatingWriteIndex: Int { idx }
+    internal var rotatingRingOffset: Int {
+        let pinned = min(keep, maxCacheSize)
+        let ringCapacity = maxCacheSize - pinned
+        guard ringCapacity > 0, offset > pinned else { return 0 }
+        let activeRing = min(offset - pinned, ringCapacity)
+        return (offset - pinned - activeRing) % ringCapacity
+    }
 
     public init(maxSize: Int, keep: Int = 0, step: Int = 256) {
         self.maxCacheSize = maxSize
@@ -1264,7 +1274,8 @@ public class CacheList: BaseKVCache {
     }
 
     public subscript(index: Int) -> KVCache {
-        return caches[index]
+        get { caches[index] }
+        set { caches[index] = newValue }
     }
 
     public override func update(keys: MLXArray, values: MLXArray) -> (MLXArray, MLXArray) {
@@ -1305,6 +1316,12 @@ public class CacheList: BaseKVCache {
 
     /// Internal accessor for child caches (used by serialization)
     internal var children: [KVCache] { caches }
+
+    internal func replaceChildren(_ transform: (KVCache) -> KVCache) {
+        for index in caches.indices {
+            caches[index] = transform(caches[index])
+        }
+    }
 
     // MARK: - Serialization
 
@@ -1527,15 +1544,22 @@ private func restoreCacheFromMetaState(
     case "TurboQuantKVCache":
         let preset =
             metaState.count > 4 ? TurboQuantPreset(rawValue: metaState[4]) ?? .turbo3_5 : .turbo3_5
+        let groupSize = metaState.count > 2 ? Int(metaState[2]) ?? 64 : 64
         let backend =
             metaState.count > 5 ? TurboQuantBackend(rawValue: metaState[5]) ?? .mlxPacked : .mlxPacked
         let seed = metaState.count > 6 ? UInt64(metaState[6]) ?? defaultTurboQuantSeed : defaultTurboQuantSeed
         let cache = TurboQuantKVCache(
             preset: preset,
+            groupSize: groupSize,
             backend: backend,
             optimizationPolicy: .auto,
             seed: seed
         )
+        if state.count == 10, cache.activeBackend != .metalPolarQJL {
+            throw KVCacheError(
+                message:
+                    "Cannot restore compressed TurboQuantKVCache without a verified Metal TurboQuant backend")
+        }
         cache.state = state
         cache.metaState = metaState
         return cache
@@ -1566,6 +1590,11 @@ private func restoreCacheFromMetaState(
             optimizationPolicy: .auto,
             seed: seed
         )
+        if state.count == 10, cache.activeBackend != .metalPolarQJL {
+            throw KVCacheError(
+                message:
+                    "Cannot restore compressed RotatingTurboQuantKVCache without a verified Metal TurboQuant backend")
+        }
         cache.state = state
         cache.metaState = metaState
         return cache
@@ -1735,13 +1764,51 @@ public func makePromptCacheWithLayerCount(
         }
     }
 
-    if let maxKVSize = maxKVSize {
+    if let maxKVSize = parameters?.maxKVSize ?? maxKVSize {
         return (0 ..< numLayers).map { _ in
             RotatingKVCache(maxSize: maxKVSize, keep: 4)
         }
     } else {
         return (0 ..< numLayers).map { _ in KVCacheSimple() }
     }
+}
+
+/// Construct a single standard attention KV cache, honoring TurboQuant generation parameters.
+public func makeAttentionKVCache(
+    parameters: GenerateParameters? = nil,
+    maxKVSize: Int? = nil,
+    keep: Int = 4
+) -> KVCache {
+    if parameters?.kvCacheStrategy == .turboQuant {
+        let preset = parameters?.turboQuantPreset ?? .turbo3_5
+        let backend = parameters?.turboQuantBackend ?? .mlxPacked
+        let groupSize = parameters?.kvGroupSize ?? 64
+        let policy = parameters?.turboQuantOptimizationPolicy ?? .auto
+        let seed = parameters?.turboQuantSeed ?? defaultTurboQuantSeed
+        if let maxKVSize = parameters?.maxKVSize ?? maxKVSize {
+            return RotatingTurboQuantKVCache(
+                maxSize: maxKVSize,
+                keep: keep,
+                preset: preset,
+                groupSize: groupSize,
+                backend: backend,
+                optimizationPolicy: policy,
+                seed: seed
+            )
+        }
+        return TurboQuantKVCache(
+            preset: preset,
+            groupSize: groupSize,
+            backend: backend,
+            optimizationPolicy: policy,
+            seed: seed
+        )
+    }
+
+    if let maxKVSize = parameters?.maxKVSize ?? maxKVSize {
+        return RotatingKVCache(maxSize: maxKVSize, keep: keep)
+    }
+    return KVCacheSimple()
 }
 
 /// Check if model's cache can be trimmed.
@@ -1887,31 +1954,57 @@ public func maybeQuantizeKVCache(
     let resolvedBits = kvCacheStrategy == .turboQuant ? turboQuantPreset.effectiveBits : kvBits
     guard let kvBits = resolvedBits else { return }
 
-    // Find the first quantizable (non-Mamba, non-already-quantized) cache entry
-    guard let firstQuantizable = cache.first(where: { $0 is KVCacheSimple }),
-        !(firstQuantizable is QuantizedKVCache),
-        firstQuantizable.offset > quantizedKVStart
-    else {
-        return
+    func isReadyForQuantization(_ item: KVCache) -> Bool {
+        if let list = item as? CacheList {
+            return list.children.contains(where: isReadyForQuantization)
+        }
+        if item is QuantizedKVCacheProtocol {
+            return false
+        }
+        if item is KVCacheSimple {
+            return item.offset > quantizedKVStart
+        }
+        if kvCacheStrategy == .turboQuant, item is RotatingKVCache {
+            return item.offset > quantizedKVStart
+        }
+        return false
     }
 
-    for i in 0 ..< cache.count {
-        // Handle cache types that support quantization
-        if let simpleCache = cache[i] as? KVCacheSimple {
+    func convertedCache(_ item: KVCache) -> KVCache {
+        if let list = item as? CacheList {
+            list.replaceChildren(convertedCache)
+            return list
+        }
+        if item is QuantizedKVCacheProtocol {
+            return item
+        }
+        if let simpleCache = item as? KVCacheSimple {
             if kvCacheStrategy == .turboQuant {
-                cache[i] = simpleCache.toTurboQuant(
+                return simpleCache.toTurboQuant(
                     preset: turboQuantPreset,
                     groupSize: kvGroupSize,
                     backend: turboQuantBackend,
                     optimizationPolicy: turboQuantOptimizationPolicy,
                     seed: turboQuantSeed ?? defaultTurboQuantSeed
                 )
-            } else {
-                cache[i] = simpleCache.toQuantized(groupSize: kvGroupSize, bits: kvBits)
             }
+            return simpleCache.toQuantized(groupSize: kvGroupSize, bits: kvBits)
         }
-        // TODO: RotatingKVCache.toQuantized() is not implemented yet, like in Python.
-        // When implemented, add: else if let rotatingCache = cache[i] as? RotatingKVCache { ... }
-        // MambaCache and CacheList don't use traditional KV quantization
+        if kvCacheStrategy == .turboQuant, let rotatingCache = item as? RotatingKVCache {
+            return rotatingCache.toTurboQuant(
+                preset: turboQuantPreset,
+                groupSize: kvGroupSize,
+                backend: turboQuantBackend,
+                optimizationPolicy: turboQuantOptimizationPolicy,
+                seed: turboQuantSeed ?? defaultTurboQuantSeed
+            )
+        }
+        return item
+    }
+
+    guard cache.contains(where: isReadyForQuantization) else { return }
+
+    for i in 0 ..< cache.count {
+        cache[i] = convertedCache(cache[i])
     }
 }

@@ -521,7 +521,7 @@ public class GraniteMoeHybridModel: Module, LLMModel, KVCacheDimensionProvider {
             if layerType == "mamba" {
                 return MambaCache()
             } else {
-                return KVCacheSimple()
+                return makeAttentionKVCache(parameters: parameters)
             }
         }
     }

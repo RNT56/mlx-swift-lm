@@ -147,8 +147,35 @@ func testCacheSerialization(creator: (() -> any KVCache)) async throws {
         #expect(turbo.activeBackend == expectedBackend)
         if expectedBackend == .mlxPacked {
             #expect(turbo.backendFallbackReason != nil)
+        } else {
+            #expect(turbo.state.count == 10)
+            let compressed = try #require(turbo.compressedState)
+            #expect(compressed.0.layout.logicalLength == 16)
+            #expect(compressed.1.layout.logicalLength == 16)
         }
     }
+}
+
+@Test func testMakeAttentionKVCacheHonorsTurboQuantParameters() throws {
+    let parameters = GenerateParameters(
+        maxKVSize: 48,
+        kvCacheStrategy: .turboQuant,
+        turboQuantPreset: .turbo2_5,
+        turboQuantBackend: .metalPolarQJL,
+        turboQuantOptimizationPolicy: .conservative,
+        turboQuantSeed: 0x1234_5678_9ABC_DEF0
+    )
+
+    let cache = try #require(
+        makeAttentionKVCache(parameters: parameters, maxKVSize: 16, keep: 2)
+            as? RotatingTurboQuantKVCache)
+
+    #expect(cache.maxSize == 48)
+    #expect(cache.metaState.first == "2")
+    #expect(cache.preset == .turbo2_5)
+    #expect(cache.requestedBackend == .metalPolarQJL)
+    #expect(cache.optimizationPolicy == .conservative)
+    #expect(cache.seed == 0x1234_5678_9ABC_DEF0)
 }
 
 @Test func testTurboQuantOptimizationPolicyPropagatesToPromptCaches() throws {

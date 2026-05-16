@@ -1086,9 +1086,9 @@ private final class Gemma4TextLanguageModel: Module, KVCacheDimensionProvider {
         return config.layerTypes.prefix(config.hiddenLayers - config.numKVSharedLayers).map {
             layerType in
             if layerType == "full_attention" {
-                StandardKVCache()
+                makeAttentionKVCache(parameters: parameters)
             } else {
-                RotatingKVCache(maxSize: slidingWindow, keep: 0)
+                makeAttentionKVCache(parameters: parameters, maxKVSize: slidingWindow, keep: 0)
             }
         }
     }
