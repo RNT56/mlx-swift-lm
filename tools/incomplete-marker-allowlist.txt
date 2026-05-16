@@ -1,0 +1,61 @@
+# Regexes matched against `rg -n` output by audit-incomplete-markers.sh.
+# Keep this list limited to intentional internal contracts and shape/type programmer errors.
+
+# Abstract/base protocol surfaces.
+^Libraries/MLXLMCommon/LanguageModel\.swift:.*callAsFunction\(inputs:cache:\) not implemented
+^Libraries/MLXLMCommon/KVCache\.swift:.*must be implemented by subclass
+^Libraries/MLXLMCommon/KVCache\.swift:.*CacheList should not use update
+
+# Internal cache state invariants. User/model supplied cache conversion paths should validate before this.
+^Libraries/MLXLMCommon/KVCache\.swift:.*state must have exactly
+^Libraries/MLXLMCommon/KVCache\.swift:.*metaState must have exactly
+^Libraries/MLXLMCommon/KVCache\.swift:.*This cache has no state
+^Libraries/MLXLMCommon/KVCache\.swift:.*meta_state
+^Libraries/MLXLMCommon/KVCache\.swift:.*not properly initialized
+^Libraries/MLXLMCommon/KVCache\.swift:.*Failed to convert
+^Libraries/MLXLMCommon/KVCache\.swift:.*fatalError\(
+^Libraries/MLXLMCommon/InterpolationUtils\.swift:.*Either size or scaleFactor
+^Libraries/MLXLMCommon/UserInput\.swift:.*This functionality is not implemented
+
+# Programmer-error tensor shape/type contracts.
+^Libraries/.*:.*precondition\(
+^Libraries/.*:.*Unsupported .* shape
+^Libraries/.*:.*unsupported
+^Libraries/.*:.*must be divisible
+^Libraries/.*:.*must be positive
+^Libraries/.*:.*requires .* configuration
+^Libraries/.*:.*is required
+^Libraries/.*:.*inputIds required
+^Libraries/.*:.*inputs.*required
+^Libraries/.*:.*inputs.*input
+^Libraries/.*:.*Either .* must be provided
+^Libraries/.*:.*one of inputs or inputEmbedding must be non-nil
+^Libraries/.*:.*Vision model must return hidden states
+^Libraries/.*:.*hidden states
+^Libraries/.*:.*The input feature dimensions
+^Libraries/.*:.*lmHead must be
+^Libraries/.*:.*Token mixer type
+^Libraries/.*:.*Module must be
+^Libraries/.*:.*CustomFunction
+^Libraries/.*:.*per layer inputs
+^Libraries/.*:.*Cannot generate per layer inputs
+^Libraries/MLXVLM/Models/(Gemma4|Idefics3|Mistral3|Gemma3|LFM2VL)\.swift:.*fatalError
+^Libraries/MLXLLM/Models/(Phi3|GraniteMoeHybrid|Gemma3nText)\.swift:.*fatalError
+^Libraries/MLXLLM/Models/Gemma3nText\.swift:.*Layer type
+
+# Explicit programmer/internal misuse traps.
+^Libraries/MLXLMCommon/Utilities/SerialAccessContainer\.swift:.*value already consumed
+^Libraries/MLXLLM/Lora\+Data\.swift:.*unknown type
+^Libraries/MLXLLM/.*:.*Unknown layer type
+^Libraries/MLXVLM/.*:.*Unknown layer type
+^Libraries/MLXLLM/.*:.*Unsupported topk method
+^Libraries/MLXLLM/.*:.*requires nRoutedExperts
+^Libraries/MLXVLM/.*:.*requires numExperts
+^Libraries/MLXVLM/.*:.*expected a KV state
+^Libraries/MLXVLM/.*:.*Per-layer inputs requested
+^Libraries/MLXLLM/Models/GatedDelta\.swift:.*Gated delta kernel not available
+^Libraries/MLXLLM/Models/NemotronH\.swift:.*Unknown NemotronH block type
+
+# Controlled force-casts where preceding config/module construction selects the concrete type.
+^Libraries/MLXLLM/.*:.* as! 
+^Libraries/MLXVLM/.*:.* as! 
