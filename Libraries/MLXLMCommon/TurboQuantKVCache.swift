@@ -98,6 +98,17 @@ private struct RestoredAttentionLayoutMetadata {
     var kvHeadCount: Int?
 }
 
+private enum TurboQuantCacheError: Error, CustomStringConvertible {
+    case compressedBackfillUnavailable(String)
+
+    var description: String {
+        switch self {
+        case .compressedBackfillUnavailable(let message):
+            "TurboQuant compressed cache backfill unavailable: \(message)"
+        }
+    }
+}
+
 public final class TurboQuantKVCache: QuantizedKVCache, TurboQuantCompressedKVCacheProtocol {
     private var compressedKeys: TurboQuantAttentionCode?
     private var compressedValues: TurboQuantAttentionCode?
@@ -154,7 +165,9 @@ public final class TurboQuantKVCache: QuantizedKVCache, TurboQuantCompressedKVCa
         }
         set {
             super.metaState = Array(newValue.prefix(4))
-            let compressedBase = UInt64(newValue.dropFirst(6).first ?? "") == nil ? 6 : 7
+            let compressedBase = newValue.firstIndex {
+                $0.hasPrefix("turboq-attn-v")
+            } ?? (UInt64(newValue.dropFirst(6).first ?? "") == nil ? 6 : 7)
             if newValue.count >= compressedBase + 7,
                 let capacity = Int(newValue[compressedBase + 1]),
                 let logicalLength = Int(newValue[compressedBase + 2]),
@@ -263,6 +276,9 @@ public final class TurboQuantKVCache: QuantizedKVCache, TurboQuantCompressedKVCa
                     residualSigns: newValue[8],
                     scales: newValue[9]
                 )
+            } else if newValue.count == 10 {
+                lastUnsupportedShape =
+                    "compressed TurboQuant state restored without Metal attention support"
             } else {
                 super.state = newValue
             }
@@ -454,6 +470,10 @@ public final class TurboQuantKVCache: QuantizedKVCache, TurboQuantCompressedKVCa
     ) throws {
         if compressedKeys == nil || compressedValues == nil {
             let capacity = ((compressedStep + requiredLength - 1) / compressedStep) * compressedStep
+            if offset > 0 {
+                try backfillCompressedStorage(capacity: capacity)
+                return
+            }
             let keyLayout = try MLX.turboQuantAttentionLayout(
                 for: keys,
                 preset: preset,
@@ -494,6 +514,53 @@ public final class TurboQuantKVCache: QuantizedKVCache, TurboQuantCompressedKVCa
         let newCapacity = ((compressedStep + requiredLength - 1) / compressedStep) * compressedStep
         compressedKeys = try expandCompressedCode(currentKeys, newCapacity: newCapacity)
         compressedValues = try expandCompressedCode(currentValues, newCapacity: newCapacity)
+    }
+
+    private func backfillCompressedStorage(capacity: Int) throws {
+        guard let (packedKeys, packedValues) = super.getQuantizedState() else {
+            throw TurboQuantCacheError.compressedBackfillUnavailable(
+                "no packed cache state exists for \(offset) previous tokens"
+            )
+        }
+
+        let keyConfiguration = TurboQuantConfiguration(
+            preset: preset,
+            role: .key,
+            groupSize: groupSize,
+            mode: mode,
+            backend: activeBackend,
+            seed: seed
+        )
+        let valueConfiguration = TurboQuantConfiguration(
+            preset: preset,
+            role: .value,
+            groupSize: groupSize,
+            mode: mode,
+            backend: activeBackend,
+            seed: seed ^ turboQuantValueSeedSalt
+        )
+        let decodedKeys = turboDequantized(
+            packedKeys,
+            configuration: keyConfiguration,
+            dtype: .float32
+        )
+        let decodedValues = turboDequantized(
+            packedValues,
+            configuration: valueConfiguration,
+            dtype: .float32
+        )
+        compressedKeys = try MLX.turboQuantMetalEncodeAttention(
+            decodedKeys,
+            configuration: keyConfiguration,
+            capacity: capacity,
+            logicalLength: offset
+        )
+        compressedValues = try MLX.turboQuantMetalEncodeAttention(
+            decodedValues,
+            configuration: valueConfiguration,
+            capacity: capacity,
+            logicalLength: offset
+        )
     }
 
     private func expandCompressedCode(
@@ -690,6 +757,10 @@ public final class RotatingTurboQuantKVCache: BaseKVCache, QuantizedKVCacheProto
             lastUnsupportedShape = "query heads must be a multiple of KV heads"
             return false
         }
+        if compressedKeys == nil, offset > 0, rawFallbackCache != nil {
+            lastUnsupportedShape = "raw fallback cache already owns previous rotating context"
+            return false
+        }
         let keyCode = compressedKeys ?? placeholderCode(for: keys, role: .key)
         let supportsTiled = prefersOnlineFusedAttention && MLX.turboQuantMetalSupportsOnlineFusedAttention(
             queries: queries,
@@ -849,6 +920,9 @@ public final class RotatingTurboQuantKVCache: BaseKVCache, QuantizedKVCacheProto
                     residualSigns: newValue[8],
                     scales: newValue[9]
                 )
+            } else if newValue.count == 10 {
+                lastUnsupportedShape =
+                    "compressed rotating TurboQuant state restored without Metal attention support"
             } else {
                 let rawCache = materializedRawFallbackCache()
                 rawCache.state = newValue
@@ -1063,6 +1137,11 @@ public final class RotatingTurboQuantKVCache: BaseKVCache, QuantizedKVCacheProto
 
     private func ensureCompressedStorage(keys: MLXArray, values: MLXArray) throws {
         if compressedKeys != nil, compressedValues != nil { return }
+        if offset > 0, rawFallbackCache != nil {
+            throw TurboQuantCacheError.compressedBackfillUnavailable(
+                "rotating raw fallback cache already owns \(offset) previous tokens"
+            )
+        }
         let logicalLength = min(offset, maxCacheSize)
         let keyLayout = try MLX.turboQuantAttentionLayout(
             for: keys,
@@ -1172,6 +1251,132 @@ public final class RotatingTurboQuantKVCache: BaseKVCache, QuantizedKVCacheProto
     }
 }
 
+public extension RotatingKVCache {
+    func toTurboQuant(
+        preset: TurboQuantPreset = .turbo3_5,
+        groupSize: Int = 64,
+        mode: QuantizationMode = .affine,
+        backend: TurboQuantBackend = .mlxPacked,
+        optimizationPolicy: TurboQuantOptimizationPolicy = .auto,
+        seed: UInt64 = 0x9E37_79B9_7F4A_7C15
+    ) -> RotatingTurboQuantKVCache {
+        guard let maxSize else {
+            fatalError("RotatingKVCache requires maxSize for TurboQuant conversion")
+        }
+
+        let cache = RotatingTurboQuantKVCache(
+            maxSize: maxSize,
+            keep: rotatingKeep,
+            step: rotatingStep,
+            preset: preset,
+            groupSize: groupSize,
+            mode: mode,
+            backend: backend,
+            optimizationPolicy: optimizationPolicy,
+            seed: seed
+        )
+        cache.offset = offset
+        cache.metaState = metaState
+
+        let currentState = state
+        guard currentState.count == 2 else { return cache }
+
+        if cache.activeBackend == .metalPolarQJL,
+            TurboQuantKernelAvailability.current.supportsMetalPolarQJLAttention
+        {
+            do {
+                let keyConfiguration = TurboQuantConfiguration(
+                    preset: preset,
+                    role: .key,
+                    groupSize: groupSize,
+                    mode: mode,
+                    backend: cache.activeBackend,
+                    seed: seed
+                )
+                let valueConfiguration = TurboQuantConfiguration(
+                    preset: preset,
+                    role: .value,
+                    groupSize: groupSize,
+                    mode: mode,
+                    backend: cache.activeBackend,
+                    seed: seed ^ turboQuantValueSeedSalt
+                )
+                let keys = turboQuantPhysicalizedState(currentState[0], maxSize: maxSize)
+                let values = turboQuantPhysicalizedState(currentState[1], maxSize: maxSize)
+                let logicalLength = min(offset, maxSize)
+                let pinnedPrefixLength = min(rotatingKeep, maxSize)
+                let keyCode = try MLX.turboQuantMetalEncodeAttention(
+                    keys,
+                    configuration: keyConfiguration,
+                    capacity: maxSize,
+                    logicalLength: logicalLength,
+                    ringOffset: rotatingRingOffset,
+                    pinnedPrefixLength: pinnedPrefixLength
+                )
+                let valueCode = try MLX.turboQuantMetalEncodeAttention(
+                    values,
+                    configuration: valueConfiguration,
+                    capacity: maxSize,
+                    logicalLength: logicalLength,
+                    ringOffset: rotatingRingOffset,
+                    pinnedPrefixLength: pinnedPrefixLength
+                )
+                cache.state = [
+                    keyCode.packedMagnitudes,
+                    keyCode.signs,
+                    keyCode.highPrecisionMask,
+                    keyCode.residualSigns,
+                    keyCode.scales,
+                    valueCode.packedMagnitudes,
+                    valueCode.signs,
+                    valueCode.highPrecisionMask,
+                    valueCode.residualSigns,
+                    valueCode.scales,
+                ]
+                cache.metaState = metaState
+                return cache
+            } catch {
+                cache.recordCompressedAttentionFailure(String(describing: error))
+            }
+        }
+
+        cache.metaState = metaState
+        cache.state = currentState
+        cache.metaState = metaState
+        return cache
+    }
+
+    private func turboQuantPhysicalizedState(_ array: MLXArray, maxSize: Int) -> MLXArray {
+        let length = array.dim(2)
+        guard length > maxSize else { return array }
+
+        let pinned = min(rotatingKeep, maxSize)
+        let ringCapacity = maxSize - pinned
+        let physical = MLXArray.zeros(
+            [array.dim(0), array.dim(1), maxSize, array.dim(3)],
+            dtype: array.dtype
+        )
+
+        if pinned > 0 {
+            let prefixLength = min(pinned, length)
+            physical[.ellipsis, 0 ..< prefixLength, 0...] =
+                array[.ellipsis, 0 ..< prefixLength, 0...]
+        }
+
+        guard ringCapacity > 0 else { return physical }
+
+        let ringCount = min(ringCapacity, max(0, length - pinned))
+        let sourceStart = length - ringCount
+        for logical in 0 ..< ringCount {
+            let source = sourceStart + logical
+            let target = pinned + ((rotatingRingOffset + logical) % ringCapacity)
+            physical[.ellipsis, target ..< (target + 1), 0...] =
+                array[.ellipsis, source ..< (source + 1), 0...]
+        }
+        return physical
+    }
+}
+
 public extension KVCacheSimple {
     func toTurboQuant(
         preset: TurboQuantPreset = .turbo3_5,
@@ -1215,6 +1420,36 @@ public extension KVCacheSimple {
                 keys.weight, keys.scales, keys.biases,
                 values.weight, values.scales, values.biases,
             ].compactMap { $0 }
+            if cache.activeBackend == .metalPolarQJL,
+                TurboQuantKernelAvailability.current.supportsMetalPolarQJLAttention
+            {
+                do {
+                    let keyCode = try MLX.turboQuantMetalEncodeAttention(
+                        currentState[0],
+                        configuration: keyConfiguration,
+                        logicalLength: self.offset
+                    )
+                    let valueCode = try MLX.turboQuantMetalEncodeAttention(
+                        currentState[1],
+                        configuration: valueConfiguration,
+                        logicalLength: self.offset
+                    )
+                    cache.state = [
+                        keyCode.packedMagnitudes,
+                        keyCode.signs,
+                        keyCode.highPrecisionMask,
+                        keyCode.residualSigns,
+                        keyCode.scales,
+                        valueCode.packedMagnitudes,
+                        valueCode.signs,
+                        valueCode.highPrecisionMask,
+                        valueCode.residualSigns,
+                        valueCode.scales,
+                    ]
+                } catch {
+                    cache.recordCompressedAttentionFailure(String(describing: error))
+                }
+            }
         }
 
         return cache

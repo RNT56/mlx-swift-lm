@@ -1007,15 +1007,14 @@ enum Qwen35Language {
             return LMOutput(logits: out)
         }
 
-        func makeCache(maxKVSize: Int?) -> [KVCache] {
+        func makeCache(parameters: GenerateParameters?) -> [KVCache] {
             model.layers.map { layer in
                 if layer.isLinear {
                     return MambaCache()
                 }
-                if let maxKVSize {
-                    return RotatingKVCache(maxSize: maxKVSize, keep: 4)
-                }
-                return KVCacheSimple()
+                return makeAttentionKVCache(
+                    parameters: parameters
+                )
             }
         }
     }
@@ -1043,7 +1042,7 @@ public class Qwen35: Module, VLMModel {
     }
 
     public func newCache(parameters: GenerateParameters?) -> [KVCache] {
-        languageModel.makeCache(maxKVSize: parameters?.maxKVSize)
+        languageModel.makeCache(parameters: parameters)
     }
 
     private func mergeInputIdsWithImageFeatures(

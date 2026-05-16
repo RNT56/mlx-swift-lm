@@ -498,12 +498,16 @@ public class Qwen3NextModel: Module, LLMModel, KVCacheDimensionProvider {
             if layer.isLinear {
                 return MambaCache()
             }
-            return KVCacheSimple()
+            return makeAttentionKVCache(parameters: parameters)
         }
     }
 
     public func makeCache() -> [KVCache] {
-        return newCache(parameters: nil)
+        makeCache(parameters: nil)
+    }
+
+    public func makeCache(parameters: GenerateParameters?) -> [KVCache] {
+        newCache(parameters: parameters)
     }
 
     public func sanitize(weights: [String: MLXArray]) -> [String: MLXArray] {

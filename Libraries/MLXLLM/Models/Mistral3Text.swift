@@ -353,9 +353,10 @@ public class Mistral3TextModel: Module, LLMModel, KVCacheDimensionProvider {
     public func newCache(parameters: GenerateParameters?) -> [KVCache] {
         return model.layers.map { layer in
             if layer.useSliding, let slidingWindow = args.slidingWindow {
-                return RotatingKVCache(maxSize: slidingWindow)
+                return makeAttentionKVCache(
+                    parameters: parameters, maxKVSize: slidingWindow, keep: 0)
             } else {
-                return KVCacheSimple()
+                return makeAttentionKVCache(parameters: parameters)
             }
         }
     }

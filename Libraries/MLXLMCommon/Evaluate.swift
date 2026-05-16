@@ -653,28 +653,29 @@ public struct TokenIterator: TokenIteratorProtocol {
     ///   - sampler: the logit sampler
     ///   - prefillStepSize: optional prefill step size
     ///   - maxTokens: maximum number of tokens to generate
+    ///   - cacheParameters: optional KV-cache construction and quantization parameters
     public init(
         input: LMInput, model: any LanguageModel, cache: [KVCache]? = nil,
         processor: LogitProcessor?, sampler: LogitSampler, prefillStepSize: Int = 512,
-        maxTokens: Int? = nil
+        maxTokens: Int? = nil,
+        cacheParameters: GenerateParameters? = nil
     ) throws {
         self.model = model
         self.y = input.text
-        self.cache = cache ?? model.newCache(parameters: nil)
+        self.cache = cache ?? model.newCache(parameters: cacheParameters)
 
         self.processor = processor
         self.sampler = sampler
         self.maxTokens = maxTokens
 
-        // No cache quantization for this direct initialization
-        self.kvBits = nil
-        self.kvGroupSize = 64
-        self.quantizedKVStart = 0
-        self.kvCacheStrategy = .none
-        self.turboQuantPreset = .turbo3_5
-        self.turboQuantBackend = .mlxPacked
-        self.turboQuantOptimizationPolicy = .auto
-        self.turboQuantSeed = nil
+        self.kvBits = cacheParameters?.kvBits
+        self.kvGroupSize = cacheParameters?.kvGroupSize ?? 64
+        self.quantizedKVStart = cacheParameters?.quantizedKVStart ?? 0
+        self.kvCacheStrategy = cacheParameters?.kvCacheStrategy ?? .none
+        self.turboQuantPreset = cacheParameters?.turboQuantPreset ?? .turbo3_5
+        self.turboQuantBackend = cacheParameters?.turboQuantBackend ?? .mlxPacked
+        self.turboQuantOptimizationPolicy = cacheParameters?.turboQuantOptimizationPolicy ?? .auto
+        self.turboQuantSeed = cacheParameters?.turboQuantSeed
 
         self.promptPrefillTime = try measure {
             try prepare(input: input, windowSize: prefillStepSize)

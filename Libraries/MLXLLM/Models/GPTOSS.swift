@@ -526,10 +526,11 @@ public class GPTOSSModel: Module, LLMModel, KVCacheDimensionProvider {
 
         for lt in model.layerTypes {
             if lt == "full_attention" {
-                caches.append(StandardKVCache())
+                caches.append(makeAttentionKVCache(parameters: parameters))
             } else {
                 caches.append(
-                    RotatingKVCache(maxSize: configuration.slidingWindow, keep: 0)
+                    makeAttentionKVCache(
+                        parameters: parameters, maxKVSize: configuration.slidingWindow, keep: 0)
                 )
             }
         }

@@ -583,7 +583,7 @@ public class Qwen35TextModel: Module, LLMModel, KVCacheDimensionProvider {
             if layer.isLinear {
                 return MambaCache()
             }
-            return KVCacheSimple()
+            return makeAttentionKVCache(parameters: parameters)
         }
     }
 
