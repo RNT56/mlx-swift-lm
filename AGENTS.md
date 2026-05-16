@@ -8,13 +8,14 @@ This repository is the `RNT56/mlx-swift-lm` fork used by Schtack projects. Treat
 - `schtack/turboquant-kv` intentionally points at the same commit as `main`. Keep this branch as a named integration branch for Schtack work.
 - Do not assume older topic branches are active. Most remote branches are historical experiments or upstream maintenance work.
 
-As of 2026-05-16, the expected active commit is:
+As of 2026-05-16, active branches should contain this expected code baseline:
 
 ```text
-mlx-swift-lm main / schtack/turboquant-kv:
 4bb7cbc6aafdf6abec4c34bf36f9e649444539f7
 Pin mlx-swift to Metal fallback revision
 ```
+
+Branch heads may be later docs-only or maintenance commits, but they should not drop this baseline unless the fork stack is intentionally rebuilt.
 
 ## Dependency Stack
 
