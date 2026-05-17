@@ -130,7 +130,8 @@ func testCacheSerialization(creator: (() -> any KVCache)) async throws {
             kvCacheStrategy: .turboQuant,
             turboQuantPreset: .turbo3_5,
             turboQuantBackend: .metalPolarQJL,
-            turboQuantOptimizationPolicy: .preferThroughput
+            turboQuantOptimizationPolicy: .preferThroughput,
+            turboQuantSeed: 0xDEAD_BEEF_0000_0017
         )
 
         #expect(cache[0] is TurboQuantKVCache)
@@ -138,6 +139,7 @@ func testCacheSerialization(creator: (() -> any KVCache)) async throws {
         #expect(turbo.preset == .turbo3_5)
         #expect(turbo.requestedBackend == .metalPolarQJL)
         #expect(turbo.optimizationPolicy == .preferThroughput)
+        #expect(turbo.seed == 0xDEAD_BEEF_0000_0017)
         #expect(turbo.diagnostics.optimizationPolicy == .preferThroughput)
         #expect(turbo.diagnostics.selectedKernelProfile == TurboQuantKernelAvailability.current.selectedKernelProfile)
         let expectedBackend: TurboQuantBackend =
