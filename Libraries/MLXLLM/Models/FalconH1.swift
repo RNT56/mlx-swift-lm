@@ -306,16 +306,13 @@ class FalconH1Attention: Module {
         queries = applyRotaryPosition(rope, to: queries, offset: offset)
         keys = applyRotaryPosition(rope, to: keys, offset: offset)
 
-        if let cache {
-            (keys, values) = cache.update(keys: keys, values: values)
-        }
-
-        var output = MLXFast.scaledDotProductAttention(
+        var output = attentionWithCacheUpdate(
             queries: queries,
             keys: keys,
             values: values,
+            cache: cache,
             scale: scale,
-            mask: mask
+            mask: mask.map { .array($0) } ?? .none
         )
 
         output = output.transposed(0, 2, 1, 3).reshaped(B, L, -1)

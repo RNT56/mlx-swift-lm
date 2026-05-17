@@ -227,18 +227,12 @@ private class ApertusAttention: Module {
         queries = applyRotaryPosition(rope, to: queries, offset: offset)
         keys = applyRotaryPosition(rope, to: keys, offset: offset)
 
-        if let cache = cache {
-            // Update cache (expects [B, H, L, D])
-            let (k, v) = cache.update(keys: keys, values: values)
-            keys = k
-            values = v
-        }
-
         // 5. Attention (SDPA expects [B, H, L, D])
-        let output = MLXFast.scaledDotProductAttention(
+        let output = attentionWithCacheUpdate(
             queries: queries,
             keys: keys,
             values: values,
+            cache: cache,
             scale: scale,
             mask: mask
         )

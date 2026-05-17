@@ -194,6 +194,31 @@ func testCacheSerialization(creator: (() -> any KVCache)) async throws {
     #expect(rotating.diagnostics.selfTestStatus == TurboQuantKernelAvailability.current.selfTestStatus)
 }
 
+@Test func testAttentionWithCacheUpdateSupportsSinksWithTurboQuantCache() {
+    guard TurboQuantKernelAvailability.current.supportsMetalPolarQJLCodec else { return }
+
+    Device.withDefaultDevice(.cpu) {
+        let cache = TurboQuantKVCache()
+        let queries = MLXArray.ones([1, 2, 1, 64], dtype: .float32)
+        let keys = MLXArray.ones([1, 2, 1, 64], dtype: .float32)
+        let values = MLXArray.ones([1, 2, 1, 64], dtype: .float32)
+        let sinks = MLXArray.zeros([2], dtype: .float32)
+
+        let output = attentionWithCacheUpdate(
+            queries: queries,
+            keys: keys,
+            values: values,
+            cache: cache,
+            scale: 0.125,
+            sinks: sinks
+        )
+
+        #expect(output.shape == [1, 2, 1, 64])
+        #expect(cache.offset == 1)
+        #expect(cache.attentionDiagnostics.activeAttentionPath == .mlxPackedFallback)
+    }
+}
+
 @Test func testTurboQuantCompressedAttentionStateWhenAvailable() throws {
     guard TurboQuantKernelAvailability.current.supportsMetalPolarQJLAttention else { return }
 
