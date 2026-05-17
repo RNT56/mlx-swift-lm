@@ -1156,7 +1156,9 @@ public class RotatingQuantizedKVCache: QuantizedKVCache {
         }
     }
 
-    private func assign(_ update: QuantizedTuple, to storage: inout QuantizedTuple, range: Range<Int>) {
+    private func assign(
+        _ update: QuantizedTuple, to storage: inout QuantizedTuple, range: Range<Int>
+    ) {
         storage.0[.ellipsis, range, 0...] = update.0
         storage.1[.ellipsis, range, 0...] = update.1
         if let updateBiases = update.2 {
@@ -1253,8 +1255,12 @@ public class RotatingQuantizedKVCache: QuantizedKVCache {
     public override func update(keys: MLXArray, values: MLXArray) -> (MLXArray, MLXArray) {
         let (qKeys, qValues) = updateQuantized(keys: keys, values: values)
         return (
-            dequantized(qKeys.0, scales: qKeys.1, biases: qKeys.2, groupSize: groupSize, bits: bits, mode: mode),
-            dequantized(qValues.0, scales: qValues.1, biases: qValues.2, groupSize: groupSize, bits: bits, mode: mode)
+            dequantized(
+                qKeys.0, scales: qKeys.1, biases: qKeys.2, groupSize: groupSize, bits: bits,
+                mode: mode),
+            dequantized(
+                qValues.0, scales: qValues.1, biases: qValues.2, groupSize: groupSize, bits: bits,
+                mode: mode)
         )
     }
 
@@ -1348,7 +1354,8 @@ public class RotatingQuantizedKVCache: QuantizedKVCache {
         let decodedKeys = dequantized(
             keys.0, scales: keys.1, biases: keys.2, groupSize: groupSize, bits: bits, mode: mode)
         let decodedValues = dequantized(
-            values.0, scales: values.1, biases: values.2, groupSize: groupSize, bits: bits, mode: mode)
+            values.0, scales: values.1, biases: values.2, groupSize: groupSize, bits: bits,
+            mode: mode)
         cache.state = [decodedKeys, decodedValues]
         return cache
     }
@@ -1886,8 +1893,11 @@ private func restoreCacheFromMetaState(
             metaState.count > 4 ? TurboQuantPreset(rawValue: metaState[4]) ?? .turbo3_5 : .turbo3_5
         let groupSize = metaState.count > 2 ? Int(metaState[2]) ?? 64 : 64
         let backend =
-            metaState.count > 5 ? TurboQuantBackend(rawValue: metaState[5]) ?? .mlxPacked : .mlxPacked
-        let seed = metaState.count > 6 ? UInt64(metaState[6]) ?? defaultTurboQuantSeed : defaultTurboQuantSeed
+            metaState.count > 5
+            ? TurboQuantBackend(rawValue: metaState[5]) ?? .mlxPacked : .mlxPacked
+        let seed =
+            metaState.count > 6
+            ? UInt64(metaState[6]) ?? defaultTurboQuantSeed : defaultTurboQuantSeed
         let cache = TurboQuantKVCache(
             preset: preset,
             groupSize: groupSize,
@@ -1898,7 +1908,8 @@ private func restoreCacheFromMetaState(
         if state.count == 10, cache.activeBackend != .metalPolarQJL {
             throw KVCacheError(
                 message:
-                    "Cannot restore compressed TurboQuantKVCache without a verified Metal TurboQuant backend")
+                    "Cannot restore compressed TurboQuantKVCache without a verified Metal TurboQuant backend"
+            )
         }
         cache.state = state
         cache.metaState = metaState
@@ -1918,8 +1929,11 @@ private func restoreCacheFromMetaState(
         let preset = TurboQuantPreset(rawValue: metaState[5]) ?? .turbo3_5
         let groupSize = Int(metaState[6]) ?? 64
         let backend =
-            metaState.count > 7 ? TurboQuantBackend(rawValue: metaState[7]) ?? .mlxPacked : .mlxPacked
-        let seed = metaState.count > 8 ? UInt64(metaState[8]) ?? defaultTurboQuantSeed : defaultTurboQuantSeed
+            metaState.count > 7
+            ? TurboQuantBackend(rawValue: metaState[7]) ?? .mlxPacked : .mlxPacked
+        let seed =
+            metaState.count > 8
+            ? UInt64(metaState[8]) ?? defaultTurboQuantSeed : defaultTurboQuantSeed
         let cache = RotatingTurboQuantKVCache(
             maxSize: maxSize,
             keep: keep,
@@ -1933,7 +1947,8 @@ private func restoreCacheFromMetaState(
         if state.count == 10, cache.activeBackend != .metalPolarQJL {
             throw KVCacheError(
                 message:
-                    "Cannot restore compressed RotatingTurboQuantKVCache without a verified Metal TurboQuant backend")
+                    "Cannot restore compressed RotatingTurboQuantKVCache without a verified Metal TurboQuant backend"
+            )
         }
         cache.state = state
         cache.metaState = metaState
@@ -2077,7 +2092,7 @@ public func makePromptCacheWithLayerCount(
 ) -> [KVCache] {
     if parameters?.kvCacheStrategy == .turboQuant {
         let preset = parameters?.turboQuantPreset ?? .turbo3_5
-        let backend = parameters?.turboQuantBackend ?? .mlxPacked
+        let backend = parameters?.turboQuantBackend ?? .metalPolarQJL
         let groupSize = parameters?.kvGroupSize ?? 64
         let policy = parameters?.turboQuantOptimizationPolicy ?? .auto
         let seed = parameters?.turboQuantSeed ?? defaultTurboQuantSeed
@@ -2121,7 +2136,7 @@ public func makeAttentionKVCache(
 ) -> KVCache {
     if parameters?.kvCacheStrategy == .turboQuant {
         let preset = parameters?.turboQuantPreset ?? .turbo3_5
-        let backend = parameters?.turboQuantBackend ?? .mlxPacked
+        let backend = parameters?.turboQuantBackend ?? .metalPolarQJL
         let groupSize = parameters?.kvGroupSize ?? 64
         let policy = parameters?.turboQuantOptimizationPolicy ?? .auto
         let seed = parameters?.turboQuantSeed ?? defaultTurboQuantSeed
@@ -2224,11 +2239,11 @@ public func quantizedScaledDotProductAttention(
         let kIndices = MLXArray(0 ..< kL)
         let causalMask = greaterEqual(
             expandedDimensions(qIndices, axis: -1), expandedDimensions(kIndices, axis: -2))
-        scores = MLX.where(causalMask, scores, MLXArray(Float.leastNormalMagnitude))
+        scores = MLX.where(causalMask, scores, MLXArray(-Float.greatestFiniteMagnitude))
 
     case .array(let maskArray):
         if maskArray.dtype == .bool {
-            scores = MLX.where(maskArray, scores, MLXArray(Float.leastNormalMagnitude))
+            scores = MLX.where(maskArray, scores, MLXArray(-Float.greatestFiniteMagnitude))
         } else {
             scores = scores + maskArray
         }
@@ -2237,7 +2252,7 @@ public func quantizedScaledDotProductAttention(
         // Handle multiple mask arrays - just use the first one for simplicity
         if let maskArray = maskArrays.first {
             if maskArray.dtype == .bool {
-                scores = MLX.where(maskArray, scores, MLXArray(Float.leastNormalMagnitude))
+                scores = MLX.where(maskArray, scores, MLXArray(-Float.greatestFiniteMagnitude))
             } else {
                 scores = scores + maskArray
             }
@@ -2285,7 +2300,7 @@ public func maybeQuantizeKVCache(
     quantizedKVStart: Int = 0,
     kvCacheStrategy: KVCacheStrategy = .mlxAffine,
     turboQuantPreset: TurboQuantPreset = .turbo3_5,
-    turboQuantBackend: TurboQuantBackend = .mlxPacked,
+    turboQuantBackend: TurboQuantBackend = .metalPolarQJL,
     turboQuantOptimizationPolicy: TurboQuantOptimizationPolicy = .auto,
     turboQuantSeed: UInt64? = nil
 ) {

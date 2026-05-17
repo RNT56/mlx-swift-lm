@@ -125,7 +125,7 @@ public struct GenerateParameters: Sendable {
         quantizedKVStart: Int = 0,
         kvCacheStrategy: KVCacheStrategy = .mlxAffine,
         turboQuantPreset: TurboQuantPreset = .turbo3_5,
-        turboQuantBackend: TurboQuantBackend = .mlxPacked,
+        turboQuantBackend: TurboQuantBackend = .metalPolarQJL,
         turboQuantOptimizationPolicy: TurboQuantOptimizationPolicy = .auto,
         turboQuantSeed: UInt64? = nil,
         temperature: Float = 0.6,
@@ -673,7 +673,7 @@ public struct TokenIterator: TokenIteratorProtocol {
         self.quantizedKVStart = cacheParameters?.quantizedKVStart ?? 0
         self.kvCacheStrategy = cacheParameters?.kvCacheStrategy ?? .none
         self.turboQuantPreset = cacheParameters?.turboQuantPreset ?? .turbo3_5
-        self.turboQuantBackend = cacheParameters?.turboQuantBackend ?? .mlxPacked
+        self.turboQuantBackend = cacheParameters?.turboQuantBackend ?? .metalPolarQJL
         self.turboQuantOptimizationPolicy = cacheParameters?.turboQuantOptimizationPolicy ?? .auto
         self.turboQuantSeed = cacheParameters?.turboQuantSeed
 
