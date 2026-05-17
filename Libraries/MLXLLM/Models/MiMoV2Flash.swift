@@ -11,70 +11,6 @@ import MLX
 import MLXLMCommon
 import MLXNN
 
-private func attentionWithCacheUpdateAndSinks(
-    queries: MLXArray,
-    keys: MLXArray,
-    values: MLXArray,
-    cache: KVCache?,
-    scale: Float,
-    mask: MLXFast.ScaledDotProductAttentionMaskMode = .none,
-    sinks: MLXArray? = nil
-) -> MLXArray {
-    guard let cache else {
-        return MLXFast.scaledDotProductAttention(
-            queries: queries,
-            keys: keys,
-            values: values,
-            scale: scale,
-            mask: mask,
-            sinks: sinks
-        )
-    }
-
-    if let quantizedKVCache = cache as? QuantizedKVCacheProtocol {
-        let (quantizedKeys, quantizedValues) = quantizedKVCache.updateQuantized(
-            keys: keys, values: values)
-        if sinks != nil {
-            let decodedKeys = dequantized(
-                quantizedKeys.0, scales: quantizedKeys.1, biases: quantizedKeys.2,
-                groupSize: quantizedKVCache.groupSize, bits: quantizedKVCache.bits,
-                mode: quantizedKVCache.mode)
-            let decodedValues = dequantized(
-                quantizedValues.0, scales: quantizedValues.1, biases: quantizedValues.2,
-                groupSize: quantizedKVCache.groupSize, bits: quantizedKVCache.bits,
-                mode: quantizedKVCache.mode)
-            return MLXFast.scaledDotProductAttention(
-                queries: queries,
-                keys: decodedKeys,
-                values: decodedValues,
-                scale: scale,
-                mask: mask,
-                sinks: sinks
-            )
-        }
-        return quantizedScaledDotProductAttention(
-            queries: queries,
-            quantizedKeys: quantizedKeys,
-            quantizedValues: quantizedValues,
-            scale: scale,
-            mask: mask,
-            groupSize: quantizedKVCache.groupSize,
-            bits: quantizedKVCache.bits,
-            mode: quantizedKVCache.mode
-        )
-    } else {
-        let (cachedKeys, cachedValues) = cache.update(keys: keys, values: values)
-        return MLXFast.scaledDotProductAttention(
-            queries: queries,
-            keys: cachedKeys,
-            values: cachedValues,
-            scale: scale,
-            mask: mask,
-            sinks: sinks
-        )
-    }
-}
-
 private func groupExpertSelect(
     gates: MLXArray,
     eScoreCorrectionBias: MLXArray,
@@ -190,7 +126,7 @@ class MiMoV2FlashAttention: Module {
         q = applyRotaryPosition(rope, to: q, offset: offset)
         k = applyRotaryPosition(rope, to: k, offset: offset)
 
-        let output = attentionWithCacheUpdateAndSinks(
+        let output = attentionWithCacheUpdate(
             queries: q,
             keys: k,
             values: v,

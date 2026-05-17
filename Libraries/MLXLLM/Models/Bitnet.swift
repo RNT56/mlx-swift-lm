@@ -319,14 +319,11 @@ class BitnetAttention: Module {
         queries = applyRotaryPosition(rope, to: queries, offset: offset)
         keys = applyRotaryPosition(rope, to: keys, offset: offset)
 
-        if let cache {
-            (keys, values) = cache.update(keys: keys, values: values)
-        }
-
-        let output = MLXFast.scaledDotProductAttention(
+        let output = attentionWithCacheUpdate(
             queries: queries,
             keys: keys,
             values: values,
+            cache: cache,
             scale: scale,
             mask: mask
         )

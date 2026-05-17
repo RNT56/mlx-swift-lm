@@ -115,7 +115,7 @@ class BaichuanM1Attention: Module {
 
         var lastK: MLXArray? = nil
         var lastV: MLXArray? = nil
-        let kvSubCache: KVCache? = (cache as? CacheList)?[1]
+        let kvCache: KVCache? = (cache as? CacheList)?[1]
 
         if let cacheList = cache as? CacheList {
             if let mambaCache = cacheList[0] as? MambaCache {
@@ -130,28 +130,26 @@ class BaichuanM1Attention: Module {
         keys = customConvolution(keys, convK, state: lastK)
         values = customConvolution(values, convV, state: lastV)
 
-        let offset = kvSubCache?.ropeOffset
+        let offset = kvCache?.ropeOffset
         queries = applyRotaryPosition(rope, to: queries, offset: offset)
         keys = applyRotaryPosition(rope, to: keys, offset: offset)
 
-        if let cache = cache as? CacheList {
-            let kvCache = cache[1]
-            let (cachedKeys, cachedValues) = kvCache.update(keys: keys, values: values)
-            keys = cachedKeys
-            values = cachedValues
-
-            if L > 0 {
-                let convCache = cache[0] as! MambaCache
-                convCache[0] = kInit[0..., 0..., (L - 1)..., 0...]
-                convCache[1] = vInit[0..., 0..., (L - 1)..., 0...]
-            }
-        }
-
-        let out = MLXFast.scaledDotProductAttention(
-            queries: queries, keys: keys, values: values, scale: scale, mask: mask
+        let out = attentionWithCacheUpdate(
+            queries: queries,
+            keys: keys,
+            values: values,
+            cache: kvCache,
+            scale: scale,
+            mask: mask
         )
         .transposed(0, 2, 1, 3)
         .reshaped(B, L, -1)
+
+        if let cache = cache as? CacheList, L > 0 {
+            let convCache = cache[0] as! MambaCache
+            convCache[0] = kInit[0..., 0..., (L - 1)..., 0...]
+            convCache[1] = vInit[0..., 0..., (L - 1)..., 0...]
+        }
 
         return oProj(out)
     }
