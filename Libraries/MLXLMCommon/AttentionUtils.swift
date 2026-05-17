@@ -33,8 +33,9 @@ import MLX
 ///   - cache: Cache instance (any type)
 ///   - scale: Attention scale factor
 ///   - mask: Attention mask
-///   - sinks: Optional attention sinks. Compressed TurboQuant attention does not support sinks yet,
-///     so sink-enabled calls use the packed/dequantized fallback paths.
+///   - sinks: Optional attention sinks. Compressed TurboQuant applies sinks through the
+///     two-stage path and uses the packed/dequantized fallback when compressed kernels
+///     are unavailable.
 /// - Returns: Attention output [B, nHeads, L, D]
 public func attentionWithCacheUpdate(
     queries: MLXArray,
@@ -55,11 +56,7 @@ public func attentionWithCacheUpdate(
             sinks: sinks
         )
     }
-    if sinks != nil, let turboQuantCache = cache as? TurboQuantCompressedKVCacheProtocol {
-        turboQuantCache.recordCompressedAttentionFailure("attention sinks use packed fallback")
-    }
-    if sinks == nil,
-        var turboQuantCache = cache as? TurboQuantCompressedKVCacheProtocol,
+    if var turboQuantCache = cache as? TurboQuantCompressedKVCacheProtocol,
         turboQuantCache.supportsCompressedAttention(
             queries: queries,
             keys: keys,
@@ -81,6 +78,7 @@ public func attentionWithCacheUpdate(
                 valueCode: compressedValues,
                 scale: scale,
                 mask: mask,
+                sinks: sinks,
                 preferOnlineFused: turboQuantCache.prefersOnlineFusedAttention,
                 kernelProfile: turboQuantCache.attentionDiagnostics.selectedKernelProfile
             )

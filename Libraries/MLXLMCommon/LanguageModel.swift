@@ -223,7 +223,7 @@ extension LanguageModel where Self: KVCacheDimensionProvider {
 
         if parameters?.kvCacheStrategy == .turboQuant {
             let preset = parameters?.turboQuantPreset ?? .turbo3_5
-            let backend = parameters?.turboQuantBackend ?? .mlxPacked
+            let backend = parameters?.turboQuantBackend ?? .metalPolarQJL
             let groupSize = parameters?.kvGroupSize ?? 64
             let policy = parameters?.turboQuantOptimizationPolicy ?? .auto
             let seed = parameters?.turboQuantSeed ?? defaultTurboQuantSeed

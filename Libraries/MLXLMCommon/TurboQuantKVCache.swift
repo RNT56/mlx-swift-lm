@@ -126,7 +126,7 @@ public final class TurboQuantKVCache: QuantizedKVCache, TurboQuantCompressedKVCa
         preset: TurboQuantPreset = .turbo3_5,
         groupSize: Int = 64,
         mode: QuantizationMode = .affine,
-        backend: TurboQuantBackend = .mlxPacked,
+        backend: TurboQuantBackend = .metalPolarQJL,
         optimizationPolicy: TurboQuantOptimizationPolicy = .auto,
         seed: UInt64 = 0x9E37_79B9_7F4A_7C15
     ) {
@@ -341,8 +341,8 @@ public final class TurboQuantKVCache: QuantizedKVCache, TurboQuantCompressedKVCa
             lastUnsupportedShape = "queries/keys/values must be rank 4"
             return false
         }
-        guard queries.dim(0) == 1, keys.dim(0) == 1, values.dim(0) == 1 else {
-            lastUnsupportedShape = "batch sizes greater than 1 use packed fallback"
+        guard queries.dim(0) == keys.dim(0), queries.dim(0) == values.dim(0) else {
+            lastUnsupportedShape = "query/key/value batch sizes must match"
             return false
         }
         guard [64, 80, 96, 128, 256].contains(queries.dim(3)),
@@ -393,12 +393,12 @@ public final class TurboQuantKVCache: QuantizedKVCache, TurboQuantCompressedKVCa
         let encodedKeys = try MLX.turboQuantMetalEncodeAttention(
             keys,
             configuration: keyConfiguration,
-            stream: .default
+            stream: .gpu
         )
         let encodedValues = try MLX.turboQuantMetalEncodeAttention(
             values,
             configuration: valueConfiguration,
-            stream: .default
+            stream: .gpu
         )
 
         var currentKeys = compressedKeys!
@@ -637,7 +637,7 @@ public final class RotatingTurboQuantKVCache: BaseKVCache, QuantizedKVCacheProto
         preset: TurboQuantPreset = .turbo3_5,
         groupSize: Int = 64,
         mode: QuantizationMode = .affine,
-        backend: TurboQuantBackend = .mlxPacked,
+        backend: TurboQuantBackend = .metalPolarQJL,
         optimizationPolicy: TurboQuantOptimizationPolicy = .auto,
         seed: UInt64 = 0x9E37_79B9_7F4A_7C15
     ) {
@@ -740,8 +740,8 @@ public final class RotatingTurboQuantKVCache: BaseKVCache, QuantizedKVCacheProto
             lastUnsupportedShape = "queries/keys/values must be rank 4"
             return false
         }
-        guard queries.dim(0) == 1, keys.dim(0) == 1, values.dim(0) == 1 else {
-            lastUnsupportedShape = "batch sizes greater than 1 use packed fallback"
+        guard queries.dim(0) == keys.dim(0), queries.dim(0) == values.dim(0) else {
+            lastUnsupportedShape = "query/key/value batch sizes must match"
             return false
         }
         guard [64, 80, 96, 128, 256].contains(queries.dim(3)),
@@ -1251,7 +1251,7 @@ public extension RotatingKVCache {
         preset: TurboQuantPreset = .turbo3_5,
         groupSize: Int = 64,
         mode: QuantizationMode = .affine,
-        backend: TurboQuantBackend = .mlxPacked,
+        backend: TurboQuantBackend = .metalPolarQJL,
         optimizationPolicy: TurboQuantOptimizationPolicy = .auto,
         seed: UInt64 = 0x9E37_79B9_7F4A_7C15
     ) -> RotatingTurboQuantKVCache {
@@ -1377,7 +1377,7 @@ public extension KVCacheSimple {
         preset: TurboQuantPreset = .turbo3_5,
         groupSize: Int = 64,
         mode: QuantizationMode = .affine,
-        backend: TurboQuantBackend = .mlxPacked,
+        backend: TurboQuantBackend = .metalPolarQJL,
         optimizationPolicy: TurboQuantOptimizationPolicy = .auto,
         seed: UInt64 = 0x9E37_79B9_7F4A_7C15
     ) -> TurboQuantKVCache {
