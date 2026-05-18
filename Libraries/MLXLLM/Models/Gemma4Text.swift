@@ -659,10 +659,10 @@ public class Gemma4TextModel: Module, LLMModel, KVCacheDimensionProvider {
         var caches = [any KVCache]()
         for i in 0 ..< firstKvShared {
             if config.layerTypes[i] == "full_attention" {
-                caches.append(makeAttentionKVCache(parameters: parameters))
+                caches.append(makeRawAttentionKVCache(parameters: parameters))
             } else {
                 caches.append(
-                    makeAttentionKVCache(
+                    makeRawAttentionKVCache(
                         parameters: parameters, maxKVSize: config.slidingWindow, keep: 0))
             }
         }

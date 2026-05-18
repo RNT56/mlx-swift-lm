@@ -87,6 +87,10 @@ public protocol KVCache: Evaluatable {
     func copy() -> any KVCache
 }
 
+/// Marker for architecture-specific caches that must remain raw because model attention
+/// reads shared or latent KV state directly.
+public protocol RawOnlyKVCache: KVCache {}
+
 extension KVCache {
     public var ropeOffset: RoPEOffset {
         .scalar(offset)
@@ -458,6 +462,18 @@ public class KVCacheSimple: BaseKVCache, CustomDebugStringConvertible {
     }
 }
 
+public final class RawOnlyKVCacheSimple: KVCacheSimple, RawOnlyKVCache {
+    public override func copy() -> any KVCache {
+        let new = RawOnlyKVCacheSimple()
+        new.step = self.step
+        let s = self.state
+        if !s.isEmpty {
+            new.state = s.map { $0[.ellipsis] }
+        }
+        return new
+    }
+}
+
 /// Rotating KV cache for sliding window attention
 public class RotatingKVCache: BaseKVCache, CustomDebugStringConvertible {
     private var keep: Int
@@ -755,6 +771,22 @@ public class RotatingKVCache: BaseKVCache, CustomDebugStringConvertible {
         }
         cache.metaState = metaState
         return cache
+    }
+}
+
+public final class RawOnlyRotatingKVCache: RotatingKVCache, RawOnlyKVCache {
+    public override func copy() -> any KVCache {
+        let new = RawOnlyRotatingKVCache(
+            maxSize: self.maxSize ?? 0,
+            keep: rotatingKeep,
+            step: rotatingStep
+        )
+        let s = self.state
+        if !s.isEmpty {
+            new.state = s.map { $0[.ellipsis] }
+        }
+        new.metaState = self.metaState
+        return new
     }
 }
 
@@ -1898,12 +1930,14 @@ private func restoreCacheFromMetaState(
         let seed =
             metaState.count > 6
             ? UInt64(metaState[6]) ?? defaultTurboQuantSeed : defaultTurboQuantSeed
+        let valueBits = turboQuantValueBits(from: metaState)
         let cache = TurboQuantKVCache(
             preset: preset,
             groupSize: groupSize,
             backend: backend,
             optimizationPolicy: .auto,
-            seed: seed
+            seed: seed,
+            valueBits: valueBits
         )
         if state.count == 10, cache.activeBackend != .metalPolarQJL {
             throw KVCacheError(
@@ -1934,6 +1968,7 @@ private func restoreCacheFromMetaState(
         let seed =
             metaState.count > 8
             ? UInt64(metaState[8]) ?? defaultTurboQuantSeed : defaultTurboQuantSeed
+        let valueBits = turboQuantValueBits(from: metaState)
         let cache = RotatingTurboQuantKVCache(
             maxSize: maxSize,
             keep: keep,
@@ -1942,7 +1977,8 @@ private func restoreCacheFromMetaState(
             groupSize: groupSize,
             backend: backend,
             optimizationPolicy: .auto,
-            seed: seed
+            seed: seed,
+            valueBits: valueBits
         )
         if state.count == 10, cache.activeBackend != .metalPolarQJL {
             throw KVCacheError(
@@ -1976,6 +2012,15 @@ private func restoreCacheFromMetaState(
     default:
         throw KVCacheError(message: "Unknown cache class: \(className)")
     }
+}
+
+private func turboQuantValueBits(from metaState: [String]) -> Int? {
+    for item in metaState {
+        if item.hasPrefix("valueBits=") {
+            return Int(item.dropFirst("valueBits=".count))
+        }
+    }
+    return nil
 }
 
 /// Unflatten arrays from tree_flatten format (e.g., "0.1", "1.0") to nested structure
@@ -2096,6 +2141,7 @@ public func makePromptCacheWithLayerCount(
         let groupSize = parameters?.kvGroupSize ?? 64
         let policy = parameters?.turboQuantOptimizationPolicy ?? .auto
         let seed = parameters?.turboQuantSeed ?? defaultTurboQuantSeed
+        let valueBits = parameters?.turboQuantValueBits
         if let maxKVSize = parameters?.maxKVSize ?? maxKVSize {
             return (0 ..< numLayers).map { _ in
                 RotatingTurboQuantKVCache(
@@ -2104,7 +2150,8 @@ public func makePromptCacheWithLayerCount(
                     groupSize: groupSize,
                     backend: backend,
                     optimizationPolicy: policy,
-                    seed: seed
+                    seed: seed,
+                    valueBits: valueBits
                 )
             }
         }
@@ -2114,7 +2161,8 @@ public func makePromptCacheWithLayerCount(
                 groupSize: groupSize,
                 backend: backend,
                 optimizationPolicy: policy,
-                seed: seed
+                seed: seed,
+                valueBits: valueBits
             )
         }
     }
@@ -2140,6 +2188,7 @@ public func makeAttentionKVCache(
         let groupSize = parameters?.kvGroupSize ?? 64
         let policy = parameters?.turboQuantOptimizationPolicy ?? .auto
         let seed = parameters?.turboQuantSeed ?? defaultTurboQuantSeed
+        let valueBits = parameters?.turboQuantValueBits
         if let maxKVSize = parameters?.maxKVSize ?? maxKVSize {
             return RotatingTurboQuantKVCache(
                 maxSize: maxKVSize,
@@ -2148,7 +2197,8 @@ public func makeAttentionKVCache(
                 groupSize: groupSize,
                 backend: backend,
                 optimizationPolicy: policy,
-                seed: seed
+                seed: seed,
+                valueBits: valueBits
             )
         }
         return TurboQuantKVCache(
@@ -2156,7 +2206,8 @@ public func makeAttentionKVCache(
             groupSize: groupSize,
             backend: backend,
             optimizationPolicy: policy,
-            seed: seed
+            seed: seed,
+            valueBits: valueBits
         )
     }
 
@@ -2164,6 +2215,18 @@ public func makeAttentionKVCache(
         return RotatingKVCache(maxSize: maxKVSize, keep: keep)
     }
     return KVCacheSimple()
+}
+
+/// Construct a raw-only KV cache for model paths that read cache state directly.
+public func makeRawAttentionKVCache(
+    parameters: GenerateParameters? = nil,
+    maxKVSize: Int? = nil,
+    keep: Int = 4
+) -> KVCache {
+    if let maxKVSize = parameters?.maxKVSize ?? maxKVSize {
+        return RawOnlyRotatingKVCache(maxSize: maxKVSize, keep: keep)
+    }
+    return RawOnlyKVCacheSimple()
 }
 
 /// Check if model's cache can be trimmed.
@@ -2302,7 +2365,8 @@ public func maybeQuantizeKVCache(
     turboQuantPreset: TurboQuantPreset = .turbo3_5,
     turboQuantBackend: TurboQuantBackend = .metalPolarQJL,
     turboQuantOptimizationPolicy: TurboQuantOptimizationPolicy = .auto,
-    turboQuantSeed: UInt64? = nil
+    turboQuantSeed: UInt64? = nil,
+    turboQuantValueBits: Int? = nil
 ) {
     guard !cache.isEmpty else { return }
     if kvCacheStrategy == .none { return }
@@ -2312,6 +2376,9 @@ public func maybeQuantizeKVCache(
     func isReadyForQuantization(_ item: KVCache) -> Bool {
         if let list = item as? CacheList {
             return list.children.contains(where: isReadyForQuantization)
+        }
+        if item is RawOnlyKVCache {
+            return false
         }
         if item is QuantizedKVCacheProtocol {
             return false
@@ -2330,6 +2397,9 @@ public func maybeQuantizeKVCache(
             list.replaceChildren(convertedCache)
             return list
         }
+        if item is RawOnlyKVCache {
+            return item
+        }
         if item is QuantizedKVCacheProtocol {
             return item
         }
@@ -2340,7 +2410,8 @@ public func maybeQuantizeKVCache(
                     groupSize: kvGroupSize,
                     backend: turboQuantBackend,
                     optimizationPolicy: turboQuantOptimizationPolicy,
-                    seed: turboQuantSeed ?? defaultTurboQuantSeed
+                    seed: turboQuantSeed ?? defaultTurboQuantSeed,
+                    valueBits: turboQuantValueBits
                 )
             }
             return simpleCache.toQuantized(groupSize: kvGroupSize, bits: kvBits)
@@ -2351,7 +2422,8 @@ public func maybeQuantizeKVCache(
                 groupSize: kvGroupSize,
                 backend: turboQuantBackend,
                 optimizationPolicy: turboQuantOptimizationPolicy,
-                seed: turboQuantSeed ?? defaultTurboQuantSeed
+                seed: turboQuantSeed ?? defaultTurboQuantSeed,
+                valueBits: turboQuantValueBits
             )
         }
         if let rotatingCache = item as? RotatingKVCache {

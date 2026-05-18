@@ -211,7 +211,8 @@ extension MLXRuntimeSwiftTests {
                 turboQuantPreset: .turbo2_5,
                 turboQuantBackend: .metalPolarQJL,
                 turboQuantOptimizationPolicy: .conservative,
-                turboQuantSeed: 0x1234_5678_9ABC_DEF0
+                turboQuantSeed: 0x1234_5678_9ABC_DEF0,
+                turboQuantValueBits: 4
             )
 
             let cache = try #require(
@@ -224,6 +225,71 @@ extension MLXRuntimeSwiftTests {
             #expect(cache.requestedBackend == .metalPolarQJL)
             #expect(cache.optimizationPolicy == .conservative)
             #expect(cache.seed == 0x1234_5678_9ABC_DEF0)
+            #expect(cache.valueBits == 4)
+        }
+
+        @Test func testRawOnlyAttentionCacheIgnoresTurboQuantConversion() {
+            let parameters = GenerateParameters(
+                maxKVSize: 16,
+                kvCacheStrategy: .turboQuant,
+                turboQuantPreset: .turbo3_5
+            )
+            var cache: [KVCache] = [
+                makeRawAttentionKVCache(parameters: GenerateParameters(kvCacheStrategy: .turboQuant)),
+                makeRawAttentionKVCache(parameters: parameters, maxKVSize: 8, keep: 0),
+            ]
+            let keys = MLXArray.ones([1, 2, 4, 64], dtype: .float32)
+            let values = MLXArray.ones([1, 2, 4, 64], dtype: .float32)
+            _ = cache[0].update(keys: keys, values: values)
+            _ = cache[1].update(keys: keys, values: values)
+
+            maybeQuantizeKVCache(
+                cache: &cache,
+                kvBits: nil,
+                kvGroupSize: 64,
+                quantizedKVStart: 0,
+                kvCacheStrategy: .turboQuant,
+                turboQuantPreset: .turbo3_5,
+                turboQuantBackend: .metalPolarQJL
+            )
+
+            #expect(cache[0] is RawOnlyKVCacheSimple)
+            #expect(cache[1] is RawOnlyRotatingKVCache)
+            #expect(!(cache[0] is QuantizedKVCacheProtocol))
+            #expect(!(cache[1] is QuantizedKVCacheProtocol))
+        }
+
+        @Test func testTurboQuantCompressedCacheUpdateRollsBackOnFailure() {
+            guard TurboQuantKernelAvailability.current.supportsMetalPolarQJLAttention else {
+                return
+            }
+
+            enum TestFailure: Error {
+                case forced
+            }
+
+            let cache = TurboQuantKVCache(backend: .metalPolarQJL)
+            let queries = MLXArray.ones([1, 2, 1, 64], dtype: .float32)
+            let keys = MLXArray.ones([1, 2, 2, 64], dtype: .float32)
+            let values = MLXArray.ones([1, 2, 2, 64], dtype: .float32)
+
+            let output: MLXArray? = withTurboQuantCompressedCacheUpdate(
+                queries: queries,
+                keys: keys,
+                values: values,
+                cache: cache,
+                mask: .none
+            ) { _, _, _ in
+                throw TestFailure.forced
+            }
+
+            #expect(output == nil)
+            #expect(cache.offset == 0)
+            #expect(cache.state.isEmpty)
+            #expect(cache.compressedState == nil)
+            #expect(
+                cache.attentionDiagnostics.lastUnsupportedShape?
+                    .contains("compressed attention failed") == true)
         }
 
         @Test func testTurboQuantOptimizationPolicyPropagatesToPromptCaches() throws {
@@ -394,7 +460,7 @@ extension MLXRuntimeSwiftTests {
 
             let compressed = try #require(cache.compressedState)
             #expect(cache.state.count == 10)
-            #expect(compressed.0.layout.layoutVersion == 3)
+            #expect(compressed.0.layout.layoutVersion == 4)
             #expect(compressed.0.layout.capacity == 8)
             #expect(compressed.0.layout.logicalLength == 8)
             #expect(compressed.0.layout.pinnedPrefixLength == 4)
