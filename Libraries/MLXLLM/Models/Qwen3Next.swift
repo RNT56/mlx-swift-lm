@@ -461,6 +461,39 @@ public class Qwen3NextModelInner: Module {
 
         return norm(hiddenStates)
     }
+
+    public func callCapturing(
+        _ inputs: MLXArray,
+        cache: [KVCache?]? = nil,
+        captureLayerIDs: Set<Int>
+    ) -> (MLXArray, [Int: MLXArray]) {
+        var hiddenStates = embedTokens(inputs)
+
+        var cacheArray = cache
+        if cacheArray == nil || cacheArray?.count != layers.count {
+            cacheArray = Array(repeating: nil as KVCache?, count: layers.count)
+        }
+
+        let faMask = createAttentionMask(h: hiddenStates, cache: cacheArray?[faIdx])
+        let ssmMask = createSSMMask(h: hiddenStates, cache: cacheArray?[ssmIdx] as? MambaCache)
+
+        var captured = [Int: MLXArray]()
+        for (i, layer) in layers.enumerated() {
+            let mask = layer.isLinear ? ssmMask : nil
+            let attnMask = layer.isLinear ? MLXFast.ScaledDotProductAttentionMaskMode.none : faMask
+            hiddenStates = layer(
+                hiddenStates,
+                attentionMask: attnMask,
+                ssmMask: mask,
+                cache: cacheArray?[i]
+            )
+            if captureLayerIDs.contains(i) {
+                captured[i] = hiddenStates
+            }
+        }
+
+        return (norm(hiddenStates), captured)
+    }
 }
 
 public class Qwen3NextModel: Module, LLMModel, KVCacheDimensionProvider {

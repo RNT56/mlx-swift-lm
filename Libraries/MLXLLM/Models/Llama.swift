@@ -147,6 +147,34 @@ public class LlamaModelInner: Module {
 
         return norm(h)
     }
+
+    public func callCapturing(
+        _ inputs: MLXArray,
+        cache: [KVCache?]? = nil,
+        captureLayerIDs: Set<Int>
+    ) -> (MLXArray, [Int: MLXArray]) {
+        var h = embedTokens(inputs)
+        let cacheArray: [KVCache?] = {
+            guard let cache else {
+                return Array(repeating: nil, count: layers.count)
+            }
+            var normalized = Array(repeating: nil as KVCache?, count: layers.count)
+            for (index, value) in cache.prefix(layers.count).enumerated() {
+                normalized[index] = value
+            }
+            return normalized
+        }()
+
+        let mask = createAttentionMask(h: h, cache: cacheArray.first ?? nil)
+        var captured = [Int: MLXArray]()
+        for (i, layer) in layers.enumerated() {
+            h = layer(h, mask: mask, cache: cacheArray[i])
+            if captureLayerIDs.contains(i) {
+                captured[i] = h
+            }
+        }
+        return (norm(h), captured)
+    }
 }
 
 /// Model for Llama and Mistral model types.
