@@ -101,6 +101,9 @@ public struct ModelConfiguration: Sendable {
     /// Additional tokens to use for end of string (specified as strings, converted to IDs at runtime)
     public var extraEOSTokens: Set<String>
 
+    /// Text sequences that stop decoded generation when encountered.
+    public var stopStrings: Set<String>
+
     /// EOS token IDs loaded from config.json/generation_config.json
     public var eosTokenIds: Set<Int> = []
 
@@ -115,6 +118,7 @@ public struct ModelConfiguration: Sendable {
         tokenizerSource: TokenizerSource? = nil,
         defaultPrompt: String = "",
         extraEOSTokens: Set<String> = [],
+        stopStrings: Set<String> = [],
         eosTokenIds: Set<Int> = [],
         toolCallFormat: ToolCallFormat? = nil,
         lazyLoad: Bool = false
@@ -123,6 +127,7 @@ public struct ModelConfiguration: Sendable {
         self.tokenizerSource = tokenizerSource
         self.defaultPrompt = defaultPrompt
         self.extraEOSTokens = extraEOSTokens
+        self.stopStrings = stopStrings
         self.eosTokenIds = eosTokenIds
         self.toolCallFormat = toolCallFormat
         self.lazyLoad = lazyLoad
@@ -133,6 +138,7 @@ public struct ModelConfiguration: Sendable {
         tokenizerSource: TokenizerSource? = nil,
         defaultPrompt: String = "",
         extraEOSTokens: Set<String> = [],
+        stopStrings: Set<String> = [],
         eosTokenIds: Set<Int> = [],
         toolCallFormat: ToolCallFormat? = nil,
         lazyLoad: Bool = false
@@ -141,6 +147,7 @@ public struct ModelConfiguration: Sendable {
         self.tokenizerSource = tokenizerSource
         self.defaultPrompt = defaultPrompt
         self.extraEOSTokens = extraEOSTokens
+        self.stopStrings = stopStrings
         self.eosTokenIds = eosTokenIds
         self.toolCallFormat = toolCallFormat
         self.lazyLoad = lazyLoad
@@ -160,6 +167,7 @@ public struct ModelConfiguration: Sendable {
             name: name,
             defaultPrompt: defaultPrompt,
             extraEOSTokens: extraEOSTokens,
+            stopStrings: stopStrings,
             eosTokenIds: eosTokenIds,
             toolCallFormat: toolCallFormat,
             lazyLoad: lazyLoad)
