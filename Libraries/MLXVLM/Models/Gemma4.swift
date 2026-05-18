@@ -8,12 +8,16 @@ import MLXNN
 
 private enum Gemma4Error: LocalizedError {
     case imageTokenCountMismatch(expectedVisionTokens: Int, actualPromptTokens: Int)
+    case audioTokenCountMismatch(expectedAudioTokens: Int, actualPromptTokens: Int)
 
     var errorDescription: String? {
         switch self {
         case .imageTokenCountMismatch(let expectedVisionTokens, let actualPromptTokens):
             return
                 "Gemma4 image token count mismatch: vision encoder produced \(expectedVisionTokens) soft tokens, but the prompt contains \(actualPromptTokens) image tokens."
+        case .audioTokenCountMismatch(let expectedAudioTokens, let actualPromptTokens):
+            return
+                "Gemma4 audio token count mismatch: audio encoder produced \(expectedAudioTokens) soft tokens, but the prompt contains \(actualPromptTokens) audio tokens."
         }
     }
 }
@@ -395,6 +399,7 @@ public struct Gemma4Configuration: Codable, Sendable {
     public let eoiTokenId: Int?
     public let visionSoftTokensPerImage: Int
     public let tieWordEmbeddings: Bool
+    public let audioConfig: Gemma4AudioConfiguration?
 
     private let _vocabularySize: Int?
     private let _hiddenSize: Int?
@@ -415,6 +420,7 @@ public struct Gemma4Configuration: Codable, Sendable {
         case eoiTokenId = "eoi_token_id"
         case visionSoftTokensPerImage = "vision_soft_tokens_per_image"
         case tieWordEmbeddings = "tie_word_embeddings"
+        case audioConfig = "audio_config"
         case _vocabularySize = "vocab_size"
         case _hiddenSize = "hidden_size"
         case _padTokenId = "pad_token_id"
@@ -439,6 +445,8 @@ public struct Gemma4Configuration: Codable, Sendable {
         tieWordEmbeddings =
             try c.decodeIfPresent(Bool.self, forKey: CodingKeys.tieWordEmbeddings)
             ?? textConfiguration.tieWordEmbeddings
+        audioConfig = try c.decodeIfPresent(
+            Gemma4AudioConfiguration.self, forKey: CodingKeys.audioConfig)
         _vocabularySize = try c.decodeIfPresent(Int.self, forKey: CodingKeys._vocabularySize)
         _hiddenSize = try c.decodeIfPresent(Int.self, forKey: CodingKeys._hiddenSize)
         _padTokenId = try c.decodeIfPresent(Int.self, forKey: CodingKeys._padTokenId)
@@ -1645,6 +1653,8 @@ public final class Gemma4: Module, VLMModel, KVCacheDimensionProvider {
     @ModuleInfo(key: "vision_tower") private var visionTower: Gemma4VisionModel
     @ModuleInfo(key: "language_model") private var languageModel: Gemma4TextLanguageModel
     @ModuleInfo(key: "embed_vision") private var embedVision: Gemma4MultimodalEmbedder
+    @ModuleInfo(key: "audio_tower") private var audioTower: Gemma4AudioModel?
+    @ModuleInfo(key: "embed_audio") private var embedAudio: Gemma4MultimodalEmbedder?
 
     public let config: Gemma4Configuration
 
@@ -1661,6 +1671,14 @@ public final class Gemma4: Module, VLMModel, KVCacheDimensionProvider {
             textHiddenSize: config.textConfiguration.hiddenSize,
             eps: config.visionConfiguration.rmsNormEps
         )
+        if let audioConfig = config.audioConfig {
+            self._audioTower.wrappedValue = Gemma4AudioModel(config: audioConfig)
+            self._embedAudio.wrappedValue = Gemma4MultimodalEmbedder(
+                embeddingDim: audioConfig.outputProjDims,
+                textHiddenSize: config.textConfiguration.hiddenSize,
+                eps: config.visionConfiguration.rmsNormEps
+            )
+        }
         super.init()
     }
 
@@ -1670,7 +1688,9 @@ public final class Gemma4: Module, VLMModel, KVCacheDimensionProvider {
 
     private func getInputEmbeddings(
         inputIds: MLXArray,
-        pixelValues: MLXArray? = nil
+        pixelValues: MLXArray? = nil,
+        audioValues: MLXArray? = nil,
+        audioMask: MLXArray? = nil
     ) throws -> (MLXArray, MLXArray?) {
         var inputsEmbeds = languageModel.model.embedTokens(inputIds)
         inputsEmbeds =
@@ -1692,29 +1712,58 @@ public final class Gemma4: Module, VLMModel, KVCacheDimensionProvider {
             perLayerInputs = languageModel.model.getPerLayerInputs(perLayerTokens)
         }
 
-        guard let pixelValues else {
-            return (inputsEmbeds, perLayerInputs)
+        if let pixelValues {
+            var imageFeatures = visionTower(pixelValues)
+            imageFeatures = embedVision(imageFeatures)
+            imageFeatures = imageFeatures.asType(inputsEmbeds.dtype)
+
+            let imageMask = inputIds .== config.imageTokenId
+            let expectedImageTokens = imageMask.asType(.int32).sum().item(Int.self)
+
+            if expectedImageTokens != imageFeatures.dim(1) {
+                throw Gemma4Error.imageTokenCountMismatch(
+                    expectedVisionTokens: imageFeatures.dim(1),
+                    actualPromptTokens: expectedImageTokens)
+            }
+
+            var imageMaskExpanded = expandedDimensions(imageMask, axis: -1)
+            imageMaskExpanded = broadcast(imageMaskExpanded, to: inputsEmbeds.shape)
+            inputsEmbeds = gemma4MaskedScatter(
+                inputTensor: inputsEmbeds,
+                mask: imageMaskExpanded,
+                source: imageFeatures
+            )
         }
 
-        var imageFeatures = visionTower(pixelValues)
-        imageFeatures = embedVision(imageFeatures)
-        imageFeatures = imageFeatures.asType(inputsEmbeds.dtype)
+        if let audioValues,
+            let audioTower,
+            let embedAudio,
+            let audioTokenId = config.audioTokenId
+        {
+            let actualAudioMask =
+                audioMask
+                ?? MLXArray.ones([audioValues.dim(0), audioValues.dim(1)], dtype: .bool)
+            let (audioOutputs, _) = audioTower(audioValues, mask: actualAudioMask)
+            var audioFeatures = embedAudio(audioOutputs)
+            audioFeatures = audioFeatures.asType(inputsEmbeds.dtype)
 
-        let imageMask = inputIds .== config.imageTokenId
-        let expectedImageTokens = imageMask.asType(.int32).sum().item(Int.self)
+            let audioTokenMask = inputIds .== audioTokenId
+            let promptAudioTokens = audioTokenMask.asType(.int32).sum().item(Int.self)
+            let audioFeatureCount = audioFeatures.dim(1)
+            if promptAudioTokens != audioFeatureCount {
+                throw Gemma4Error.audioTokenCountMismatch(
+                    expectedAudioTokens: audioFeatureCount,
+                    actualPromptTokens: promptAudioTokens)
+            }
 
-        if expectedImageTokens != imageFeatures.dim(1) {
-            throw Gemma4Error.imageTokenCountMismatch(
-                expectedVisionTokens: imageFeatures.dim(1), actualPromptTokens: expectedImageTokens)
+            var audioMaskExpanded = expandedDimensions(audioTokenMask, axis: -1)
+            audioMaskExpanded = broadcast(audioMaskExpanded, to: inputsEmbeds.shape)
+            inputsEmbeds = gemma4MaskedScatter(
+                inputTensor: inputsEmbeds,
+                mask: audioMaskExpanded,
+                source: audioFeatures
+            )
         }
-
-        var imageMaskExpanded = expandedDimensions(imageMask, axis: -1)
-        imageMaskExpanded = broadcast(imageMaskExpanded, to: inputsEmbeds.shape)
-        inputsEmbeds = gemma4MaskedScatter(
-            inputTensor: inputsEmbeds,
-            mask: imageMaskExpanded,
-            source: imageFeatures
-        )
 
         return (inputsEmbeds, perLayerInputs)
     }
@@ -1723,9 +1772,12 @@ public final class Gemma4: Module, VLMModel, KVCacheDimensionProvider {
         -> PrepareResult
     {
         let convertedCache = cache.map { $0 }
-        if let imagePixels = input.image?.pixels {
+        if input.image?.pixels != nil || input.audio?.features != nil {
             let (inputsEmbeds, perLayerInputs) = try getInputEmbeddings(
-                inputIds: input.text.tokens, pixelValues: imagePixels)
+                inputIds: input.text.tokens,
+                pixelValues: input.image?.pixels,
+                audioValues: input.audio?.features,
+                audioMask: input.audio?.mask)
             let result = languageModel(
                 nil,
                 cache: convertedCache,
@@ -1747,21 +1799,37 @@ public final class Gemma4: Module, VLMModel, KVCacheDimensionProvider {
     public func sanitize(weights: [String: MLXArray]) -> [String: MLXArray] {
         var sanitized = languageModel.sanitize(weights: weights)
 
-        // This port currently supports text + vision only.
-        sanitized = sanitized.filter { key, _ in
-            !key.contains("audio_tower") && !key.contains("embed_audio")
+        if config.audioConfig == nil {
+            sanitized = sanitized.filter { key, _ in
+                !key.contains("audio_tower") && !key.contains("embed_audio")
+            }
         }
 
         if !config.visionConfiguration.useClippedLinears {
             sanitized = sanitized.filter { key, _ in
-                !key.contains("input_min")
-                    && !key.contains("input_max")
-                    && !key.contains("output_min")
-                    && !key.contains("output_max")
+                let isClippingRange =
+                    key.contains("input_min") || key.contains("input_max")
+                    || key.contains("output_min") || key.contains("output_max")
+                let isAudioClippingRange =
+                    key.contains("audio_tower") && (config.audioConfig?.useClippedLinears == true)
+                return !isClippingRange || isAudioClippingRange
             }
         }
 
-        return sanitized
+        var finalSanitized: [String: MLXArray] = [:]
+        for (key, value) in sanitized {
+            var newKey = key
+            if newKey.contains("subsampling_conv.layers.") {
+                newKey = newKey.replacingOccurrences(
+                    of: "subsampling_conv.layers.0",
+                    with: "subsample_conv_projection.layer0")
+                newKey = newKey.replacingOccurrences(
+                    of: "subsampling_conv.layers.1",
+                    with: "subsample_conv_projection.layer1")
+            }
+            finalSanitized[newKey] = value
+        }
+        return finalSanitized
     }
 }
 
@@ -1771,7 +1839,7 @@ public struct Gemma4MessageGenerator: MessageGenerator {
     public init() {}
 
     public func generate(message: Chat.Message) -> MLXLMCommon.Message {
-        if message.role == .system {
+        if message.role != .user {
             [
                 "role": message.role.rawValue,
                 "content": message.content,
@@ -1787,7 +1855,10 @@ public struct Gemma4MessageGenerator: MessageGenerator {
                     }
                     + [
                         ["type": "text", "text": message.content]
-                    ],
+                    ]
+                    + message.audio.map { _ in
+                        ["type": "audio"]
+                    },
             ]
         }
     }
@@ -1863,9 +1934,48 @@ public struct Gemma4Processor: UserInputProcessor {
             promptTokens = expandedTokens
         }
 
+        var processedAudio: LMInput.ProcessedAudio?
+        if let audioInput = input.audio.first {
+            let samples = try MediaProcessing.extractAudioSamples(from: audioInput)
+            let processor = Gemma4AudioFeatureExtractor(
+                featureSize: 128,
+                samplingRate: 16_000,
+                frameLengthMs: 20.0,
+                hopLengthMs: 10.0,
+                melFloor: 1e-3
+            )
+            let (features, audioMask) = processor.extract(waveform: samples)
+
+            let melFrames = features.dim(1)
+            let firstStride = (melFrames + 1) / 2
+            let audioTokenCount = min((firstStride + 1) / 2, 750)
+            processedAudio = LMInput.ProcessedAudio(
+                features: features, mask: audioMask, seqLengths: [melFrames])
+
+            let audioTokenId = config.audioTokenId ?? 258_881
+            let audioStartTokenId = config.boaTokenId
+            let audioEndTokenId = config.eoaTokenId
+            var audioTokens = [audioStartTokenId]
+            audioTokens.append(contentsOf: Array(repeating: audioTokenId, count: audioTokenCount))
+            audioTokens.append(audioEndTokenId)
+
+            let insertionIndex =
+                promptTokens.firstIndex(of: audioStartTokenId)
+                ?? promptTokens.firstIndex(of: audioTokenId)
+            var expandedTokens = promptTokens
+            expandedTokens.removeAll {
+                $0 == audioStartTokenId || $0 == audioEndTokenId || $0 == audioTokenId
+            }
+            expandedTokens.insert(contentsOf: audioTokens, at: insertionIndex ?? 0)
+            promptTokens = expandedTokens
+        }
+
         let promptArray = MLXArray(promptTokens).expandedDimensions(axis: 0)
         let mask = ones(like: promptArray).asType(.int8)
-        return LMInput(text: .init(tokens: promptArray, mask: mask), image: processedImage)
+        return LMInput(
+            text: .init(tokens: promptArray, mask: mask),
+            image: processedImage,
+            audio: processedAudio)
     }
 }
 
@@ -1880,6 +1990,9 @@ public struct Gemma4ProcessorConfiguration: Codable, Sendable {
     public let imageTokenId: Int
     public let boiTokenId: Int
     public let eoiTokenId: Int?
+    public let boaTokenId: Int
+    public let eoaTokenId: Int
+    public let audioTokenId: Int?
 
     enum CodingKeys: String, CodingKey {
         case processorClass = "processor_class"
@@ -1891,6 +2004,9 @@ public struct Gemma4ProcessorConfiguration: Codable, Sendable {
         case imageTokenId = "image_token_id"
         case boiTokenId = "boi_token_id"
         case eoiTokenId = "eoi_token_id"
+        case boaTokenId = "boa_token_id"
+        case eoaTokenId = "eoa_token_id"
+        case audioTokenId = "audio_token_id"
     }
 
     public init(from decoder: any Swift.Decoder) throws {
@@ -1907,6 +2023,9 @@ public struct Gemma4ProcessorConfiguration: Codable, Sendable {
         imageTokenId = try c.decodeIfPresent(Int.self, forKey: CodingKeys.imageTokenId) ?? 258_880
         boiTokenId = try c.decodeIfPresent(Int.self, forKey: CodingKeys.boiTokenId) ?? 255_999
         eoiTokenId = try c.decodeIfPresent(Int.self, forKey: CodingKeys.eoiTokenId) ?? 258_882
+        boaTokenId = try c.decodeIfPresent(Int.self, forKey: CodingKeys.boaTokenId) ?? 256_000
+        eoaTokenId = try c.decodeIfPresent(Int.self, forKey: CodingKeys.eoaTokenId) ?? 258_883
+        audioTokenId = try c.decodeIfPresent(Int.self, forKey: CodingKeys.audioTokenId) ?? 258_881
     }
 
     public var imageMeanTuple: (CGFloat, CGFloat, CGFloat) {

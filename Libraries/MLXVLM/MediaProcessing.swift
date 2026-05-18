@@ -524,6 +524,95 @@ public enum MediaProcessing {
             totalDuration: duration
         )
     }
+
+    public static func extractAudioSamples(from audio: UserInput.Audio) throws -> [Float] {
+        let url: URL
+        var temporaryURL: URL?
+
+        switch audio {
+        case .url(let audioURL):
+            url = audioURL
+        case .data(let data, let format):
+            let fileURL = FileManager.default.temporaryDirectory
+                .appendingPathComponent(UUID().uuidString)
+                .appendingPathExtension(format)
+            try data.write(to: fileURL)
+            url = fileURL
+            temporaryURL = fileURL
+        }
+
+        defer {
+            if let temporaryURL {
+                try? FileManager.default.removeItem(at: temporaryURL)
+            }
+        }
+
+        let file = try AVAudioFile(forReading: url)
+        let targetFormat = AVAudioFormat(
+            commonFormat: .pcmFormatFloat32,
+            sampleRate: 16_000,
+            channels: 1,
+            interleaved: false
+        )!
+
+        let frameCount = AVAudioFrameCount(file.length)
+        let sourceBuffer = AVAudioPCMBuffer(
+            pcmFormat: file.processingFormat,
+            frameCapacity: frameCount
+        )!
+        try file.read(into: sourceBuffer)
+
+        let convertedFrameCapacity = AVAudioFrameCount(
+            Double(frameCount) * (targetFormat.sampleRate / file.processingFormat.sampleRate)
+        ) + 1024
+        let convertedBuffer = AVAudioPCMBuffer(
+            pcmFormat: targetFormat,
+            frameCapacity: convertedFrameCapacity
+        )!
+
+        guard let converter = AVAudioConverter(from: file.processingFormat, to: targetFormat) else {
+            throw NSError(
+                domain: "MediaProcessing",
+                code: -1,
+                userInfo: [NSLocalizedDescriptionKey: "Failed to create AVAudioConverter"]
+            )
+        }
+
+        final class AudioBufferState: @unchecked Sendable {
+            var hasRead = false
+            let source: AVAudioPCMBuffer
+
+            init(source: AVAudioPCMBuffer) {
+                self.source = source
+            }
+        }
+
+        let state = AudioBufferState(source: sourceBuffer)
+        var error: NSError?
+        converter.convert(to: convertedBuffer, error: &error) { _, status in
+            if state.hasRead {
+                status.pointee = .endOfStream
+                return nil
+            }
+            state.hasRead = true
+            status.pointee = .haveData
+            return state.source
+        }
+
+        if let error {
+            throw error
+        }
+        guard let channelData = convertedBuffer.floatChannelData else {
+            throw NSError(
+                domain: "MediaProcessing",
+                code: -1,
+                userInfo: [NSLocalizedDescriptionKey: "Failed to extract channel data"]
+            )
+        }
+
+        return Array(
+            UnsafeBufferPointer(start: channelData[0], count: Int(convertedBuffer.frameLength)))
+    }
 }
 
 // MARK: - Convenience

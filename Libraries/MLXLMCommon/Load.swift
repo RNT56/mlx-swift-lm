@@ -14,7 +14,8 @@ import MLXNN
 public func loadWeights(
     modelDirectory: URL, model: BaseLanguageModel,
     quantization: BaseConfiguration.Quantization? = nil,
-    perLayerQuantization: BaseConfiguration.PerLayerQuantization? = nil
+    perLayerQuantization: BaseConfiguration.PerLayerQuantization? = nil,
+    lazyLoad: Bool = false
 ) throws {
     // load the weights and collect metadata from the first safetensor file
     var weights = [String: MLXArray]()
@@ -35,6 +36,10 @@ public func loadWeights(
 
     // per-model cleanup (models can inspect metadata to customize behavior)
     weights = model.sanitize(weights: weights, metadata: metadata)
+
+    if ExpertStreamingConfig.shared.isEnabled {
+        ExpertStreamerManager.shared = ExpertStreamerManager(modelDirectory: modelDirectory)
+    }
 
     // quantize if needed
     if let turboQuantOptions = turboQuantLinearLoadOptions(
@@ -67,11 +72,104 @@ public func loadWeights(
         }
     }
 
+    assignExpertStreamingMetadata(model: model, weights: weights)
+
     // apply the loaded weights
     let parameters = ModuleParameters.unflattened(weights)
-    try model.update(parameters: parameters, verify: [.all])
+    let verification: Module.VerifyUpdate = ExpertStreamingConfig.shared.isEnabled
+        ? .noUnusedKeys
+        : .all
+    try model.update(parameters: parameters, verify: verification)
 
-    eval(model)
+    if !lazyLoad {
+        eval(model)
+    }
+}
+
+private func assignExpertStreamingMetadata(
+    model: BaseLanguageModel,
+    weights: [String: MLXArray]
+) {
+    guard ExpertStreamingConfig.shared.isEnabled,
+        let manager = ExpertStreamerManager.shared
+    else {
+        return
+    }
+
+    let knownPrefixes = ["", "model.", "language_model.", "model.language_model."]
+    let scaleTensors = weights.filter {
+        $0.key.contains(".switch_mlp.") && $0.key.hasSuffix(".weight_scale_inv")
+    }
+
+    for (path, module) in model.namedModules() {
+        guard let switchLinear = module as? ExpertStreamingSwitchLinear else {
+            continue
+        }
+
+        if let scale = scaleTensors["\(path).weight_scale_inv"] {
+            switchLinear.weightScaleInv = scale
+        }
+
+        let bareName = "\(path).weight"
+        let strippedBareName = stripCommonPrefixes(from: bareName)
+        let strippedMTPName = strippedBareName.replacingOccurrences(of: ".mtp.0.", with: ".mtp.")
+        let stackedCandidates =
+            [bareName, strippedBareName, strippedMTPName]
+            + knownPrefixes.map { $0 + strippedBareName }
+            + knownPrefixes.map { $0 + strippedMTPName }
+
+        if let originalKey = stackedCandidates.first(where: { manager.getFile(for: $0) != nil }) {
+            switchLinear.tensorName = originalKey
+            continue
+        }
+
+        guard bareName.contains(".switch_mlp.") else {
+            continue
+        }
+
+        let expert0Name = bareName
+            .replacingOccurrences(of: ".switch_mlp.", with: ".experts.")
+            .replacingOccurrences(of: ".experts.", with: ".experts.0.")
+        let strippedExpert0Name = stripCommonPrefixes(from: expert0Name)
+        let strippedMTPExpert0Name = strippedExpert0Name.replacingOccurrences(
+            of: ".mtp.0.", with: ".mtp.")
+        let unstackedCandidates =
+            [expert0Name, strippedExpert0Name, strippedMTPExpert0Name]
+            + knownPrefixes.map { $0 + strippedExpert0Name }
+            + knownPrefixes.map { $0 + strippedMTPExpert0Name }
+
+        guard let matchedExpert0 = unstackedCandidates.first(where: {
+            manager.getFile(for: $0) != nil
+        }) else {
+            continue
+        }
+
+        var map = [Int: (path: String, tensorName: String)]()
+        for expertIndex in 0 ..< switchLinear.expertCount {
+            let tensorName = matchedExpert0.replacingOccurrences(
+                of: ".experts.0.", with: ".experts.\(expertIndex).")
+            if let file = manager.getFile(for: tensorName) {
+                map[expertIndex] = (
+                    manager.modelDirectory.appendingPathComponent(file).path,
+                    tensorName
+                )
+            }
+        }
+        if !map.isEmpty {
+            switchLinear.unstackedSSDMap = map
+        }
+    }
+}
+
+private func stripCommonPrefixes(from name: String) -> String {
+    var stripped = name
+    for prefix in ["language_model.model.", "language_model.", "model."] {
+        if stripped.hasPrefix(prefix) {
+            stripped.removeFirst(prefix.count)
+            break
+        }
+    }
+    return stripped
 }
 
 private struct TurboQuantLinearLoadOptions {
