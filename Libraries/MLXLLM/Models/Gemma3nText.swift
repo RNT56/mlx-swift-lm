@@ -249,6 +249,15 @@ class Gemma3nAttention: Module {
         mask: MLXFast.ScaledDotProductAttentionMaskMode? = nil,
         cache: KVCache? = nil
     ) -> MLXArray {
+        callWithKVState(x, mask: mask, cache: cache).output
+    }
+
+    func callWithKVState(
+        _ x: MLXArray,
+        mask: MLXFast.ScaledDotProductAttentionMaskMode? = nil,
+        cache: KVCache? = nil,
+        sharedKV: AttentionKVState? = nil
+    ) -> (output: MLXArray, state: AttentionKVState?) {
         let (B, L, _) = (x.dim(0), x.dim(1), x.dim(2))
 
         var queries = qProj(x)
@@ -256,68 +265,93 @@ class Gemma3nAttention: Module {
         queries = qNorm(queries)
 
         let offset = cache?.ropeOffset
-        var keys: MLXArray
-        var values: MLXArray
+        queries = queries.transposed(0, 2, 1, 3)
+        queries = applyRotaryPosition(rope, to: queries, offset: offset)
 
-        if isKvSharedLayer && cache != nil {
+        let attentionOutput: MLXArray
+        let attentionState: AttentionKVState?
+
+        if isKvSharedLayer, let sharedKV {
+            attentionState = sharedKV
+            let adjustedMask = adjustedAttentionMask(mask, keyLength: sharedKV.keyLength, dtype: queries.dtype)
+            attentionOutput = attentionWithKVState(
+                queries: queries,
+                state: sharedKV,
+                scale: scale,
+                mask: adjustedMask
+            )
+        } else if isKvSharedLayer && cache != nil && !(cache is QuantizedKVCacheProtocol) {
             let state = cache!.state
             if state.count >= 2 {
-                keys = state[0]
-                values = state[1]
+                let rawState = AttentionKVState.raw(keys: state[0], values: state[1])
+                attentionState = rawState
+                let adjustedMask = adjustedAttentionMask(
+                    mask,
+                    keyLength: state[0].dim(2),
+                    dtype: queries.dtype
+                )
+                attentionOutput = attentionWithKVState(
+                    queries: queries,
+                    state: rawState,
+                    scale: scale,
+                    mask: adjustedMask
+                )
             } else {
-                keys = kProj(x).reshaped(B, L, -1, headDim)
+                var keys = kProj(x).reshaped(B, L, -1, headDim)
                 keys = kNorm(keys)
                 keys = keys.transposed(0, 2, 1, 3)
                 keys = applyRotaryPosition(rope, to: keys, offset: offset)
 
-                values = vProj(x).reshaped(B, L, -1, headDim)
+                var values = vProj(x).reshaped(B, L, -1, headDim)
                 values = vNorm(values)
                 values = values.transposed(0, 2, 1, 3)
 
-                if let cache = cache {
-                    (keys, values) = cache.update(keys: keys, values: values)
-                }
+                let adjustedMask = adjustedAttentionMask(
+                    mask,
+                    keyLength: attentionKeyLengthAfterUpdate(cache: cache, keys: keys),
+                    dtype: queries.dtype
+                )
+                let result = attentionWithCacheUpdateReturningState(
+                    queries: queries,
+                    keys: keys,
+                    values: values,
+                    cache: cache,
+                    scale: scale,
+                    mask: adjustedMask
+                )
+                attentionOutput = result.output
+                attentionState = result.state
             }
         } else {
-            keys = kProj(x).reshaped(B, L, -1, headDim)
+            var keys = kProj(x).reshaped(B, L, -1, headDim)
             keys = kNorm(keys)
             keys = keys.transposed(0, 2, 1, 3)
             keys = applyRotaryPosition(rope, to: keys, offset: offset)
 
-            values = vProj(x).reshaped(B, L, -1, headDim)
+            var values = vProj(x).reshaped(B, L, -1, headDim)
             values = vNorm(values)
             values = values.transposed(0, 2, 1, 3)
 
-            if let cache = cache {
-                (keys, values) = cache.update(keys: keys, values: values)
-            }
+            let adjustedMask = adjustedAttentionMask(
+                mask,
+                keyLength: attentionKeyLengthAfterUpdate(cache: cache, keys: keys),
+                dtype: queries.dtype
+            )
+            let result = attentionWithCacheUpdateReturningState(
+                queries: queries,
+                keys: keys,
+                values: values,
+                cache: cache,
+                scale: scale,
+                mask: adjustedMask
+            )
+            attentionOutput = result.output
+            attentionState = result.state
         }
 
-        queries = queries.transposed(0, 2, 1, 3)
-        queries = applyRotaryPosition(rope, to: queries, offset: offset)
+        let output = attentionOutput.transposed(0, 2, 1, 3).reshaped(B, L, -1)
 
-        var adjustedMask = mask
-        if case .array(let maskArray) = mask {
-            let keysSeqLen = keys.shape[keys.shape.count - 2]
-            if maskArray.dim(-1) != keysSeqLen {
-                let slicedMask = maskArray[.ellipsis, 0 ..< keysSeqLen].asType(queries.dtype)
-                adjustedMask = .array(slicedMask)
-            } else {
-                adjustedMask = .array(maskArray.asType(queries.dtype))
-            }
-        }
-
-        let output = MLXFast.scaledDotProductAttention(
-            queries: queries,
-            keys: keys,
-            values: values,
-            scale: scale,
-            mask: adjustedMask ?? .none
-        )
-        .transposed(0, 2, 1, 3)
-        .reshaped(B, L, -1)
-
-        return oProj(output)
+        return (oProj(output), attentionState)
     }
 }
 
@@ -572,9 +606,10 @@ class Gemma3nDecoderLayer: Module {
         mask: MLXFast.ScaledDotProductAttentionMaskMode? = nil,
         cache: KVCache? = nil,
         perLayerInput: MLXArray? = nil,
+        sharedKV: AttentionKVState? = nil,
         caches: [KVCache?]? = nil,
         cachePosition: MLXArray? = nil
-    ) -> MLXArray {
+    ) -> (MLXArray, AttentionKVState?) {
         var x = x
         if x.ndim == 1 {
             x = expandedDimensions(x, axis: 0)
@@ -603,11 +638,13 @@ class Gemma3nDecoderLayer: Module {
         let activePredictionNormed = inputLayernorm(activePrediction)
         let laurelOutput = laurel(activePredictionNormed)
 
-        let attn = selfAttn(
+        let attnResult = selfAttn.callWithKVState(
             activePredictionNormed,
             mask: finalMask,
-            cache: cache
+            cache: cache,
+            sharedKV: sharedKV
         )
+        let attn = attnResult.output
 
         let attnNormed = postAttentionLayernorm(attn)
         let attnGated = activePrediction + attnNormed
@@ -643,7 +680,7 @@ class Gemma3nDecoderLayer: Module {
         let result = correctedPredictions
         result[1...] = result[1...] + firstPrediction
 
-        return result
+        return (result, attnResult.state)
     }
 }
 
@@ -684,10 +721,10 @@ public class Gemma3nLanguageModel: Module {
         for i in 0 ..< firstKvSharedLayerIdx {
             let layerType = layerTypes[i]
             if layerType == "full_attention" {
-                caches.append(makeRawAttentionKVCache(parameters: parameters))
+                caches.append(makeAttentionKVCache(parameters: parameters))
             } else if layerType == "sliding_attention" {
                 caches.append(
-                    makeRawAttentionKVCache(
+                    makeAttentionKVCache(
                         parameters: parameters, maxKVSize: slidingWindow, keep: 0))
             } else {
                 fatalError("Unknown layer type: \(layerType) for layer \(i)")
@@ -849,6 +886,11 @@ public class Gemma3nLanguageModel: Module {
             h[1...] = h[1...] * (targetMagnitude / maximum(mags, epsilonTensor))
         }
 
+        var attentionStates = Array<AttentionKVState?>(
+            repeating: nil,
+            count: max(requiredCacheSize, config.numHiddenLayers)
+        )
+
         for (i, layer) in layers.enumerated() {
             let perLayerInput = finalPerLayerInputs[0..., 0..., i, 0...]
 
@@ -868,15 +910,23 @@ public class Gemma3nLanguageModel: Module {
 
             let cacheIdx = layerIdxToCacheIdx[i]
             let layerCache = cacheIdx < cacheArray.count ? cacheArray[cacheIdx] : nil
+            let sharedKV = i >= firstKvSharedLayerIdx && cacheIdx < attentionStates.count
+                ? attentionStates[cacheIdx]
+                : nil
 
-            h = layer(
+            let layerResult = layer(
                 h,
                 mask: localMask,
                 cache: layerCache,
                 perLayerInput: perLayerInput,
+                sharedKV: sharedKV,
                 caches: cacheArray,
                 cachePosition: cachePosition
             )
+            h = layerResult.0
+            if cacheIdx < attentionStates.count, let state = layerResult.1 {
+                attentionStates[cacheIdx] = state
+            }
         }
 
         let targetMagnitudeFinal = pow(mean(h[0].square(), axis: -1, keepDims: true), 0.5)

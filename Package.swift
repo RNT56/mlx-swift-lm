@@ -36,7 +36,7 @@ let package = Package(
             targets: ["IntegrationTestHelpers"]),
     ],
     dependencies: [
-        .package(url: "https://github.com/RNT56/mlx-swift", revision: "1994b28276444bea52218e16b80bad64b5bdcd10"),
+        .package(url: "https://github.com/RNT56/mlx-swift", revision: "1230c0eeafc2bc2921e346f532e9bc859d539bae"),
         .package(url: "https://github.com/swiftlang/swift-syntax.git", "600.0.0" ..< "604.0.0"),
     ],
     targets: [

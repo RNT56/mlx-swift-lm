@@ -95,8 +95,39 @@ private struct RestoredAttentionLayoutMetadata {
     var logicalLength: Int
     var ringOffset: Int
     var pinnedPrefixLength: Int
-    var headDimension: Int?
+    var keyHeadDimension: Int?
+    var valueHeadDimension: Int?
     var kvHeadCount: Int?
+
+    init(
+        capacity: Int?,
+        logicalLength: Int,
+        ringOffset: Int,
+        pinnedPrefixLength: Int,
+        headDimension: Int?,
+        valueHeadDimension: Int? = nil,
+        kvHeadCount: Int?
+    ) {
+        self.capacity = capacity
+        self.logicalLength = logicalLength
+        self.ringOffset = ringOffset
+        self.pinnedPrefixLength = pinnedPrefixLength
+        self.keyHeadDimension = headDimension
+        self.valueHeadDimension = valueHeadDimension ?? headDimension
+        self.kvHeadCount = kvHeadCount
+    }
+}
+
+private func turboQuantMetaInt(_ meta: [String], key: String) -> Int? {
+    let prefix = "\(key)="
+    guard let value = meta.first(where: { $0.hasPrefix(prefix) })?.dropFirst(prefix.count) else {
+        return nil
+    }
+    return Int(value)
+}
+
+private func turboQuantSupportsAttentionDimension(_ dimension: Int) -> Bool {
+    dimension > 0 && dimension <= 512
 }
 
 private enum TurboQuantCacheError: Error, CustomStringConvertible {
@@ -156,6 +187,7 @@ public final class TurboQuantKVCache: QuantizedKVCache, TurboQuantCompressedKVCa
             ]
             if let compressedKeys {
                 let layout = compressedKeys.layout
+                let valueLayout = compressedValues?.layout
                 meta += [
                     "turboq-attn-v\(layout.layoutVersion)",
                     String(layout.capacity),
@@ -164,6 +196,9 @@ public final class TurboQuantKVCache: QuantizedKVCache, TurboQuantCompressedKVCa
                     String(layout.headDimension),
                     String(layout.kvHeadCount),
                     lastAttentionPath.rawValue,
+                    "keyHeadDimension=\(layout.headDimension)",
+                    "valueHeadDimension=\(valueLayout?.headDimension ?? layout.headDimension)",
+                    "kvHeadCount=\(layout.kvHeadCount)",
                 ]
             }
             return meta
@@ -180,29 +215,36 @@ public final class TurboQuantKVCache: QuantizedKVCache, TurboQuantCompressedKVCa
                 let headDimension = Int(newValue[compressedBase + 4]),
                 let kvHeadCount = Int(newValue[compressedBase + 5])
             {
+                let keyHeadDimension =
+                    turboQuantMetaInt(newValue, key: "keyHeadDimension") ?? headDimension
+                let valueHeadDimension =
+                    turboQuantMetaInt(newValue, key: "valueHeadDimension") ?? headDimension
+                let restoredKVHeadCount =
+                    turboQuantMetaInt(newValue, key: "kvHeadCount") ?? kvHeadCount
                 offset = logicalLength
                 restoredLayoutMetadata = RestoredAttentionLayoutMetadata(
                     capacity: capacity,
                     logicalLength: logicalLength,
                     ringOffset: ringOffset,
                     pinnedPrefixLength: 0,
-                    headDimension: headDimension,
-                    kvHeadCount: kvHeadCount
+                    headDimension: keyHeadDimension,
+                    valueHeadDimension: valueHeadDimension,
+                    kvHeadCount: restoredKVHeadCount
                 )
                 if var compressedKeys {
                     compressedKeys.layout.capacity = capacity
                     compressedKeys.layout.logicalLength = logicalLength
                     compressedKeys.layout.ringOffset = ringOffset
-                    compressedKeys.layout.headDimension = headDimension
-                    compressedKeys.layout.kvHeadCount = kvHeadCount
+                    compressedKeys.layout.headDimension = keyHeadDimension
+                    compressedKeys.layout.kvHeadCount = restoredKVHeadCount
                     self.compressedKeys = compressedKeys
                 }
                 if var compressedValues {
                     compressedValues.layout.capacity = capacity
                     compressedValues.layout.logicalLength = logicalLength
                     compressedValues.layout.ringOffset = ringOffset
-                    compressedValues.layout.headDimension = headDimension
-                    compressedValues.layout.kvHeadCount = kvHeadCount
+                    compressedValues.layout.headDimension = valueHeadDimension
+                    compressedValues.layout.kvHeadCount = restoredKVHeadCount
                     self.compressedValues = compressedValues
                 }
                 if let path = TurboQuantAttentionPath(rawValue: newValue[compressedBase + 6]) {
@@ -241,8 +283,10 @@ public final class TurboQuantKVCache: QuantizedKVCache, TurboQuantCompressedKVCa
             }
             if activeBackend == .metalPolarQJL, newValue.count == 10 {
                 let capacity = restoredLayoutMetadata?.capacity ?? newValue[0].dim(2)
-                let headDimension = restoredLayoutMetadata?.headDimension
+                let keyHeadDimension = restoredLayoutMetadata?.keyHeadDimension
                     ?? max(groupSize, (newValue[0].dim(3) * groupSize))
+                let valueHeadDimension = restoredLayoutMetadata?.valueHeadDimension
+                    ?? max(groupSize, (newValue[5].dim(3) * groupSize))
                 let logicalLength = restoredLayoutMetadata?.logicalLength
                     ?? (offset > 0 ? min(offset, capacity) : capacity)
                 let keyLayout = MLX.TurboQuantAttentionLayout(
@@ -252,7 +296,7 @@ public final class TurboQuantKVCache: QuantizedKVCache, TurboQuantCompressedKVCa
                     logicalLength: logicalLength,
                     ringOffset: restoredLayoutMetadata?.ringOffset ?? 0,
                     pinnedPrefixLength: restoredLayoutMetadata?.pinnedPrefixLength ?? 0,
-                    headDimension: headDimension,
+                    headDimension: keyHeadDimension,
                     groupsPerVector: newValue[0].dim(3),
                     magnitudeWordsPerGroup: newValue[0].dim(4),
                     bitsetWordsPerGroup: newValue[1].dim(4)
@@ -264,7 +308,7 @@ public final class TurboQuantKVCache: QuantizedKVCache, TurboQuantCompressedKVCa
                     logicalLength: logicalLength,
                     ringOffset: restoredLayoutMetadata?.ringOffset ?? 0,
                     pinnedPrefixLength: restoredLayoutMetadata?.pinnedPrefixLength ?? 0,
-                    headDimension: headDimension,
+                    headDimension: valueHeadDimension,
                     groupsPerVector: newValue[5].dim(3),
                     magnitudeWordsPerGroup: newValue[5].dim(4),
                     bitsetWordsPerGroup: newValue[1].dim(4)
@@ -367,11 +411,17 @@ public final class TurboQuantKVCache: QuantizedKVCache, TurboQuantCompressedKVCa
             lastUnsupportedShape = "query/key/value batch sizes must match"
             return false
         }
-        guard [64, 80, 96, 128, 256].contains(queries.dim(3)),
-            queries.dim(3) == keys.dim(3),
-            queries.dim(3) == values.dim(3)
+        guard keys.dim(2) == values.dim(2), keys.dim(1) == values.dim(1) else {
+            lastUnsupportedShape = "key/value token and head counts must match"
+            return false
+        }
+        guard turboQuantSupportsAttentionDimension(queries.dim(3)),
+            turboQuantSupportsAttentionDimension(keys.dim(3)),
+            turboQuantSupportsAttentionDimension(values.dim(3)),
+            queries.dim(3) == keys.dim(3)
         else {
-            lastUnsupportedShape = "unsupported head dimension q=\(queries.dim(3)) k=\(keys.dim(3)) v=\(values.dim(3))"
+            lastUnsupportedShape =
+                "unsupported head dimension q=\(queries.dim(3)) k=\(keys.dim(3)) v=\(values.dim(3))"
             return false
         }
         guard queries.dim(1) % keys.dim(1) == 0 else {
@@ -387,7 +437,8 @@ public final class TurboQuantKVCache: QuantizedKVCache, TurboQuantCompressedKVCa
             lastUnsupportedShape = "failed to create compressed attention placeholder"
             return false
         }
-        let supportsTiled = prefersOnlineFusedAttention && MLX.turboQuantMetalSupportsOnlineFusedAttention(
+        let supportsTiled = queries.dim(3) == values.dim(3) && prefersOnlineFusedAttention
+            && MLX.turboQuantMetalSupportsOnlineFusedAttention(
             queries: queries,
             keyCode: keyCode,
             mask: mask
@@ -812,11 +863,17 @@ public final class RotatingTurboQuantKVCache: BaseKVCache, QuantizedKVCacheProto
             lastUnsupportedShape = "query/key/value batch sizes must match"
             return false
         }
-        guard [64, 80, 96, 128, 256].contains(queries.dim(3)),
-            queries.dim(3) == keys.dim(3),
-            queries.dim(3) == values.dim(3)
+        guard keys.dim(2) == values.dim(2), keys.dim(1) == values.dim(1) else {
+            lastUnsupportedShape = "key/value token and head counts must match"
+            return false
+        }
+        guard turboQuantSupportsAttentionDimension(queries.dim(3)),
+            turboQuantSupportsAttentionDimension(keys.dim(3)),
+            turboQuantSupportsAttentionDimension(values.dim(3)),
+            queries.dim(3) == keys.dim(3)
         else {
-            lastUnsupportedShape = "unsupported head dimension q=\(queries.dim(3)) k=\(keys.dim(3)) v=\(values.dim(3))"
+            lastUnsupportedShape =
+                "unsupported head dimension q=\(queries.dim(3)) k=\(keys.dim(3)) v=\(values.dim(3))"
             return false
         }
         guard queries.dim(1) % keys.dim(1) == 0 else {
@@ -836,7 +893,8 @@ public final class RotatingTurboQuantKVCache: BaseKVCache, QuantizedKVCacheProto
             lastUnsupportedShape = "failed to create compressed attention placeholder"
             return false
         }
-        let supportsTiled = prefersOnlineFusedAttention && MLX.turboQuantMetalSupportsOnlineFusedAttention(
+        let supportsTiled = queries.dim(3) == values.dim(3) && prefersOnlineFusedAttention
+            && MLX.turboQuantMetalSupportsOnlineFusedAttention(
             queries: queries,
             keyCode: keyCode,
             mask: mask
@@ -958,8 +1016,10 @@ public final class RotatingTurboQuantKVCache: BaseKVCache, QuantizedKVCacheProto
             }
             if activeBackend == .metalPolarQJL, newValue.count == 10 {
                 let capacity = restoredLayoutMetadata?.capacity ?? newValue[0].dim(2)
-                let headDimension = restoredLayoutMetadata?.headDimension
+                let keyHeadDimension = restoredLayoutMetadata?.keyHeadDimension
                     ?? max(groupSize, (newValue[0].dim(3) * groupSize))
+                let valueHeadDimension = restoredLayoutMetadata?.valueHeadDimension
+                    ?? max(groupSize, (newValue[5].dim(3) * groupSize))
                 let logicalLength = restoredLayoutMetadata?.logicalLength ?? min(offset, capacity)
                 let keyLayout = MLX.TurboQuantAttentionLayout(
                     batchSize: newValue[0].dim(0),
@@ -968,7 +1028,7 @@ public final class RotatingTurboQuantKVCache: BaseKVCache, QuantizedKVCacheProto
                     logicalLength: logicalLength,
                     ringOffset: restoredLayoutMetadata?.ringOffset ?? ringOffset(forOffset: offset),
                     pinnedPrefixLength: restoredLayoutMetadata?.pinnedPrefixLength ?? min(keep, capacity),
-                    headDimension: headDimension,
+                    headDimension: keyHeadDimension,
                     groupsPerVector: newValue[0].dim(3),
                     magnitudeWordsPerGroup: newValue[0].dim(4),
                     bitsetWordsPerGroup: newValue[1].dim(4)
@@ -980,7 +1040,7 @@ public final class RotatingTurboQuantKVCache: BaseKVCache, QuantizedKVCacheProto
                     logicalLength: logicalLength,
                     ringOffset: restoredLayoutMetadata?.ringOffset ?? ringOffset(forOffset: offset),
                     pinnedPrefixLength: restoredLayoutMetadata?.pinnedPrefixLength ?? min(keep, capacity),
-                    headDimension: headDimension,
+                    headDimension: valueHeadDimension,
                     groupsPerVector: newValue[5].dim(3),
                     magnitudeWordsPerGroup: newValue[5].dim(4),
                     bitsetWordsPerGroup: newValue[1].dim(4)
@@ -1043,6 +1103,7 @@ public final class RotatingTurboQuantKVCache: BaseKVCache, QuantizedKVCacheProto
             ]
             if let compressedKeys {
                 let layout = compressedKeys.layout
+                let valueLayout = compressedValues?.layout
                 meta += [
                     "turboq-rot-v\(layout.layoutVersion)",
                     String(layout.logicalLength),
@@ -1051,6 +1112,9 @@ public final class RotatingTurboQuantKVCache: BaseKVCache, QuantizedKVCacheProto
                     String(layout.headDimension),
                     lastAttentionPath.rawValue,
                     rawFallbackCache == nil ? "raw-free" : "raw-fallback",
+                    "keyHeadDimension=\(layout.headDimension)",
+                    "valueHeadDimension=\(valueLayout?.headDimension ?? layout.headDimension)",
+                    "kvHeadCount=\(layout.kvHeadCount)",
                 ]
             }
             return meta
@@ -1084,14 +1148,18 @@ public final class RotatingTurboQuantKVCache: BaseKVCache, QuantizedKVCacheProto
                     ringOffset: ringOffset,
                     pinnedPrefixLength: pinnedPrefixLength,
                     headDimension: headDimension,
+                    valueHeadDimension: turboQuantMetaInt(
+                        newValue, key: "valueHeadDimension") ?? headDimension,
                     kvHeadCount: nil
                 )
                 if var compressedKeys {
                     compressedKeys.layout.logicalLength = logicalLength
                     compressedKeys.layout.ringOffset = ringOffset
                     compressedKeys.layout.pinnedPrefixLength = pinnedPrefixLength
-                    if let headDimension {
-                        compressedKeys.layout.headDimension = headDimension
+                    if let keyHeadDimension =
+                        turboQuantMetaInt(newValue, key: "keyHeadDimension") ?? headDimension
+                    {
+                        compressedKeys.layout.headDimension = keyHeadDimension
                     }
                     self.compressedKeys = compressedKeys
                 }
@@ -1099,8 +1167,10 @@ public final class RotatingTurboQuantKVCache: BaseKVCache, QuantizedKVCacheProto
                     compressedValues.layout.logicalLength = logicalLength
                     compressedValues.layout.ringOffset = ringOffset
                     compressedValues.layout.pinnedPrefixLength = pinnedPrefixLength
-                    if let headDimension {
-                        compressedValues.layout.headDimension = headDimension
+                    if let valueHeadDimension =
+                        turboQuantMetaInt(newValue, key: "valueHeadDimension") ?? headDimension
+                    {
+                        compressedValues.layout.headDimension = valueHeadDimension
                     }
                     self.compressedValues = compressedValues
                 }

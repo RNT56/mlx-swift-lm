@@ -265,24 +265,24 @@ class GLM4MoELiteAttention: Module {
         qNope = callMultiLinear(embedQ, qNope)
 
         // Create keys for attention (and caching)
-        var keys = concatenated([kvLatent, kPe], axis: -1)
-        var values = kvLatent  // Values are the compressed KV latent
-
-        // Update cache with compressed representation
-        if let cache {
-            (keys, values) = cache.update(keys: keys, values: values)
-        }
+        let keys = concatenated([kvLatent, kPe], axis: -1)
+        let values = kvLatent  // Values are the compressed KV latent
 
         // Create queries
         let queries = concatenated([qNope, qPe], axis: -1)
 
-        // Compute attention
-        var output = MLXFast.scaledDotProductAttention(
+        let adjustedMask = adjustedAttentionMask(
+            mask,
+            keyLength: attentionKeyLengthAfterUpdate(cache: cache, keys: keys)
+        )
+
+        var output = attentionWithCacheUpdate(
             queries: queries,
             keys: keys,
             values: values,
+            cache: cache,
             scale: scale,
-            mask: mask
+            mask: adjustedMask
         )
 
         // Transform output through unembed_out
@@ -509,7 +509,7 @@ public class GLM4MoELiteModel: Module, LLMModel, KVCacheDimensionProvider {
 
     public func newCache(parameters: GenerateParameters?) -> [KVCache] {
         (0 ..< configuration.hiddenLayers).map { _ in
-            makeRawAttentionKVCache(parameters: parameters)
+            makeAttentionKVCache(parameters: parameters)
         }
     }
 

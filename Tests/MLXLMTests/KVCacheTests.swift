@@ -424,6 +424,82 @@ extension MLXRuntimeSwiftTests {
             #expect(cache.attentionDiagnostics.rawFallbackAllocated == false)
         }
 
+        @Test func testTurboQuantCompressedAttentionStateSupportsSplitValueDimension() throws {
+            guard TurboQuantKernelAvailability.current.supportsMetalPolarQJLAttention else {
+                return
+            }
+
+            let cache = TurboQuantKVCache(backend: .metalPolarQJL)
+            let keys = MLXArray.ones([1, 2, 2, 64], dtype: .float32)
+            let values = MLXArray.ones([1, 2, 2, 80], dtype: .float32)
+            let queries = MLXArray.ones([1, 4, 1, 64], dtype: .float32)
+
+            let result = attentionWithCacheUpdateReturningState(
+                queries: queries,
+                keys: keys,
+                values: values,
+                cache: cache,
+                scale: 0.125
+            )
+
+            #expect(result.output.shape == [1, 4, 1, 80])
+            guard case .turboQuant(let compressedKeys, let compressedValues, _) = result.state else {
+                Issue.record("Expected TurboQuant compressed attention state")
+                return
+            }
+            #expect(compressedKeys.layout.headDimension == 64)
+            #expect(compressedValues.layout.headDimension == 80)
+            #expect(cache.attentionDiagnostics.activeAttentionPath == .twoStageCompressed)
+        }
+
+        @Test func testTurboQuantCompressedStateSerializationKeepsSplitValueDimension() throws {
+            guard TurboQuantKernelAvailability.current.supportsMetalPolarQJLAttention else {
+                return
+            }
+
+            let cache = TurboQuantKVCache(backend: .metalPolarQJL)
+            let keys = MLXArray.ones([1, 2, 2, 64], dtype: .float32)
+            let values = MLXArray.ones([1, 2, 2, 80], dtype: .float32)
+            let queries = MLXArray.ones([1, 4, 1, 64], dtype: .float32)
+            _ = attentionWithCacheUpdateReturningState(
+                queries: queries,
+                keys: keys,
+                values: values,
+                cache: cache,
+                scale: 0.125
+            )
+
+            let url = tempURL()
+            try savePromptCache(url: url, cache: [cache], metadata: [:])
+            let (loaded, _) = try loadPromptCache(url: url)
+            let restored = try #require(loaded.first as? TurboQuantKVCache)
+            let compressed = try #require(restored.compressedState)
+
+            #expect(compressed.0.layout.headDimension == 64)
+            #expect(compressed.1.layout.headDimension == 80)
+        }
+
+        @Test func testQuantizedAttentionStateSupportsSplitValueDimension() {
+            let cache = QuantizedKVCache(groupSize: 64, bits: 4)
+            let keys = MLXArray.ones([1, 2, 3, 64], dtype: .float32)
+            let values = MLXArray.ones([1, 2, 3, 128], dtype: .float32)
+            let queries = MLXArray.ones([1, 4, 1, 64], dtype: .float32)
+
+            let result = attentionWithCacheUpdateReturningState(
+                queries: queries,
+                keys: keys,
+                values: values,
+                cache: cache,
+                scale: 0.125
+            )
+
+            #expect(result.output.shape == [1, 4, 1, 128])
+            guard case .quantized = result.state else {
+                Issue.record("Expected quantized attention state")
+                return
+            }
+        }
+
         @Test func testTurboQuantConservativePolicyUsesTwoStageCompressedAttentionWhenAvailable()
             throws
         {
