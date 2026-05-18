@@ -37,8 +37,24 @@ public func loadWeights(
     weights = model.sanitize(weights: weights, metadata: metadata)
 
     // quantize if needed
-    if quantization != nil || perLayerQuantization != nil {
-        quantize(model: model) { path, module in
+    if let turboQuantOptions = turboQuantLinearLoadOptions(
+        metadata: metadata,
+        quantization: quantization,
+        perLayerQuantization: perLayerQuantization
+    ) {
+        turboQuantize(
+            model: model,
+            preset: turboQuantOptions.preset,
+            groupSize: turboQuantOptions.groupSize,
+            mode: turboQuantOptions.mode,
+            backend: .mlxPacked,
+            seed: turboQuantOptions.seed,
+            valueBits: turboQuantOptions.valueBits
+        ) { path, _ in
+            weights["\(path).scales"] != nil
+        }
+    } else if quantization != nil || perLayerQuantization != nil {
+        quantize(model: model) { path, _ in
             if weights["\(path).scales"] != nil {
                 if let perLayerQuantization {
                     return perLayerQuantization.quantization(layer: path)?.asTuple
@@ -56,4 +72,53 @@ public func loadWeights(
     try model.update(parameters: parameters, verify: [.all])
 
     eval(model)
+}
+
+private struct TurboQuantLinearLoadOptions {
+    var preset: TurboQuantPreset
+    var groupSize: Int
+    var mode: QuantizationMode
+    var seed: UInt64
+    var valueBits: Int?
+}
+
+private func turboQuantLinearLoadOptions(
+    metadata: [String: String],
+    quantization: BaseConfiguration.Quantization?,
+    perLayerQuantization: BaseConfiguration.PerLayerQuantization?
+) -> TurboQuantLinearLoadOptions? {
+    let method = metadata["quant_method"]?.lowercased()
+    let linearClass = metadata["linear_class"]?.lowercased()
+    guard method == "turboquant" || linearClass == "turboquantlinear" else {
+        return nil
+    }
+
+    let preset =
+        metadata["turboquant_preset"]
+        .flatMap(TurboQuantPreset.init(rawValue:))
+        ?? ((metadata["turboquant_bits"].flatMap(Int.init) ?? quantization?.bits ?? 4) <= 2
+            ? .turbo2_5 : .turbo4v2)
+    let groupSize =
+        metadata["turboquant_group_size"].flatMap(Int.init)
+        ?? perLayerQuantization?.quantization?.groupSize
+        ?? quantization?.groupSize
+        ?? 64
+    let mode =
+        metadata["turboquant_mode"]
+        .flatMap(QuantizationMode.init(rawValue:))
+        ?? perLayerQuantization?.quantization?.mode
+        ?? quantization?.mode
+        ?? .affine
+    let seed =
+        metadata["turboquant_seed"].flatMap(UInt64.init)
+        ?? 0x9E37_79B9_7F4A_7C15
+    let valueBits = metadata["turboquant_value_bits"].flatMap(Int.init)
+
+    return TurboQuantLinearLoadOptions(
+        preset: preset,
+        groupSize: groupSize,
+        mode: mode,
+        seed: seed,
+        valueBits: valueBits
+    )
 }

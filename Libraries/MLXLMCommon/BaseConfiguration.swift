@@ -152,6 +152,10 @@ public struct BaseConfiguration: Codable, Sendable {
                 // additional keys that are not layer instructions, see
                 // mlx-community/bitnet-b1.58-2B-4T-4bit
                 case "quant_method", "linear_class", "quantization_mode": continue
+                case "turboquant_format", "turboquant_preset", "turboquant_group_size": continue
+                case "turboquant_bits", "turboquant_mode", "turboquant_seed": continue
+                case "turboquant_value_bits", "turboquant_converted_tensors": continue
+                case "preset", "seed", "value_bits": continue
 
                 default:
                     // If the value is a boolean 'false', we treat it as .skip

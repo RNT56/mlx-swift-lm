@@ -1,0 +1,26 @@
+{
+  "id": "gemma-4",
+  "model_patterns": ["*gemma-4*", "*gemma4*"],
+  "architecture": "gemma4",
+  "supported_key_head_dimensions": [64, 128, 256],
+  "supported_value_head_dimensions": [64, 128, 256],
+  "recommended_scheme": "turbo4v2",
+  "fallback_scheme": "turbo3_5",
+  "key_bits": 3.5,
+  "value_bits": 4,
+  "group_size": 64,
+  "safe_mask_modes": ["none", "causal"],
+  "supported_context_lengths": [4096, 8192, 16384, 32768, 65536],
+  "safe_context_length": 65536,
+  "quality_profile": "balanced",
+  "backend": "metalPolarQJL",
+  "optimization_policy": "auto",
+  "requires_metal_self_test": true,
+  "requires_fused_attention_self_test": false,
+  "measured": {},
+  "notes": [
+    "Uses ordinary MLX model weights; TurboQuant applies only to runtime KV-cache state.",
+    "Shared-KV layers use AttentionKVState so compressed state can be reused without raw KV materialization.",
+    "Runtime shape checks and Metal self-tests remain authoritative."
+  ]
+}
