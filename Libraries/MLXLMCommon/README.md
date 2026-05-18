@@ -27,6 +27,24 @@ print(try await session.respond(to: "What are two things to see in San Francisco
 print(try await session.respond(to: "How about a great place to eat?"))
 ```
 
+## TurboQuant KV Profiles
+
+TurboQuant profiles select a runtime KV-cache policy for ordinary MLX model
+weights. They do not require calibrated or retrained model files.
+
+```swift
+let parameters = GenerateParameters(
+    turboQuantModelID: "mlx-community/Qwen3-4B-4bit",
+    keyHeadDimension: 128,
+    valueHeadDimension: 128
+)
+```
+
+Bundled profile metadata is available through `TurboQuantProfileRegistry.bundled`
+and as JSON files in the repository root `TurboQuantProfiles/` directory.
+Measured perplexity and throughput fields are left empty until reproduced for a
+specific model revision and target device.
+
 ## More Loading Scenarios
 
 Load from a local directory:

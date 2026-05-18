@@ -1,0 +1,26 @@
+{
+  "id": "llama-3.2-3b",
+  "model_patterns": ["*llama-3.2*3b*", "*llama-3-2*3b*"],
+  "architecture": "llama",
+  "supported_key_head_dimensions": [128],
+  "supported_value_head_dimensions": [128],
+  "recommended_scheme": "turbo4v2",
+  "fallback_scheme": "turbo3_5",
+  "key_bits": 3.5,
+  "value_bits": 4,
+  "group_size": 64,
+  "safe_mask_modes": ["none", "causal"],
+  "supported_context_lengths": [4096, 8192, 16384, 32768, 65536],
+  "safe_context_length": 65536,
+  "quality_profile": "balanced",
+  "backend": "metalPolarQJL",
+  "optimization_policy": "auto",
+  "requires_metal_self_test": true,
+  "requires_fused_attention_self_test": false,
+  "measured": {},
+  "notes": [
+    "Uses ordinary MLX model weights; TurboQuant applies only to runtime KV-cache state.",
+    "Measured quality and throughput fields are intentionally empty until reproduced on target hardware.",
+    "Runtime shape checks and Metal self-tests remain authoritative."
+  ]
+}

@@ -8,11 +8,11 @@ This repository is the `RNT56/mlx-swift-lm` fork used by Schtack projects. Treat
 - `schtack/turboquant-kv` intentionally points at the same commit as `main`. Keep this branch as a named integration branch for Schtack work.
 - Do not assume older topic branches are active. Most remote branches are historical experiments or upstream maintenance work.
 
-As of 2026-05-16, active branches should contain this expected code baseline:
+As of 2026-05-18, active branches should contain this expected code baseline:
 
 ```text
-4bb7cbc6aafdf6abec4c34bf36f9e649444539f7
-Pin mlx-swift to Metal fallback revision
+f72c30d6744f1280c641c53f9e15c82a074b5a3a
+Enable TurboQuant for shared and latent attention
 ```
 
 Branch heads may be later docs-only or maintenance commits, but they should not drop this baseline unless the fork stack is intentionally rebuilt.
@@ -34,7 +34,7 @@ The expected `Package.swift` dependency is:
 ```swift
 .package(
     url: "https://github.com/RNT56/mlx-swift",
-    revision: "dd13c2b55a743473d458058e9d9fb028233065ec"
+    revision: "5db40d34a96a9c6889b6583d6cc09f8b8f05ea5e"
 )
 ```
 
@@ -59,6 +59,9 @@ The active branch must include the LM-side TurboQuant and robustness work, inclu
 - `f3479d9` Pin MLX runtime profile refinement
 - `d245b7b` Complete TurboQuant KV cache integration
 - `c2b5697` Implement rotating quantized KV cache
+- `f72c30d` Enable TurboQuant for shared and latent attention
+- `3f0a284` Add TurboQuant linear layer support
+- `5db40d3` Add TurboQuant checkpoint conversion tooling
 - `73e8cd9` Harden model config and runtime error paths
 - `c402565` Complete VLM processor TODOs
 - `b68f708` Add incomplete-marker audit and compile verification
@@ -79,6 +82,13 @@ swift build --target MLXLMCommon
 ```
 
 For changes touching model execution, KV cache behavior, VLM processors, or config parsing, also run the most relevant tests available locally.
+
+For changes touching TurboQuant profile policy, validate both the Swift registry
+and the root JSON profile files:
+
+```sh
+swift test --filter TurboQuantProfileTests
+```
 
 `Package.resolved` is ignored in this repository. Updating it locally during `swift package resolve` is useful for validation, but it is not a tracked source-of-truth file unless the repository policy changes.
 
