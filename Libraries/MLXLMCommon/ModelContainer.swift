@@ -268,6 +268,20 @@ public final class ModelContainer: Sendable {
         }
     }
 
+    /// Human-readable summary of the current layer partition, when supported by the model.
+    public func partitionSummary() async -> String? {
+        await context.read { context in
+            Self.findPartitionable(in: context.model)?.partitionSummary
+        }
+    }
+
+    /// Whether the loaded model exposes streamable MoE expert controls.
+    public func supportsStreamExperts() async -> Bool {
+        await context.read { context in
+            Self.findStreamable(in: context.model) != nil
+        }
+    }
+
     private static func findPartitionable(in module: Module) -> (any LayerPartitionable)? {
         module.modules().lazy.compactMap { $0 as? (any LayerPartitionable) }.first
     }

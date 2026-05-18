@@ -377,7 +377,8 @@ public final class VLMModelFactory: GenericModelFactory {
 
         try loadWeights(
             modelDirectory: modelDirectory, model: model,
-            perLayerQuantization: baseConfig.perLayerQuantization)
+            perLayerQuantization: baseConfig.perLayerQuantization,
+            lazyLoad: configuration.lazyLoad)
 
         let tokenizer = try await tokenizerTask
         let processorConfigData: Data
@@ -417,7 +418,8 @@ public final class VLMModelFactory: GenericModelFactory {
             defaultPrompt: configuration.defaultPrompt,
             extraEOSTokens: mutableConfiguration.extraEOSTokens,
             eosTokenIds: mutableConfiguration.eosTokenIds,
-            toolCallFormat: mutableConfiguration.toolCallFormat)
+            toolCallFormat: mutableConfiguration.toolCallFormat,
+            lazyLoad: mutableConfiguration.lazyLoad)
 
         return .init(
             configuration: modelConfig, model: model, processor: processor,
