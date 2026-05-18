@@ -587,7 +587,8 @@ public final class LLMModelFactory: GenericModelFactory {
 
         try loadWeights(
             modelDirectory: modelDirectory, model: model,
-            perLayerQuantization: baseConfig.perLayerQuantization)
+            perLayerQuantization: baseConfig.perLayerQuantization,
+            lazyLoad: configuration.lazyLoad)
 
         let tokenizer = try await tokenizerTask
 
@@ -609,7 +610,8 @@ public final class LLMModelFactory: GenericModelFactory {
             defaultPrompt: configuration.defaultPrompt,
             extraEOSTokens: mutableConfiguration.extraEOSTokens,
             eosTokenIds: mutableConfiguration.eosTokenIds,
-            toolCallFormat: mutableConfiguration.toolCallFormat)
+            toolCallFormat: mutableConfiguration.toolCallFormat,
+            lazyLoad: mutableConfiguration.lazyLoad)
 
         let processor = LLMUserInputProcessor(
             tokenizer: tokenizer, configuration: modelConfig,
