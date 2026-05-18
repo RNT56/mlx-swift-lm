@@ -420,7 +420,7 @@ class JambaDecoderLayer: Module {
     }
 }
 
-public class JambaModelInner: Module {
+public class JambaModelInner: Module, LayerPartitionable, StreamableMoE {
     @ModuleInfo(key: "embed_tokens") var embedTokens: Embedding
 
     fileprivate let layers: [JambaDecoderLayer]
@@ -429,6 +429,10 @@ public class JambaModelInner: Module {
 
     let attnIdx: Int
     let ssmIdx: Int
+
+    public var gpuLayerCount: Int?
+    public var streamExperts: Bool = false
+    public var totalLayerCount: Int { layers.count }
 
     public init(_ config: JambaConfiguration) {
         precondition(config.vocabSize > 0)
@@ -457,9 +461,19 @@ public class JambaModelInner: Module {
 
         for (i, layer) in layers.enumerated() {
             if layer.isAttn {
-                h = layer(h, mask: attnMask, cache: cacheArray[i])
+                h = partitionedLayerCall(
+                    index: i, gpuLayerCount: gpuLayerCount, stream: streamExperts,
+                    cacheToEval: cacheArray[i]
+                ) {
+                    layer(h, mask: attnMask, cache: cacheArray[i])
+                }
             } else {
-                h = layer(h, mask: .none, cache: cacheArray[i])
+                h = partitionedLayerCall(
+                    index: i, gpuLayerCount: gpuLayerCount, stream: streamExperts,
+                    cacheToEval: cacheArray[i]
+                ) {
+                    layer(h, mask: .none, cache: cacheArray[i])
+                }
             }
         }
 

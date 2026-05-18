@@ -237,4 +237,42 @@ public final class ModelContainer: Sendable {
         let tokenizer = await self.tokenizer
         return try tokenizer.applyChatTemplate(messages: messages)
     }
+
+    /// Configure GPU/CPU layer partitioning for the loaded model.
+    ///
+    /// - Parameter gpuLayers: Number of layers to run on GPU, or nil for all layers on
+    ///   the default device.
+    /// - Returns: The clamped GPU layer count when a partitionable model was found.
+    @discardableResult
+    public func setGPULayers(_ gpuLayers: Int?) async -> Int? {
+        await context.read { context in
+            guard let partitionable = Self.findPartitionable(in: context.model) else {
+                return nil
+            }
+            partitionable.setGPULayers(gpuLayers)
+            return partitionable.gpuLayerCount
+        }
+    }
+
+    /// Enable or disable per-layer expert streaming behavior for MoE models.
+    ///
+    /// - Returns: `true` when a streamable MoE model was found.
+    @discardableResult
+    public func setStreamExperts(_ stream: Bool) async -> Bool {
+        await context.read { context in
+            guard let streamable = Self.findStreamable(in: context.model) else {
+                return false
+            }
+            streamable.streamExperts = stream
+            return true
+        }
+    }
+
+    private static func findPartitionable(in module: Module) -> (any LayerPartitionable)? {
+        module.modules().lazy.compactMap { $0 as? (any LayerPartitionable) }.first
+    }
+
+    private static func findStreamable(in module: Module) -> (any StreamableMoE)? {
+        module.modules().lazy.compactMap { $0 as? (any StreamableMoE) }.first
+    }
 }

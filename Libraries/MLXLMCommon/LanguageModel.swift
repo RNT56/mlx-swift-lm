@@ -61,6 +61,7 @@ public struct LMInput {
     public let text: Text
     public let image: ProcessedImage?
     public let video: ProcessedVideo?
+    public let audio: ProcessedAudio?
 
     /// Representation of tokenized input text.
     public struct Text {
@@ -120,17 +121,32 @@ public struct LMInput {
         }
     }
 
+    /// Representation of prepared input audio.
+    public struct ProcessedAudio {
+        public let features: MLXArray
+        public let mask: MLXArray?
+        public let seqLengths: [Int]?
+
+        public init(features: MLXArray, mask: MLXArray? = nil, seqLengths: [Int]? = nil) {
+            self.features = features
+            self.mask = mask
+            self.seqLengths = seqLengths
+        }
+    }
+
     public init(tokens: MLXArray, mask: MLXArray? = nil) {
         self.init(text: .init(tokens: tokens, mask: mask))
     }
 
     public init(
         text: LMInput.Text, image: LMInput.ProcessedImage? = nil,
-        video: LMInput.ProcessedVideo? = nil
+        video: LMInput.ProcessedVideo? = nil,
+        audio: LMInput.ProcessedAudio? = nil
     ) {
         self.text = text
         self.image = image
         self.video = video
+        self.audio = audio
     }
 }
 
@@ -262,5 +278,40 @@ extension LanguageModel where Self: KVCacheDimensionProvider {
         } else {
             return (0 ..< numLayers).map { _ in KVCacheSimple() }
         }
+    }
+}
+
+/// Interface for language models that support Multi-Token Prediction (MTP).
+///
+/// MTP models can produce the main model logits and one or more future-token
+/// draft logits from a single forward pass. Callers still verify the drafted
+/// tokens against the main logits before emitting them.
+public protocol MTPLanguageModel: LanguageModel {
+    /// Returns `[mainLogits, mtpHead0Logits, mtpHead1Logits, ...]`.
+    ///
+    /// `mtpCaches` are persistent per-head caches. Models that need them should
+    /// create them in ``makeMTPCaches(parameters:)`` and update them here.
+    func callMTP(_ inputs: MLXArray, cache: [KVCache]?, mtpCaches: [[KVCache]]?) -> [MLXArray]
+
+    /// Initialize persistent per-depth caches for MTP heads.
+    func makeMTPCaches(parameters: GenerateParameters?) -> [[KVCache]]
+}
+
+/// MTP draft models that need a reference to the verifier model.
+public protocol DualModelMTP: MTPLanguageModel {
+    var mainModelRef: (any BaseLanguageModel)? { get set }
+}
+
+extension MTPLanguageModel {
+    public func callMTP(_ inputs: MLXArray, cache: [KVCache]?, mtpCaches: [[KVCache]]?) -> [MLXArray] {
+        callMTP(inputs, cache: cache)
+    }
+
+    public func callMTP(_ inputs: MLXArray, cache: [KVCache]?) -> [MLXArray] {
+        callMTP(inputs, cache: cache, mtpCaches: nil)
+    }
+
+    public func makeMTPCaches(parameters: GenerateParameters?) -> [[KVCache]] {
+        []
     }
 }

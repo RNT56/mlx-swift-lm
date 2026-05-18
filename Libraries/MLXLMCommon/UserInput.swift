@@ -141,6 +141,12 @@ public struct UserInput {
         }
     }
 
+    /// Representation of an audio resource.
+    public enum Audio: Sendable {
+        case data(Data, format: String)
+        case url(URL)
+    }
+
     /// Representation of processing to apply to media.
     public struct Processing: Sendable {
         public var resize: CGSize?
@@ -158,12 +164,15 @@ public struct UserInput {
                 // no action
                 break
             case .chat(let messages):
-                // rebuild images & videos
+                // rebuild images, videos, and audio
                 self.images = messages.reduce(into: []) { result, message in
                     result.append(contentsOf: message.images)
                 }
                 self.videos = messages.reduce(into: []) { result, message in
                     result.append(contentsOf: message.videos)
+                }
+                self.audio = messages.reduce(into: []) { result, message in
+                    result.append(contentsOf: message.audio)
                 }
             }
         }
@@ -180,6 +189,12 @@ public struct UserInput {
     /// If the ``prompt-swift.property`` is a ``Prompt-swift.enum/chat(_:)`` this will
     /// collect the videos from the chat messages, otherwise these are the stored videos with the ``UserInput``.
     public var videos = [Video]()
+
+    /// The audio associated with the `UserInput`.
+    ///
+    /// If the ``prompt-swift.property`` is a ``Prompt-swift.enum/chat(_:)`` this will
+    /// collect the audio from the chat messages, otherwise these are the stored audio with the ``UserInput``.
+    public var audio = [Audio]()
 
     public var tools: [ToolSpec]?
 
@@ -200,15 +215,17 @@ public struct UserInput {
     /// - ``init(chat:processing:tools:additionalContext:)``
     public init(
         prompt: String, images: [Image] = [Image](), videos: [Video] = [Video](),
+        audio: [Audio] = [Audio](),
         tools: [ToolSpec]? = nil,
         additionalContext: [String: any Sendable]? = nil
     ) {
         self.prompt = .chat([
-            .user(prompt, images: images, videos: videos)
+            .user(prompt, images: images, videos: videos, audio: audio)
         ])
         // note: prompt.didSet is not triggered in init
         self.images = images
         self.videos = videos
+        self.audio = audio
         self.tools = tools
         self.additionalContext = additionalContext
     }
@@ -248,12 +265,14 @@ public struct UserInput {
     /// - ``init(chat:processing:tools:additionalContext:)``
     public init(
         messages: [Message], images: [Image] = [Image](), videos: [Video] = [Video](),
+        audio: [Audio] = [Audio](),
         tools: [ToolSpec]? = nil,
         additionalContext: [String: any Sendable]? = nil
     ) {
         self.prompt = .messages(messages)
         self.images = images
         self.videos = videos
+        self.audio = audio
         self.tools = tools
         self.additionalContext = additionalContext
     }
@@ -296,6 +315,9 @@ public struct UserInput {
         self.videos = chat.reduce(into: []) { result, message in
             result.append(contentsOf: message.videos)
         }
+        self.audio = chat.reduce(into: []) { result, message in
+            result.append(contentsOf: message.audio)
+        }
 
         self.processing = processing
         self.tools = tools
@@ -320,6 +342,7 @@ public struct UserInput {
         prompt: Prompt,
         images: [Image] = [Image](),
         videos: [Video] = [Video](),
+        audio: [Audio] = [Audio](),
         processing: Processing = .init(),
         tools: [ToolSpec]? = nil, additionalContext: [String: any Sendable]? = nil
     ) {
@@ -329,12 +352,16 @@ public struct UserInput {
         case .text, .messages:
             self.images = images
             self.videos = videos
+            self.audio = audio
         case .chat(let messages):
             self.images = messages.reduce(into: []) { result, message in
                 result.append(contentsOf: message.images)
             }
             self.videos = messages.reduce(into: []) { result, message in
                 result.append(contentsOf: message.videos)
+            }
+            self.audio = messages.reduce(into: []) { result, message in
+                result.append(contentsOf: message.audio)
             }
         }
         self.processing = processing

@@ -1,5 +1,5 @@
 import Foundation
-import MLX
+@preconcurrency import MLX
 import MLXNN
 
 // Port of https://github.com/ml-explore/mlx-examples/blob/main/llms/mlx_lm/models/switch_layers.py
@@ -23,6 +23,36 @@ public func scatterUnsort(x: MLXArray, invOrder: MLXArray, shape: [Int]? = nil) 
         x = unflatten(x, axis: 0, shape: shape)
     }
     return x
+}
+
+public struct ExpertRange: Equatable, Sendable {
+    public let id: Int
+    public let start: Int
+    public let end: Int
+
+    public init(id: Int, start: Int, end: Int) {
+        self.id = id
+        self.start = start
+        self.end = end
+    }
+}
+
+private func expertRanges(from indices: MLXArray) -> [ExpertRange] {
+    let cpuIndices = indices.asArray(UInt32.self)
+    var ranges = [ExpertRange]()
+    var start = 0
+
+    while start < cpuIndices.count {
+        let expert = Int(cpuIndices[start])
+        var end = start + 1
+        while end < cpuIndices.count && Int(cpuIndices[end]) == expert {
+            end += 1
+        }
+        ranges.append(ExpertRange(id: expert, start: start, end: end))
+        start = end
+    }
+
+    return ranges
 }
 
 // MARK: - SwitchGLU
@@ -62,7 +92,8 @@ public class SwitchGLU: Module {
     public func callAsFunction(_ x: MLXArray, _ indices: MLXArray) -> MLXArray {
         var x = MLX.expandedDimensions(x, axes: [-2, -3])
 
-        let doSort = indices.size >= 64
+        let isExpertStreaming = ExpertStreamingConfig.shared.isEnabled
+        let doSort = indices.size >= 64 || isExpertStreaming
 
         var idx = indices
         var inverseOrder = MLXArray()
@@ -71,12 +102,20 @@ public class SwitchGLU: Module {
             (x, idx, inverseOrder) = gatherSort(x: x, indices: indices)
         }
 
-        let xUp = upProj(x, idx, sortedIndices: doSort)
-        let xGate = gateProj(x, idx, sortedIndices: doSort)
-        x = downProj(
-            activation(xGate) * xUp,
-            idx,
-            sortedIndices: doSort)
+        if isExpertStreaming {
+            MLX.eval(idx)
+            let ranges = expertRanges(from: idx)
+            let xGate = gateProj.computeStreamedExperts(x, ranges: ranges)
+            let xUp = upProj.computeStreamedExperts(x, ranges: ranges)
+            x = downProj.computeStreamedExperts(activation(xGate) * xUp, ranges: ranges)
+        } else {
+            let xUp = upProj(x, idx, sortedIndices: doSort)
+            let xGate = gateProj(x, idx, sortedIndices: doSort)
+            x = downProj(
+                activation(xGate) * xUp,
+                idx,
+                sortedIndices: doSort)
+        }
 
         if doSort {
             x = scatterUnsort(x: x, invOrder: inverseOrder, shape: indices.shape)
@@ -123,7 +162,8 @@ public class FusedGateUpSwitchGLU: Module {
     public func callAsFunction(_ x: MLXArray, _ indices: MLXArray) -> MLXArray {
         var x = MLX.expandedDimensions(x, axes: [-2, -3])
 
-        let doSort = indices.size >= 64
+        let isExpertStreaming = ExpertStreamingConfig.shared.isEnabled
+        let doSort = indices.size >= 64 || isExpertStreaming
 
         var idx = indices
         var inverseOrder = MLXArray()
@@ -132,12 +172,27 @@ public class FusedGateUpSwitchGLU: Module {
             (x, idx, inverseOrder) = gatherSort(x: x, indices: indices)
         }
 
-        let gateUp = gateUpProj(x, idx, sortedIndices: doSort)
+        let gateUp: MLXArray
+        let ranges: [ExpertRange]?
+        if isExpertStreaming {
+            MLX.eval(idx)
+            let parsedRanges = expertRanges(from: idx)
+            ranges = parsedRanges
+            gateUp = gateUpProj.computeStreamedExperts(x, ranges: parsedRanges)
+        } else {
+            ranges = nil
+            gateUp = gateUpProj(x, idx, sortedIndices: doSort)
+        }
+
         let parts = MLX.split(gateUp, parts: 2, axis: -1)
-        x = downProj(
-            activation(parts[0]) * parts[1],
-            idx,
-            sortedIndices: doSort)
+        if let ranges {
+            x = downProj.computeStreamedExperts(activation(parts[0]) * parts[1], ranges: ranges)
+        } else {
+            x = downProj(
+                activation(parts[0]) * parts[1],
+                idx,
+                sortedIndices: doSort)
+        }
 
         if doSort {
             x = scatterUnsort(x: x, invOrder: inverseOrder, shape: indices.shape)
@@ -156,6 +211,51 @@ public class SwitchLinear: Module, Quantizable {
     let inputDims: Int
     let outputDims: Int
     let numExperts: Int
+
+    public func resolveSSDInfo() -> (path: String, tensorName: String)? {
+        #if os(macOS)
+        guard ExpertStreamingConfig.shared.useDirectNVMe else {
+            return nil
+        }
+
+        if let firstUnstacked = unstackedSSDMap?[0] {
+            return (firstUnstacked.path, firstUnstacked.tensorName)
+        }
+
+        guard let tensorName,
+            let filename = ExpertStreamerManager.shared?.getFile(for: tensorName),
+            let modelDirectory = ExpertStreamingConfig.shared.modelDirectory
+        else {
+            return nil
+        }
+
+        return (modelDirectory.appendingPathComponent(filename).path, tensorName)
+        #else
+        return nil
+        #endif
+    }
+
+    public func resolveSSDInfo(expertIndex: Int) -> (
+        path: String, tensorName: String, readIndex: UInt32
+    )? {
+        #if os(macOS)
+        guard ExpertStreamingConfig.shared.useDirectNVMe else {
+            return nil
+        }
+
+        if let unstacked = unstackedSSDMap?[expertIndex] {
+            return (unstacked.path, unstacked.tensorName, 0)
+        }
+
+        guard let base = resolveSSDInfo() else {
+            return nil
+        }
+
+        return (base.path, base.tensorName, UInt32(expertIndex))
+        #else
+        return nil
+        #endif
+    }
 
     public init(inputDims: Int, outputDims: Int, numExperts: Int, bias: Bool = true) {
         self.inputDims = inputDims
@@ -195,6 +295,11 @@ public class SwitchLinear: Module, Quantizable {
     public func callAsFunction(
         _ x: MLXArray, _ indices: MLXArray, sortedIndices: Bool = false
     ) -> MLXArray {
+        if ExpertStreamingConfig.shared.isEnabled {
+            MLX.eval(indices)
+            return computeStreamedExperts(x, ranges: expertRanges(from: indices))
+        }
+
         let weightT = self.weight.swappedAxes(-1, -2)
         var result = MLX.gatherMM(x, weightT, rhsIndices: indices, sortedIndices: sortedIndices)
 
@@ -203,6 +308,107 @@ public class SwitchLinear: Module, Quantizable {
         }
 
         return result
+    }
+
+    public func allocateExpertBuffers(_ count: Int) -> [MLXArray] {
+        (0..<count).map { _ in
+            MLXArray.zeros([1, outputDims, inputDims]).asType(weight.dtype)
+        }
+    }
+
+    @discardableResult
+    public func loadExpertWeights(_ buffers: [MLXArray], ranges: [ExpertRange]) -> Bool {
+        guard buffers.count == ranges.count else {
+            return false
+        }
+
+        for (buffer, range) in zip(buffers, ranges) {
+            guard let ssd = resolveSSDInfo(expertIndex: range.id) else {
+                return false
+            }
+
+            let status = MLXFast.preadInto(
+                buffer,
+                safetensorsPath: ssd.path,
+                tensorName: ssd.tensorName,
+                expertIndex: ssd.readIndex)
+            if status != 0 {
+                return false
+            }
+        }
+
+        return true
+    }
+
+    public func computeStreamedExperts(_ x: MLXArray, ranges: [ExpertRange]) -> MLXArray {
+        if ranges.isEmpty {
+            return zeroOutput(like: x)
+        }
+
+        if ExpertStreamingConfig.shared.useDirectNVMe,
+            ranges.allSatisfy({ resolveSSDInfo(expertIndex: $0.id) != nil })
+        {
+            let buffers = allocateExpertBuffers(ranges.count)
+            MLX.eval(buffers)
+            if loadExpertWeights(buffers, ranges: ranges) {
+                return computeExperts(x, buffers: buffers, ranges: ranges)
+            }
+        }
+
+        return computeExperts(x, buffers: nil, ranges: ranges)
+    }
+
+    public func computeExperts(
+        _ x: MLXArray, buffers: [MLXArray]?, ranges: [ExpertRange]
+    ) -> MLXArray {
+        var expertResults = [MLXArray]()
+
+        for (i, range) in ranges.enumerated() {
+            let rangeX = x[range.start ..< range.end]
+            let expertIndices = MLXArray.zeros([range.end - range.start], type: UInt32.self)
+
+            let expertWeight: MLXArray
+            if let buffers {
+                expertWeight = buffers[i]
+            } else {
+                expertWeight = weight[range.id ..< range.id + 1]
+                MLX.eval(expertWeight)
+                MLXFast.prefault(expertWeight)
+            }
+
+            var expertOutput = MLX.gatherMM(
+                rangeX,
+                expertWeight.swappedAxes(-1, -2),
+                rhsIndices: expertIndices,
+                sortedIndices: true)
+
+            if let bias {
+                let expertBias = bias[range.id ..< range.id + 1]
+                expertOutput = expertOutput + MLX.expandedDimensions(
+                    expertBias[expertIndices], axis: -2)
+            }
+
+            expertOutput = canonicalizedExpertOutput(expertOutput, like: rangeX)
+            expertResults.append(expertOutput)
+        }
+
+        return expertResults.isEmpty
+            ? zeroOutput(like: x)
+            : MLX.concatenated(expertResults, axis: 0)
+    }
+
+    func zeroOutput(like x: MLXArray) -> MLXArray {
+        var shape = x.shape
+        shape[shape.count - 1] = outputDims
+        return MLXArray.zeros(shape).asType(x.dtype)
+    }
+
+    func canonicalizedExpertOutput(_ expertOutput: MLXArray, like x: MLXArray) -> MLXArray {
+        let canonicalShape = Array(x.shape.dropLast()) + [outputDims]
+        if expertOutput.shape == canonicalShape {
+            return expertOutput
+        }
+        return expertOutput.reshaped(canonicalShape)
     }
 
     public func toQuantized(groupSize: Int = 64, bits: Int = 4, mode: QuantizationMode) -> Module {
@@ -241,6 +447,11 @@ public class QuantizedSwitchLinear: SwitchLinear, Quantized {
     override public func callAsFunction(
         _ x: MLXArray, _ indices: MLXArray, sortedIndices: Bool = false
     ) -> MLXArray {
+        if ExpertStreamingConfig.shared.isEnabled {
+            MLX.eval(indices)
+            return computeStreamedExperts(x, ranges: expertRanges(from: indices))
+        }
+
         var result = MLX.gatherQuantizedMM(
             x,
             self.weight,
@@ -259,5 +470,56 @@ public class QuantizedSwitchLinear: SwitchLinear, Quantized {
         }
 
         return result
+    }
+
+    override public func computeExperts(
+        _ x: MLXArray, buffers: [MLXArray]?, ranges: [ExpertRange]
+    ) -> MLXArray {
+        var expertResults = [MLXArray]()
+
+        for (i, range) in ranges.enumerated() {
+            let rangeX = x[range.start ..< range.end]
+            let expertIndices = MLXArray.zeros([range.end - range.start], type: UInt32.self)
+
+            let expertWeight: MLXArray
+            if let buffers {
+                expertWeight = buffers[i]
+            } else {
+                expertWeight = weight[range.id ..< range.id + 1]
+                MLX.eval(expertWeight)
+                MLXFast.prefault(expertWeight)
+            }
+
+            let expertScales = scales[range.id ..< range.id + 1]
+            var expertBiases: MLXArray? = nil
+            if let biases {
+                expertBiases = biases[range.id ..< range.id + 1]
+            }
+
+            var expertOutput = MLX.gatherQuantizedMM(
+                rangeX,
+                expertWeight,
+                scales: expertScales,
+                biases: expertBiases,
+                rhsIndices: expertIndices,
+                transpose: true,
+                groupSize: groupSize,
+                bits: bits,
+                mode: mode,
+                sortedIndices: true)
+
+            if let bias {
+                let expertBias = bias[range.id ..< range.id + 1]
+                expertOutput = expertOutput + MLX.expandedDimensions(
+                    expertBias[expertIndices], axis: -2)
+            }
+
+            expertOutput = canonicalizedExpertOutput(expertOutput, like: rangeX)
+            expertResults.append(expertOutput)
+        }
+
+        return expertResults.isEmpty
+            ? zeroOutput(like: x)
+            : MLX.concatenated(expertResults, axis: 0)
     }
 }

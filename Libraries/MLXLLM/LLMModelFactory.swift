@@ -36,6 +36,10 @@ public enum LLMTypeRegistry {
         "gemma3n": create(Gemma3nTextConfiguration.self, Gemma3nTextModel.init),
         "gemma4": create(Gemma4Configuration.self, Gemma4Model.init),
         "gemma4_text": create(Gemma4TextConfiguration.self, Gemma4TextModel.init),
+        "gemma4_assistant": { data in
+            let fullConfig = try JSONDecoder.json5().decode(Gemma4Configuration.self, from: data)
+            return Gemma4AssistantModel(fullConfig)
+        },
         "qwen2": create(Qwen2Configuration.self, Qwen2Model.init),
         "qwen3": create(Qwen3Configuration.self, Qwen3Model.init),
         "qwen3_moe": create(Qwen3MoEConfiguration.self, Qwen3MoEModel.init),
@@ -49,6 +53,7 @@ public enum LLMTypeRegistry {
         "openelm": create(OpenElmConfiguration.self, OpenELMModel.init),
         "internlm2": create(InternLM2Configuration.self, InternLM2Model.init),
         "deepseek_v3": create(DeepseekV3Configuration.self, DeepseekV3Model.init),
+        "deepseek_v4": create(DeepseekV4Configuration.self, DeepseekV4Model.init),
         "granite": create(GraniteConfiguration.self, GraniteModel.init),
         "granitemoehybrid": create(
             GraniteMoeHybridConfiguration.self, GraniteMoeHybridModel.init),
@@ -77,7 +82,23 @@ public enum LLMTypeRegistry {
         "nemotron_h": create(NemotronHConfiguration.self, NemotronHModel.init),
         "afmoe": create(AfMoEConfiguration.self, AfMoEModel.init),
         "jamba": create(JambaConfiguration.self, JambaModel.init),
-        "mistral3": create(Mistral3TextConfiguration.self, Mistral3TextModel.init),
+        "mistral3": { data in
+            struct InnerType: Decodable {
+                struct TextConfig: Decodable {
+                    let modelType: String?
+                    enum CodingKeys: String, CodingKey { case modelType = "model_type" }
+                }
+                let textConfig: TextConfig?
+                enum CodingKeys: String, CodingKey { case textConfig = "text_config" }
+            }
+            let probe = try JSONDecoder.json5().decode(InnerType.self, from: data)
+            if probe.textConfig?.modelType == "mistral4" {
+                let config = try JSONDecoder.json5().decode(Mistral4Configuration.self, from: data)
+                return Mistral4Model(config)
+            }
+            let config = try JSONDecoder.json5().decode(Mistral3TextConfiguration.self, from: data)
+            return Mistral3TextModel(config)
+        },
         "apertus": create(ApertusConfiguration.self, ApertusModel.init),
     ])
 }
