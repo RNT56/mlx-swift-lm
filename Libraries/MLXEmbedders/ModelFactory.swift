@@ -204,6 +204,7 @@ public final class EmbedderModelFactory: GenericModelFactory {
             tokenizerSource: tokenizerSource,
             defaultPrompt: configuration.defaultPrompt,
             extraEOSTokens: configuration.extraEOSTokens,
+            stopStrings: configuration.stopStrings,
             eosTokenIds: configuration.eosTokenIds,
             toolCallFormat: configuration.toolCallFormat)
 
