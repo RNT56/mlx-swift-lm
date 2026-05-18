@@ -1,6 +1,71 @@
 import Foundation
 import MLX
 
+public typealias QuantizedKVStorage = (MLXArray, MLXArray, MLXArray?)
+
+/// Cached attention state that can be passed between model layers without assuming raw KV arrays.
+public enum AttentionKVState {
+    case raw(keys: MLXArray, values: MLXArray)
+    case quantized(
+        keys: QuantizedKVStorage,
+        values: QuantizedKVStorage,
+        cache: any QuantizedKVCacheProtocol
+    )
+    case turboQuant(
+        keys: TurboQuantAttentionCode,
+        values: TurboQuantAttentionCode,
+        cache: any TurboQuantCompressedKVCacheProtocol
+    )
+
+    public var keyLength: Int {
+        switch self {
+        case .raw(let keys, _):
+            keys.dim(2)
+        case .quantized(let keys, _, _):
+            keys.0.dim(-2)
+        case .turboQuant(let keys, _, _):
+            keys.layout.logicalLength
+        }
+    }
+}
+
+public func attentionKeyLengthAfterUpdate(cache: KVCache?, keys: MLXArray) -> Int {
+    let updatedLength = (cache?.offset ?? 0) + keys.dim(2)
+    if let maxSize = cache?.maxSize {
+        return min(updatedLength, maxSize)
+    }
+    return updatedLength
+}
+
+public func adjustedAttentionMask(
+    _ mask: MLXFast.ScaledDotProductAttentionMaskMode?,
+    keyLength: Int,
+    dtype: DType? = nil
+) -> MLXFast.ScaledDotProductAttentionMaskMode {
+    guard let mask else { return .none }
+
+    func adjusted(_ maskArray: MLXArray) -> MLXArray {
+        let sliced =
+            maskArray.dim(-1) == keyLength
+            ? maskArray
+            : maskArray[.ellipsis, 0 ..< keyLength]
+        if let dtype, sliced.dtype != .bool {
+            return sliced.asType(dtype)
+        }
+        return sliced
+    }
+
+    switch mask {
+    case .array(let maskArray):
+        return .array(adjusted(maskArray))
+    case .arrays(let maskArrays):
+        guard let firstMask = maskArrays.first else { return .none }
+        return .array(adjusted(firstMask))
+    case .causal, .none:
+        return mask
+    }
+}
+
 public func withTurboQuantCompressedCacheUpdate<T>(
     queries: MLXArray,
     keys: MLXArray,
@@ -38,6 +103,95 @@ public func withTurboQuantCompressedCacheUpdate<T>(
         }
         turboQuantCache.recordCompressedAttentionFailure(String(describing: error))
         return nil
+    }
+}
+
+public func attentionWithKVState(
+    queries: MLXArray,
+    state: AttentionKVState,
+    scale: Float,
+    mask: MLXFast.ScaledDotProductAttentionMaskMode = .none,
+    sinks: MLXArray? = nil
+) -> MLXArray {
+    switch state {
+    case .raw(let keys, let values):
+        return MLXFast.scaledDotProductAttention(
+            queries: queries,
+            keys: keys,
+            values: values,
+            scale: scale,
+            mask: mask,
+            sinks: sinks
+        )
+
+    case .quantized(let keys, let values, let cache):
+        if let sinks {
+            let decodedKeys = dequantized(
+                keys.0,
+                scales: keys.1,
+                biases: keys.2,
+                groupSize: cache.groupSize,
+                bits: cache.bits,
+                mode: cache.mode
+            )
+            let decodedValues = dequantized(
+                values.0,
+                scales: values.1,
+                biases: values.2,
+                groupSize: cache.groupSize,
+                bits: cache.bits,
+                mode: cache.mode
+            )
+            return MLXFast.scaledDotProductAttention(
+                queries: queries,
+                keys: decodedKeys,
+                values: decodedValues,
+                scale: scale,
+                mask: mask,
+                sinks: sinks
+            )
+        }
+        return quantizedScaledDotProductAttention(
+            queries: queries,
+            quantizedKeys: keys,
+            quantizedValues: values,
+            scale: scale,
+            mask: mask,
+            groupSize: cache.groupSize,
+            bits: cache.bits,
+            mode: cache.mode
+        )
+
+    case .turboQuant(let keys, let values, let cache):
+        do {
+            return try turboQuantMetalScaledDotProductAttention(
+                queries: queries,
+                keyCode: keys,
+                valueCode: values,
+                scale: scale,
+                mask: mask,
+                sinks: sinks,
+                preferOnlineFused: cache.prefersOnlineFusedAttention,
+                kernelProfile: cache.attentionDiagnostics.selectedKernelProfile
+            )
+        } catch {
+            cache.recordCompressedAttentionFailure(String(describing: error))
+            if let decodedKeys = try? turboQuantMetalDecodeAttention(keys, outputDType: queries.dtype),
+                let decodedValues = try? turboQuantMetalDecodeAttention(values, outputDType: queries.dtype)
+            {
+                return MLXFast.scaledDotProductAttention(
+                    queries: queries,
+                    keys: decodedKeys,
+                    values: decodedValues,
+                    scale: scale,
+                    mask: mask,
+                    sinks: sinks
+                )
+            }
+            fatalError(
+                "TurboQuant compressed attention failed and compressed state could not be decoded: \(error)"
+            )
+        }
     }
 }
 
@@ -86,24 +240,47 @@ public func attentionWithCacheUpdate(
     mask: MLXFast.ScaledDotProductAttentionMaskMode = .none,
     sinks: MLXArray? = nil
 ) -> MLXArray {
+    attentionWithCacheUpdateReturningState(
+        queries: queries,
+        keys: keys,
+        values: values,
+        cache: cache,
+        scale: scale,
+        mask: mask,
+        sinks: sinks
+    ).output
+}
+
+public func attentionWithCacheUpdateReturningState(
+    queries: MLXArray,
+    keys: MLXArray,
+    values: MLXArray,
+    cache: KVCache?,
+    scale: Float,
+    mask: MLXFast.ScaledDotProductAttentionMaskMode = .none,
+    sinks: MLXArray? = nil
+) -> (output: MLXArray, state: AttentionKVState) {
     guard let cache else {
-        return MLXFast.scaledDotProductAttention(
-            queries: queries,
-            keys: keys,
-            values: values,
-            scale: scale,
-            mask: mask,
-            sinks: sinks
+        let state = AttentionKVState.raw(keys: keys, values: values)
+        return (
+            attentionWithKVState(
+                queries: queries,
+                state: state,
+                scale: scale,
+                mask: mask,
+                sinks: sinks
+            ),
+            state
         )
     }
-    if let output = withTurboQuantCompressedCacheUpdate(
+    if let result = withTurboQuantCompressedCacheUpdate(
         queries: queries,
         keys: keys,
         values: values,
         cache: cache,
         mask: mask,
         { compressedKeys, compressedValues, turboQuantCache in
-            try turboQuantMetalScaledDotProductAttention(
+            let output = try turboQuantMetalScaledDotProductAttention(
                 queries: queries,
                 keyCode: compressedKeys,
                 valueCode: compressedValues,
@@ -113,58 +290,48 @@ public func attentionWithCacheUpdate(
                 preferOnlineFused: turboQuantCache.prefersOnlineFusedAttention,
                 kernelProfile: turboQuantCache.attentionDiagnostics.selectedKernelProfile
             )
+            return (
+                output,
+                AttentionKVState.turboQuant(
+                    keys: compressedKeys,
+                    values: compressedValues,
+                    cache: turboQuantCache
+                )
+            )
         }
     ) {
-        return output
+        return result
     }
     if let quantizedKVCache = cache as? QuantizedKVCacheProtocol {
         let (quantizedKeys, quantizedValues) = quantizedKVCache.updateQuantized(
             keys: keys, values: values)
-        if let sinks {
-            let decodedKeys = dequantized(
-                quantizedKeys.0,
-                scales: quantizedKeys.1,
-                biases: quantizedKeys.2,
-                groupSize: quantizedKVCache.groupSize,
-                bits: quantizedKVCache.bits,
-                mode: quantizedKVCache.mode
-            )
-            let decodedValues = dequantized(
-                quantizedValues.0,
-                scales: quantizedValues.1,
-                biases: quantizedValues.2,
-                groupSize: quantizedKVCache.groupSize,
-                bits: quantizedKVCache.bits,
-                mode: quantizedKVCache.mode
-            )
-            return MLXFast.scaledDotProductAttention(
+        let state = AttentionKVState.quantized(
+            keys: quantizedKeys,
+            values: quantizedValues,
+            cache: quantizedKVCache
+        )
+        return (
+            attentionWithKVState(
                 queries: queries,
-                keys: decodedKeys,
-                values: decodedValues,
+                state: state,
                 scale: scale,
                 mask: mask,
                 sinks: sinks
-            )
-        }
-        return quantizedScaledDotProductAttention(
-            queries: queries,
-            quantizedKeys: quantizedKeys,
-            quantizedValues: quantizedValues,
-            scale: scale,
-            mask: mask,
-            groupSize: quantizedKVCache.groupSize,
-            bits: quantizedKVCache.bits,
-            mode: quantizedKVCache.mode
+            ),
+            state
         )
     } else {
         let (cachedKeys, cachedValues) = cache.update(keys: keys, values: values)
-        return MLXFast.scaledDotProductAttention(
-            queries: queries,
-            keys: cachedKeys,
-            values: cachedValues,
-            scale: scale,
-            mask: mask,
-            sinks: sinks
+        let state = AttentionKVState.raw(keys: cachedKeys, values: cachedValues)
+        return (
+            attentionWithKVState(
+                queries: queries,
+                state: state,
+                scale: scale,
+                mask: mask,
+                sinks: sinks
+            ),
+            state
         )
     }
 }

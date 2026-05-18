@@ -2336,7 +2336,7 @@ public func quantizedScaledDotProductAttention(
 
     // Reshape output for GQA
     if nRepeats > 1 {
-        output = output.reshaped([B, nQHeads, L, D])
+        output = output.reshaped([B, nQHeads, L, output.dim(-1)])
     }
 
     return output
