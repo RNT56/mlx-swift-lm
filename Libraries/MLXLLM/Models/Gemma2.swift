@@ -58,7 +58,54 @@ class Gemma2Attention: Module {
         queries = applyRotaryPosition(rope, to: queries, offset: offset)
         keys = applyRotaryPosition(rope, to: keys, offset: offset)
 
-        if let cache {
+        if let output = withTurboQuantCompressedCacheUpdate(
+            queries: queries,
+            keys: keys,
+            values: values,
+            cache: cache,
+            mask: .none,
+            { compressedKeys, compressedValues, _ in
+                var scores = try turboQuantMetalQK(
+                    queries: queries,
+                    keyCode: compressedKeys,
+                    scale: self.scale,
+                    mask: .none
+                )
+                scores = tanh(scores / logitSoftCap) * logitSoftCap
+                if let mask {
+                    scores = scores + mask
+                }
+                scores = softmax(scores, axis: -1, precise: true)
+                return try turboQuantMetalAV(
+                    attentionWeights: scores,
+                    valueCode: compressedValues,
+                    outputDType: queries.dtype
+                )
+            }
+        ) {
+            return wo(output.transposed(0, 2, 1, 3).reshaped(B, L, -1))
+        }
+
+        if let quantizedCache = cache as? QuantizedKVCacheProtocol {
+            let (quantizedKeys, quantizedValues) = quantizedCache.updateQuantized(
+                keys: keys, values: values)
+            keys = dequantized(
+                quantizedKeys.0,
+                scales: quantizedKeys.1,
+                biases: quantizedKeys.2,
+                groupSize: quantizedCache.groupSize,
+                bits: quantizedCache.bits,
+                mode: quantizedCache.mode
+            )
+            values = dequantized(
+                quantizedValues.0,
+                scales: quantizedValues.1,
+                biases: quantizedValues.2,
+                groupSize: quantizedCache.groupSize,
+                bits: quantizedCache.bits,
+                mode: quantizedCache.mode
+            )
+        } else if let cache {
             (keys, values) = cache.update(keys: keys, values: values)
         }
 

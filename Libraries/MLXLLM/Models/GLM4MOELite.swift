@@ -507,6 +507,12 @@ public class GLM4MoELiteModel: Module, LLMModel, KVCacheDimensionProvider {
         return lmHead(out)
     }
 
+    public func newCache(parameters: GenerateParameters?) -> [KVCache] {
+        (0 ..< configuration.hiddenLayers).map { _ in
+            makeRawAttentionKVCache(parameters: parameters)
+        }
+    }
+
     public func sanitize(weights: [String: MLXArray]) -> [String: MLXArray] {
         var sanitized = weights
 

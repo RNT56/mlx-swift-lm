@@ -227,6 +227,7 @@ extension LanguageModel where Self: KVCacheDimensionProvider {
             let groupSize = parameters?.kvGroupSize ?? 64
             let policy = parameters?.turboQuantOptimizationPolicy ?? .auto
             let seed = parameters?.turboQuantSeed ?? defaultTurboQuantSeed
+            let valueBits = parameters?.turboQuantValueBits
             if let maxKVSize = parameters?.maxKVSize {
                 return (0 ..< numLayers).map { _ in
                     RotatingTurboQuantKVCache(
@@ -236,7 +237,8 @@ extension LanguageModel where Self: KVCacheDimensionProvider {
                         groupSize: groupSize,
                         backend: backend,
                         optimizationPolicy: policy,
-                        seed: seed
+                        seed: seed,
+                        valueBits: valueBits
                     )
                 }
             }
@@ -246,7 +248,8 @@ extension LanguageModel where Self: KVCacheDimensionProvider {
                     groupSize: groupSize,
                     backend: backend,
                     optimizationPolicy: policy,
-                    seed: seed
+                    seed: seed,
+                    valueBits: valueBits
                 )
             }
         }

@@ -111,7 +111,8 @@ public enum WiredMemoryUtils {
                 turboQuantPreset: parameters.turboQuantPreset,
                 turboQuantBackend: parameters.turboQuantBackend,
                 turboQuantOptimizationPolicy: parameters.turboQuantOptimizationPolicy,
-                turboQuantSeed: parameters.turboQuantSeed
+                turboQuantSeed: parameters.turboQuantSeed,
+                turboQuantValueBits: parameters.turboQuantValueBits
             )
             eval(result.logits)
         case .logits(let result):
@@ -124,7 +125,8 @@ public enum WiredMemoryUtils {
                 turboQuantPreset: parameters.turboQuantPreset,
                 turboQuantBackend: parameters.turboQuantBackend,
                 turboQuantOptimizationPolicy: parameters.turboQuantOptimizationPolicy,
-                turboQuantSeed: parameters.turboQuantSeed
+                turboQuantSeed: parameters.turboQuantSeed,
+                turboQuantValueBits: parameters.turboQuantValueBits
             )
             eval(result.logits)
         }

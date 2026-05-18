@@ -1,6 +1,46 @@
 import Foundation
 import MLX
 
+public func withTurboQuantCompressedCacheUpdate<T>(
+    queries: MLXArray,
+    keys: MLXArray,
+    values: MLXArray,
+    cache: KVCache?,
+    mask: MLXFast.ScaledDotProductAttentionMaskMode,
+    _ body: (TurboQuantAttentionCode, TurboQuantAttentionCode, any TurboQuantCompressedKVCacheProtocol)
+        throws -> T
+) -> T? {
+    guard var turboQuantCache = cache as? TurboQuantCompressedKVCacheProtocol,
+        turboQuantCache.supportsCompressedAttention(
+            queries: queries,
+            keys: keys,
+            values: values,
+            mask: mask
+        )
+    else {
+        return nil
+    }
+
+    let previousOffset = turboQuantCache.offset
+    let previousState = turboQuantCache.state.map { $0[.ellipsis] }
+    let previousMetaState = turboQuantCache.metaState
+    do {
+        let (compressedKeys, compressedValues) = try turboQuantCache.updateCompressed(
+            keys: keys,
+            values: values
+        )
+        return try body(compressedKeys, compressedValues, turboQuantCache)
+    } catch {
+        turboQuantCache.metaState = previousMetaState
+        turboQuantCache.state = previousState
+        if let baseCache = turboQuantCache as? BaseKVCache {
+            baseCache.offset = previousOffset
+        }
+        turboQuantCache.recordCompressedAttentionFailure(String(describing: error))
+        return nil
+    }
+}
+
 /// Attention utilities that match Python mlx-lm's interface
 ///
 /// This provides a single function that automatically routes to quantized or regular
@@ -56,23 +96,14 @@ public func attentionWithCacheUpdate(
             sinks: sinks
         )
     }
-    if var turboQuantCache = cache as? TurboQuantCompressedKVCacheProtocol,
-        turboQuantCache.supportsCompressedAttention(
-            queries: queries,
-            keys: keys,
-            values: values,
-            mask: mask
-        )
-    {
-        let previousOffset = turboQuantCache.offset
-        let previousState = turboQuantCache.state.map { $0[.ellipsis] }
-        let previousMetaState = turboQuantCache.metaState
-        do {
-            let (compressedKeys, compressedValues) = try turboQuantCache.updateCompressed(
-                keys: keys,
-                values: values
-            )
-            return try turboQuantMetalScaledDotProductAttention(
+    if let output = withTurboQuantCompressedCacheUpdate(
+        queries: queries,
+        keys: keys,
+        values: values,
+        cache: cache,
+        mask: mask,
+        { compressedKeys, compressedValues, turboQuantCache in
+            try turboQuantMetalScaledDotProductAttention(
                 queries: queries,
                 keyCode: compressedKeys,
                 valueCode: compressedValues,
@@ -82,16 +113,9 @@ public func attentionWithCacheUpdate(
                 preferOnlineFused: turboQuantCache.prefersOnlineFusedAttention,
                 kernelProfile: turboQuantCache.attentionDiagnostics.selectedKernelProfile
             )
-        } catch {
-            turboQuantCache.metaState = previousMetaState
-            turboQuantCache.state = previousState
-            if let baseCache = turboQuantCache as? BaseKVCache {
-                baseCache.offset = previousOffset
-            }
-            turboQuantCache.recordCompressedAttentionFailure(String(describing: error))
-            // Fall through to the packed quantized cache path. The compressed
-            // path is opportunistic and must never make generation fail.
         }
+    ) {
+        return output
     }
     if let quantizedKVCache = cache as? QuantizedKVCacheProtocol {
         let (quantizedKeys, quantizedValues) = quantizedKVCache.updateQuantized(

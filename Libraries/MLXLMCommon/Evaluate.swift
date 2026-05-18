@@ -87,6 +87,9 @@ public struct GenerateParameters: Sendable {
     /// Deterministic seed for TurboQuant preconditioning, normally derived from model id and revision.
     public var turboQuantSeed: UInt64?
 
+    /// Bit width for TurboQuant values. Defaults to the preset recommendation.
+    public var turboQuantValueBits: Int?
+
     /// Sampling temperature
     public var temperature: Float
 
@@ -128,6 +131,7 @@ public struct GenerateParameters: Sendable {
         turboQuantBackend: TurboQuantBackend = .metalPolarQJL,
         turboQuantOptimizationPolicy: TurboQuantOptimizationPolicy = .auto,
         turboQuantSeed: UInt64? = nil,
+        turboQuantValueBits: Int? = nil,
         temperature: Float = 0.6,
         topP: Float = 1.0,
         topK: Int = 0,
@@ -150,6 +154,7 @@ public struct GenerateParameters: Sendable {
         self.turboQuantBackend = turboQuantBackend
         self.turboQuantOptimizationPolicy = turboQuantOptimizationPolicy
         self.turboQuantSeed = turboQuantSeed
+        self.turboQuantValueBits = turboQuantValueBits
         self.temperature = temperature
         self.topP = topP
         self.topK = topK
@@ -566,6 +571,7 @@ public struct TokenIterator: TokenIteratorProtocol {
     let turboQuantBackend: TurboQuantBackend
     let turboQuantOptimizationPolicy: TurboQuantOptimizationPolicy
     let turboQuantSeed: UInt64?
+    let turboQuantValueBits: Int?
 
     // Internal metrics
     public var promptPrefillTime: TimeInterval = 0.0
@@ -599,6 +605,7 @@ public struct TokenIterator: TokenIteratorProtocol {
         self.turboQuantBackend = parameters.turboQuantBackend
         self.turboQuantOptimizationPolicy = parameters.turboQuantOptimizationPolicy
         self.turboQuantSeed = parameters.turboQuantSeed
+        self.turboQuantValueBits = parameters.turboQuantValueBits
 
         self.promptPrefillTime = try measure {
             try prepare(input: .init(text: y), windowSize: parameters.prefillStepSize)
@@ -637,6 +644,7 @@ public struct TokenIterator: TokenIteratorProtocol {
         self.turboQuantBackend = parameters.turboQuantBackend
         self.turboQuantOptimizationPolicy = parameters.turboQuantOptimizationPolicy
         self.turboQuantSeed = parameters.turboQuantSeed
+        self.turboQuantValueBits = parameters.turboQuantValueBits
 
         self.promptPrefillTime = try measure {
             try prepare(input: input, windowSize: parameters.prefillStepSize)
@@ -676,6 +684,7 @@ public struct TokenIterator: TokenIteratorProtocol {
         self.turboQuantBackend = cacheParameters?.turboQuantBackend ?? .metalPolarQJL
         self.turboQuantOptimizationPolicy = cacheParameters?.turboQuantOptimizationPolicy ?? .auto
         self.turboQuantSeed = cacheParameters?.turboQuantSeed
+        self.turboQuantValueBits = cacheParameters?.turboQuantValueBits
 
         self.promptPrefillTime = try measure {
             try prepare(input: input, windowSize: prefillStepSize)
@@ -731,7 +740,8 @@ public struct TokenIterator: TokenIteratorProtocol {
             turboQuantPreset: turboQuantPreset,
             turboQuantBackend: turboQuantBackend,
             turboQuantOptimizationPolicy: turboQuantOptimizationPolicy,
-            turboQuantSeed: turboQuantSeed
+            turboQuantSeed: turboQuantSeed,
+            turboQuantValueBits: turboQuantValueBits
         )
 
         return convertToToken(logits: result.logits)
@@ -854,7 +864,8 @@ public struct SpeculativeTokenIterator: TokenIteratorProtocol {
                 turboQuantPreset: parameters.turboQuantPreset,
                 turboQuantBackend: parameters.turboQuantBackend,
                 turboQuantOptimizationPolicy: parameters.turboQuantOptimizationPolicy,
-                turboQuantSeed: parameters.turboQuantSeed
+                turboQuantSeed: parameters.turboQuantSeed,
+                turboQuantValueBits: parameters.turboQuantValueBits
             )
         }
 
