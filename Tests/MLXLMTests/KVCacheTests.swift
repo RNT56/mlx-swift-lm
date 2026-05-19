@@ -313,10 +313,8 @@ extension MLXRuntimeSwiftTests {
 
         @Test func testAttentionWithCacheUpdateSupportsSinksWithTurboQuantCache() {
             guard TurboQuantKernelAvailability.current.supportsMetalPolarQJLCodec else { return }
-            let expectedPath: TurboQuantAttentionPath =
-                TurboQuantKernelAvailability.current.supportsMetalPolarQJLAttention
-                ? .twoStageCompressed
-                : .mlxPackedFallback
+            let expectsCompressedPath = TurboQuantKernelAvailability.current
+                .supportsMetalPolarQJLAttention
 
             Device.withDefaultDevice(.cpu) {
                 let cache = TurboQuantKVCache()
@@ -336,9 +334,13 @@ extension MLXRuntimeSwiftTests {
 
                 #expect(output.shape == [1, 2, 1, 64])
                 #expect(cache.offset == 1)
-                #expect(cache.attentionDiagnostics.activeAttentionPath == expectedPath)
-                if expectedPath == .twoStageCompressed {
+                if expectsCompressedPath {
+                    #expect(
+                        cache.attentionDiagnostics.activeAttentionPath == .twoStageCompressed
+                            || cache.attentionDiagnostics.activeAttentionPath == .tiledOnlineFused)
                     #expect(cache.compressedState != nil)
+                } else {
+                    #expect(cache.attentionDiagnostics.activeAttentionPath == .mlxPackedFallback)
                 }
             }
         }
@@ -395,6 +397,71 @@ extension MLXRuntimeSwiftTests {
             #expect(allClose(materialized, expected, rtol: 1e-5, atol: 1e-5).item(Bool.self))
             #expect(allClose(turboFallback, expected, rtol: 1e-5, atol: 1e-5).item(Bool.self))
             #expect(turboCache.attentionDiagnostics.activeAttentionPath == .mlxPackedFallback)
+        }
+
+        @Test func testQuantizedPackedAttentionSupportsSinks() {
+            let queries = MLXArray.zeros([1, 2, 1, 64], dtype: .float32)
+            let keys = MLXArray.zeros([1, 2, 3, 64], dtype: .float32)
+            let values = MLXArray.ones([1, 2, 3, 64], dtype: .float32)
+            let sinks = MLXArray([Float(0), Float(1)], [2])
+            let cache = QuantizedKVCache(groupSize: 32, bits: 4)
+
+            let packed = attentionWithCacheUpdate(
+                queries: queries,
+                keys: keys,
+                values: values,
+                cache: cache,
+                scale: 1,
+                sinks: sinks
+            )
+            let reference = MLXFast.scaledDotProductAttention(
+                queries: queries,
+                keys: keys,
+                values: values,
+                scale: 1,
+                mask: .none,
+                sinks: sinks
+            )
+
+            #expect(packed.shape == reference.shape)
+            #expect(allClose(packed, reference, rtol: 1e-5, atol: 1e-5).item(Bool.self))
+        }
+
+        @Test func testQuantizedCachesPreserveFloatingPointModeParameters() {
+            guard Device.defaultDevice().deviceType == .gpu else { return }
+
+            let keys = MLXArray.ones([1, 1, 2, 64], dtype: .float16)
+            let values = MLXArray.ones([1, 1, 2, 64], dtype: .float16)
+            let queries = MLXArray.ones([1, 1, 1, 64], dtype: .float16)
+            let simple = KVCacheSimple()
+            _ = simple.update(keys: keys, values: values)
+
+            let quantized = simple.toQuantized(groupSize: 64, bits: 4, mode: .mxfp4)
+            #expect(quantized.groupSize == 32)
+            #expect(quantized.bits == 4)
+            #expect(quantized.mode == .mxfp4)
+            #expect(quantized.state.count == 4)
+
+            let output = attentionWithCacheUpdate(
+                queries: queries,
+                keys: keys,
+                values: values,
+                cache: QuantizedKVCache(groupSize: 64, bits: 4, mode: .mxfp4),
+                scale: 0.125
+            )
+            #expect(output.shape == [1, 1, 1, 64])
+
+            let rotating = RotatingQuantizedKVCache(
+                maxSize: 4,
+                groupSize: 64,
+                bits: 4,
+                mode: .mxfp4
+            )
+            let state = rotating.updateQuantized(keys: keys, values: values)
+            #expect(rotating.groupSize == 32)
+            #expect(rotating.mode == .mxfp4)
+            #expect(state.0.2 == nil)
+            #expect(state.1.2 == nil)
         }
 
         @Test func testTurboQuantCompressedAttentionStateWhenAvailable() throws {

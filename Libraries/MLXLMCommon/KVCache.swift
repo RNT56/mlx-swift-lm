@@ -139,6 +139,43 @@ public protocol QuantizedKVCacheProtocol: KVCache {
     func getQuantizedState() -> ((MLXArray, MLXArray, MLXArray?), (MLXArray, MLXArray, MLXArray?))?
 }
 
+private struct ResolvedQuantizationParameters {
+    var groupSize: Int
+    var bits: Int
+}
+
+private func resolvedQuantizationParameters(
+    groupSize: Int,
+    bits: Int,
+    mode: QuantizationMode
+) -> ResolvedQuantizationParameters {
+    switch mode {
+    case .affine:
+        return .init(groupSize: groupSize, bits: bits)
+    case .mxfp4:
+        return .init(groupSize: 32, bits: 4)
+    case .mxfp8:
+        return .init(groupSize: 32, bits: 8)
+    case .nvfp4:
+        return .init(groupSize: 16, bits: 4)
+    }
+}
+
+private func inferredQuantizationMode(
+    stateCount: Int,
+    groupSize: Int,
+    bits: Int
+) -> QuantizationMode {
+    guard stateCount == 4 else { return .affine }
+    if groupSize == 16 && bits == 4 {
+        return .nvfp4
+    }
+    if groupSize == 32 && bits == 8 {
+        return .mxfp8
+    }
+    return .mxfp4
+}
+
 /// Base cache implementation providing default behaviors
 open class BaseKVCache: KVCache {
     public var offset: Int = 0
@@ -425,17 +462,36 @@ public class KVCacheSimple: BaseKVCache, CustomDebugStringConvertible {
     /// Convert to quantized cache for maximum efficiency
     ///
     /// Use `updateQuantized()` and `quantizedScaledDotProductAttention()` for zero-overhead operation.
-    public func toQuantized(groupSize: Int = 64, bits: Int = 4) -> QuantizedKVCache {
-        let quantizedCache = QuantizedKVCache(groupSize: groupSize, bits: bits)
+    public func toQuantized(
+        groupSize: Int = 64,
+        bits: Int = 4,
+        mode: QuantizationMode = .affine
+    ) -> QuantizedKVCache {
+        let quantizedCache = QuantizedKVCache(groupSize: groupSize, bits: bits, mode: mode)
         quantizedCache.offset = self.offset
+        let parameters = resolvedQuantizationParameters(
+            groupSize: quantizedCache.groupSize,
+            bits: quantizedCache.bits,
+            mode: quantizedCache.mode
+        )
 
         if let keys = self.keys, let values = self.values {
             // Quantize the current keys and values
             let currentKeys = keys[.ellipsis, ..<offset, 0...]
             let currentValues = values[.ellipsis, ..<offset, 0...]
 
-            let quantizedKeys = quantized(currentKeys, groupSize: groupSize, bits: bits)
-            let quantizedValues = quantized(currentValues, groupSize: groupSize, bits: bits)
+            let quantizedKeys = quantized(
+                currentKeys,
+                groupSize: parameters.groupSize,
+                bits: parameters.bits,
+                mode: quantizedCache.mode
+            )
+            let quantizedValues = quantized(
+                currentValues,
+                groupSize: parameters.groupSize,
+                bits: parameters.bits,
+                mode: quantizedCache.mode
+            )
 
             // Set the quantized state
             quantizedCache.state = [
@@ -800,8 +856,13 @@ public class QuantizedKVCache: BaseKVCache, QuantizedKVCacheProtocol {
     public let mode: QuantizationMode
 
     public init(groupSize: Int = 64, bits: Int = 8, mode: QuantizationMode = .affine) {
-        self.groupSize = groupSize
-        self.bits = bits
+        let parameters = resolvedQuantizationParameters(
+            groupSize: groupSize,
+            bits: bits,
+            mode: mode
+        )
+        self.groupSize = parameters.groupSize
+        self.bits = parameters.bits
         self.step = 256
         self.mode = mode
         super.init()
@@ -843,7 +904,7 @@ public class QuantizedKVCache: BaseKVCache, QuantizedKVCacheProtocol {
     {
         // Create temporary zero arrays and quantize them using native MLX Swift
         let tempArray = MLXArray.zeros(shape + [dim], dtype: dtype)
-        let quantized = quantized(tempArray, groupSize: groupSize, bits: bits)
+        let quantized = quantized(tempArray, groupSize: groupSize, bits: bits, mode: mode)
 
         return (quantized.wq, quantized.scales, quantized.biases)
     }
@@ -919,8 +980,8 @@ public class QuantizedKVCache: BaseKVCache, QuantizedKVCacheProtocol {
 
         offset += numSteps
 
-        let quantizedKeys = quantized(keys, groupSize: groupSize, bits: bits)
-        let quantizedValues = quantized(values, groupSize: groupSize, bits: bits)
+        let quantizedKeys = quantized(keys, groupSize: groupSize, bits: bits, mode: mode)
+        let quantizedValues = quantized(values, groupSize: groupSize, bits: bits, mode: mode)
 
         // Convert named tuples to positional tuples
         let qKeys = (quantizedKeys.wq, quantizedKeys.scales, quantizedKeys.biases)
@@ -1109,7 +1170,7 @@ public class RotatingQuantizedKVCache: QuantizedKVCache {
     }
 
     private func quantizedTuple(_ array: MLXArray) -> QuantizedTuple {
-        let q = quantized(array, groupSize: groupSize, bits: bits)
+        let q = quantized(array, groupSize: groupSize, bits: bits, mode: mode)
         return (q.wq, q.scales, q.biases)
     }
 
@@ -1915,7 +1976,14 @@ private func restoreCacheFromMetaState(
         return cache
 
     case "QuantizedKVCache":
-        let cache = QuantizedKVCache()
+        let groupSize = metaState.count > 2 ? Int(metaState[2]) ?? 64 : 64
+        let bits = metaState.count > 3 ? Int(metaState[3]) ?? 8 : 8
+        let mode = inferredQuantizationMode(
+            stateCount: state.count,
+            groupSize: groupSize,
+            bits: bits
+        )
+        let cache = QuantizedKVCache(groupSize: groupSize, bits: bits, mode: mode)
         cache.state = state
         cache.metaState = metaState
         return cache
@@ -2252,16 +2320,142 @@ public typealias StandardKVCache = KVCacheSimple
 
 // MARK: - Quantized Attention Operations
 
+private func quantizedHeadDimension(_ packed: MLXArray, bits: Int) -> Int? {
+    guard bits > 0 else { return nil }
+    let unpackedElements = packed.dim(-1) * 32
+    guard unpackedElements % bits == 0 else { return nil }
+    return unpackedElements / bits
+}
+
+private func normalizedQuantizedAttentionMask(
+    _ mask: MLXFast.ScaledDotProductAttentionMaskMode
+) -> MLXFast.ScaledDotProductAttentionMaskMode {
+    switch mask {
+    case .arrays(let masks):
+        return masks.first.map { .array($0) } ?? .none
+    default:
+        return mask
+    }
+}
+
+private func supportsNativeQuantizedScaledDotProductAttention(
+    queries: MLXArray,
+    quantizedKeys: (MLXArray, MLXArray, MLXArray?),
+    quantizedValues: (MLXArray, MLXArray, MLXArray?),
+    mask: MLXFast.ScaledDotProductAttentionMaskMode,
+    sinks: MLXArray?,
+    parameters: ResolvedQuantizationParameters,
+    mode: QuantizationMode
+) -> Bool {
+    guard parameters.groupSize > 0, parameters.bits > 0 else { return false }
+    guard queries.ndim == 4,
+        quantizedKeys.0.ndim == 4,
+        quantizedKeys.1.ndim == 4,
+        quantizedValues.0.ndim == 4,
+        quantizedValues.1.ndim == 4
+    else { return false }
+
+    guard queries.dtype == .float16 || queries.dtype == .bfloat16 || queries.dtype == .float32,
+        quantizedKeys.0.dtype == .uint32,
+        quantizedValues.0.dtype == .uint32
+    else { return false }
+
+    let keyHeadDimension = quantizedHeadDimension(quantizedKeys.0, bits: parameters.bits)
+    let valueHeadDimension = quantizedHeadDimension(quantizedValues.0, bits: parameters.bits)
+    guard keyHeadDimension == queries.dim(-1),
+        valueHeadDimension == queries.dim(-1),
+        queries.dim(-1) % parameters.groupSize == 0
+    else { return false }
+
+    guard queries.dim(0) == quantizedKeys.0.dim(0),
+        queries.dim(0) == quantizedValues.0.dim(0),
+        quantizedKeys.0.dim(-3) > 0,
+        quantizedKeys.0.dim(-3) == quantizedValues.0.dim(-3),
+        quantizedKeys.0.dim(-2) == quantizedValues.0.dim(-2),
+        queries.dim(-3) % quantizedKeys.0.dim(-3) == 0
+    else { return false }
+
+    let expectedScaleDimension = queries.dim(-1) / parameters.groupSize
+    guard quantizedKeys.1.dim(-1) == expectedScaleDimension,
+        quantizedValues.1.dim(-1) == expectedScaleDimension,
+        quantizedKeys.1.dim(-3) == quantizedKeys.0.dim(-3),
+        quantizedValues.1.dim(-3) == quantizedValues.0.dim(-3),
+        quantizedKeys.1.dim(-2) == quantizedKeys.0.dim(-2),
+        quantizedValues.1.dim(-2) == quantizedValues.0.dim(-2)
+    else { return false }
+
+    switch mode {
+    case .affine:
+        guard parameters.groupSize == 32 || parameters.groupSize == 64,
+            parameters.bits == 4 || parameters.bits == 6 || parameters.bits == 8,
+            let keyBiases = quantizedKeys.2,
+            let valueBiases = quantizedValues.2,
+            keyBiases.ndim == 4,
+            valueBiases.ndim == 4,
+            keyBiases.shape == quantizedKeys.1.shape,
+            valueBiases.shape == quantizedValues.1.shape
+        else { return false }
+    case .mxfp4, .mxfp8, .nvfp4:
+        guard quantizedKeys.2 == nil,
+            quantizedValues.2 == nil,
+            quantizedKeys.1.dtype == .uint8,
+            quantizedValues.1.dtype == .uint8
+        else { return false }
+    }
+
+    if case .array(let maskArray) = mask, maskArray.ndim > 4 {
+        return false
+    }
+
+    if let sinks {
+        guard sinks.ndim == 1,
+            sinks.dim(0) == queries.dim(1),
+            sinks.dtype.isFloatingPoint
+        else { return false }
+    }
+
+    return true
+}
+
 public func quantizedScaledDotProductAttention(
     queries: MLXArray,
     quantizedKeys: (MLXArray, MLXArray, MLXArray?),
     quantizedValues: (MLXArray, MLXArray, MLXArray?),
     scale: Float,
     mask: MLXFast.ScaledDotProductAttentionMaskMode = .none,
+    sinks: MLXArray? = nil,
     groupSize: Int = 64,
     bits: Int = 8,
     mode: QuantizationMode = .affine
 ) -> MLXArray {
+    let parameters = resolvedQuantizationParameters(groupSize: groupSize, bits: bits, mode: mode)
+    let nativeMask = normalizedQuantizedAttentionMask(mask)
+
+    if supportsNativeQuantizedScaledDotProductAttention(
+        queries: queries,
+        quantizedKeys: quantizedKeys,
+        quantizedValues: quantizedValues,
+        mask: nativeMask,
+        sinks: sinks,
+        parameters: parameters,
+        mode: mode
+    ) {
+        return MLXFast.quantizedScaledDotProductAttention(
+            queries: queries,
+            keys: quantizedKeys.0,
+            keyScales: quantizedKeys.1,
+            values: quantizedValues.0,
+            valueScales: quantizedValues.1,
+            scale: scale,
+            keyBiases: quantizedKeys.2,
+            valueBiases: quantizedValues.2,
+            mask: nativeMask,
+            sinks: sinks,
+            groupSize: parameters.groupSize,
+            bits: parameters.bits,
+            mode: mode
+        )
+    }
 
     let (B, nQHeads, L, D) = (queries.dim(0), queries.dim(1), queries.dim(2), queries.dim(3))
     let nKVHeads = quantizedKeys.0.dim(-3)
@@ -2290,7 +2484,7 @@ public func quantizedScaledDotProductAttention(
     // Compute attention scores using quantized matmul
     var scores = quantizedMM(
         scaledQueries, qKeys.0, scales: qKeys.1, biases: qKeys.2,
-        transpose: true, groupSize: groupSize, bits: bits,
+        transpose: true, groupSize: parameters.groupSize, bits: parameters.bits,
         mode: mode
     )
 
@@ -2325,12 +2519,39 @@ public func quantizedScaledDotProductAttention(
         break
     }
 
+    if let sinks {
+        precondition(
+            sinks.ndim == 1 && sinks.dim(0) == nQHeads && sinks.dtype.isFloatingPoint,
+            "attention sinks must be a floating point array with shape [query heads]"
+        )
+        let sinkScores: MLXArray
+        if nRepeats > 1 {
+            sinkScores = broadcast(
+                expandedDimensions(
+                    sinks.asType(scores.dtype).reshaped([nKVHeads, nRepeats]),
+                    axes: [0, 3, 4]
+                ),
+                to: [B, nKVHeads, nRepeats, L, 1]
+            )
+        } else {
+            sinkScores = broadcast(
+                expandedDimensions(sinks.asType(scores.dtype), axes: [0, 2, 3]),
+                to: [B, nQHeads, L, 1]
+            )
+        }
+        scores = concatenated([sinkScores, scores], axis: -1)
+    }
+
     let attentionWeights = softmax(scores, axis: -1)
+    let attentionValues =
+        sinks == nil
+        ? attentionWeights
+        : attentionWeights[.ellipsis, 1...]
 
     // Compute output using quantized matmul
     var output = quantizedMM(
-        attentionWeights, qValues.0, scales: qValues.1, biases: qValues.2,
-        transpose: false, groupSize: groupSize, bits: bits,
+        attentionValues, qValues.0, scales: qValues.1, biases: qValues.2,
+        transpose: false, groupSize: parameters.groupSize, bits: parameters.bits,
         mode: mode
     )
 

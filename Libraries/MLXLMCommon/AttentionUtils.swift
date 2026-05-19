@@ -127,38 +127,13 @@ public func attentionWithKVState(
         )
 
     case .quantized(let keys, let values, let cache):
-        if let sinks {
-            let decodedKeys = dequantized(
-                keys.0,
-                scales: keys.1,
-                biases: keys.2,
-                groupSize: cache.groupSize,
-                bits: cache.bits,
-                mode: cache.mode
-            )
-            let decodedValues = dequantized(
-                values.0,
-                scales: values.1,
-                biases: values.2,
-                groupSize: cache.groupSize,
-                bits: cache.bits,
-                mode: cache.mode
-            )
-            return MLXFast.scaledDotProductAttention(
-                queries: queries,
-                keys: decodedKeys,
-                values: decodedValues,
-                scale: scale,
-                mask: mask,
-                sinks: sinks
-            )
-        }
         return quantizedScaledDotProductAttention(
             queries: queries,
             quantizedKeys: keys,
             quantizedValues: values,
             scale: scale,
             mask: mask,
+            sinks: sinks,
             groupSize: cache.groupSize,
             bits: cache.bits,
             mode: cache.mode
