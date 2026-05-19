@@ -108,6 +108,32 @@ public func withTurboQuantCompressedCacheUpdate<T>(
     }
 }
 
+func packedQuantizedAttentionFallback(
+    queries: MLXArray,
+    cache: any TurboQuantCompressedKVCacheProtocol,
+    scale: Float,
+    mask: MLXFast.ScaledDotProductAttentionMaskMode = .none,
+    sinks: MLXArray? = nil
+) -> MLXArray? {
+    guard let quantizedCache = cache as? any QuantizedKVCacheProtocol,
+        let (quantizedKeys, quantizedValues) = quantizedCache.getQuantizedState()
+    else {
+        return nil
+    }
+
+    return quantizedScaledDotProductAttention(
+        queries: queries,
+        quantizedKeys: quantizedKeys,
+        quantizedValues: quantizedValues,
+        scale: scale,
+        mask: mask,
+        sinks: sinks,
+        groupSize: quantizedCache.groupSize,
+        bits: quantizedCache.bits,
+        mode: quantizedCache.mode
+    )
+}
+
 public func attentionWithKVState(
     queries: MLXArray,
     state: AttentionKVState,
@@ -153,6 +179,15 @@ public func attentionWithKVState(
             )
         } catch {
             cache.recordCompressedAttentionFailure(String(describing: error))
+            if let output = packedQuantizedAttentionFallback(
+                queries: queries,
+                cache: cache,
+                scale: scale,
+                mask: mask,
+                sinks: sinks
+            ) {
+                return output
+            }
             if let decodedKeys = try? turboQuantMetalDecodeAttention(
                 keys, outputDType: queries.dtype),
                 let decodedValues = try? turboQuantMetalDecodeAttention(

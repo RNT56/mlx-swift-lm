@@ -130,6 +130,23 @@ private func turboQuantSupportsAttentionDimension(_ dimension: Int) -> Bool {
     dimension > 0 && dimension <= 512
 }
 
+private func turboQuantSupportsPackedFallback(keys: MLXArray, values: MLXArray, groupSize: Int)
+    -> Bool
+{
+    guard groupSize > 0, keys.ndim == 4, values.ndim == 4 else { return false }
+    return keys.dim(3).isMultiple(of: groupSize) && values.dim(3).isMultiple(of: groupSize)
+}
+
+private func turboQuantSupportsPackedFallback(
+    keyCode: TurboQuantAttentionCode,
+    valueCode: TurboQuantAttentionCode,
+    groupSize: Int
+) -> Bool {
+    guard groupSize > 0 else { return false }
+    return keyCode.layout.headDimension.isMultiple(of: groupSize)
+        && valueCode.layout.headDimension.isMultiple(of: groupSize)
+}
+
 private enum TurboQuantCacheError: Error, CustomStringConvertible {
     case compressedBackfillUnavailable(String)
 
@@ -275,6 +292,9 @@ public final class TurboQuantKVCache: QuantizedKVCache, TurboQuantCompressedKVCa
                     compressedValues.scales,
                 ]
             }
+            if activeBackend == .metalPolarQJL, offset == 0 {
+                return []
+            }
             return super.state
         }
         set {
@@ -356,6 +376,57 @@ public final class TurboQuantKVCache: QuantizedKVCache, TurboQuantCompressedKVCa
     public var compressedState: (TurboQuantAttentionCode, TurboQuantAttentionCode)? {
         guard let compressedKeys, let compressedValues else { return nil }
         return (compressedKeys, compressedValues)
+    }
+
+    public override func getQuantizedState() -> (
+        (MLXArray, MLXArray, MLXArray?), (MLXArray, MLXArray, MLXArray?)
+    )? {
+        if let state = super.getQuantizedState() {
+            return state
+        }
+        guard let compressedKeys,
+            let compressedValues,
+            turboQuantSupportsPackedFallback(
+                keyCode: compressedKeys,
+                valueCode: compressedValues,
+                groupSize: groupSize
+            ),
+            let decodedKeys = try? MLX.turboQuantMetalDecodeAttention(
+                compressedKeys,
+                outputDType: .float32
+            ),
+            let decodedValues = try? MLX.turboQuantMetalDecodeAttention(
+                compressedValues,
+                outputDType: .float32
+            )
+        else {
+            return nil
+        }
+
+        let keyConfiguration = TurboQuantConfiguration(
+            preset: preset,
+            role: .key,
+            groupSize: groupSize,
+            mode: mode,
+            backend: activeBackend,
+            seed: seed
+        )
+        let valueConfiguration = TurboQuantConfiguration(
+            preset: preset,
+            role: .value,
+            groupSize: groupSize,
+            mode: mode,
+            backend: activeBackend,
+            seed: seed ^ turboQuantValueSeedSalt,
+            valueBits: valueBits
+        )
+        let packedKeys = turboQuantized(decodedKeys, configuration: keyConfiguration)
+        let packedValues = turboQuantized(decodedValues, configuration: valueConfiguration)
+        super.state = [
+            packedKeys.weight, packedKeys.scales, packedKeys.biases,
+            packedValues.weight, packedValues.scales, packedValues.biases,
+        ].compactMap { $0 }
+        return super.getQuantizedState()
     }
 
     public var attentionDiagnostics: TurboQuantAttentionDiagnostics {
@@ -511,7 +582,11 @@ public final class TurboQuantKVCache: QuantizedKVCache, TurboQuantCompressedKVCa
         }
         currentValues.scales[.ellipsis, range, 0..., 0...] = encodedValues.scales
 
-        offset += tokenCount
+        if turboQuantSupportsPackedFallback(keys: keys, values: values, groupSize: groupSize) {
+            _ = super.updateQuantized(keys: keys, values: values)
+        } else {
+            offset += tokenCount
+        }
         currentKeys.layout.logicalLength = offset
         currentValues.layout.logicalLength = offset
         compressedKeys = currentKeys
@@ -732,6 +807,7 @@ public final class RotatingTurboQuantKVCache: BaseKVCache, QuantizedKVCacheProto
     CustomDebugStringConvertible
 {
     private var rawFallbackCache: RotatingKVCache?
+    private var packedFallbackCache: RotatingQuantizedKVCache?
     private var packedKeys: TurboQuantPackedTensor?
     private var packedValues: TurboQuantPackedTensor?
     private var compressedKeys: TurboQuantAttentionCode?
@@ -798,6 +874,7 @@ public final class RotatingTurboQuantKVCache: BaseKVCache, QuantizedKVCacheProto
         let (cachedKeys, cachedValues) = rawCache.update(keys: keys, values: values)
         offset = rawCache.offset
         writeIndex = currentWriteIndexFromRawMeta(rawCache.metaState)
+        packedFallbackCache = nil
 
         let keyConfiguration = TurboQuantConfiguration(
             preset: preset,
@@ -828,11 +905,19 @@ public final class RotatingTurboQuantKVCache: BaseKVCache, QuantizedKVCacheProto
     public func getQuantizedState() -> (
         (MLXArray, MLXArray, MLXArray?), (MLXArray, MLXArray, MLXArray?)
     )? {
-        guard let packedKeys, let packedValues else { return nil }
-        return (
-            (packedKeys.weight, packedKeys.scales, packedKeys.biases),
-            (packedValues.weight, packedValues.scales, packedValues.biases)
-        )
+        if let packedKeys, let packedValues {
+            return (
+                (packedKeys.weight, packedKeys.scales, packedKeys.biases),
+                (packedValues.weight, packedValues.scales, packedValues.biases)
+            )
+        }
+        if let packedState = packedFallbackCache?.getQuantizedState() {
+            return packedState
+        }
+        guard compressedKeys != nil, compressedValues != nil else {
+            return nil
+        }
+        return materializedPackedFallbackCache().getQuantizedState()
     }
 
     public var compressedState: (TurboQuantAttentionCode, TurboQuantAttentionCode)? {
@@ -921,6 +1006,9 @@ public final class RotatingTurboQuantKVCache: BaseKVCache, QuantizedKVCacheProto
         TurboQuantAttentionCode,
         TurboQuantAttentionCode
     ) {
+        let packedFallbackCache =
+            turboQuantSupportsPackedFallback(keys: keys, values: values, groupSize: groupSize)
+            ? materializedPackedFallbackCache() : nil
         let keyConfiguration = TurboQuantConfiguration(
             preset: preset,
             role: .key,
@@ -981,6 +1069,9 @@ public final class RotatingTurboQuantKVCache: BaseKVCache, QuantizedKVCacheProto
 
         offset += keys.dim(2)
         writeIndex = nextWriteIndex(afterOffset: offset)
+        if let packedFallbackCache {
+            _ = packedFallbackCache.updateQuantized(keys: keys, values: values)
+        }
         updateCompressedLayouts(keys: &currentKeys, values: &currentValues)
         compressedKeys = currentKeys
         compressedValues = currentValues
@@ -1022,12 +1113,14 @@ public final class RotatingTurboQuantKVCache: BaseKVCache, QuantizedKVCacheProto
             if newValue.isEmpty {
                 packedKeys = nil
                 packedValues = nil
+                packedFallbackCache = nil
                 compressedKeys = nil
                 compressedValues = nil
                 rawFallbackCache = nil
                 return
             }
             if activeBackend == .metalPolarQJL, newValue.count == 10 {
+                packedFallbackCache = nil
                 let capacity = restoredLayoutMetadata?.capacity ?? newValue[0].dim(2)
                 let keyHeadDimension =
                     restoredLayoutMetadata?.keyHeadDimension
@@ -1096,6 +1189,7 @@ public final class RotatingTurboQuantKVCache: BaseKVCache, QuantizedKVCacheProto
                 rawCache.state = newValue
                 offset = rawCache.offset
                 writeIndex = currentWriteIndexFromRawMeta(rawCache.metaState)
+                packedFallbackCache = nil
                 compressedKeys = nil
                 compressedValues = nil
             }
@@ -1237,6 +1331,9 @@ public final class RotatingTurboQuantKVCache: BaseKVCache, QuantizedKVCacheProto
         writeIndex = nextWriteIndex(afterOffset: offset)
         if let rawFallbackCache {
             _ = rawFallbackCache.trim(n)
+        }
+        if let packedFallbackCache {
+            _ = packedFallbackCache.trim(n)
         }
         if var compressedKeys, var compressedValues {
             updateCompressedLayouts(keys: &compressedKeys, values: &compressedValues)
@@ -1438,6 +1535,77 @@ public final class RotatingTurboQuantKVCache: BaseKVCache, QuantizedKVCacheProto
         return rawCache
     }
 
+    private func materializedPackedFallbackCache() -> RotatingQuantizedKVCache {
+        if let packedFallbackCache { return packedFallbackCache }
+        let cache = RotatingQuantizedKVCache(
+            maxSize: maxCacheSize,
+            keep: keep,
+            step: step,
+            groupSize: groupSize,
+            bits: bits,
+            mode: mode
+        )
+        if let rawFallbackCache {
+            let state = rawFallbackCache.state
+            if state.count == 2 {
+                cache.setUnquantizedState(
+                    keys: state[0],
+                    values: state[1],
+                    offset: rawFallbackCache.offset,
+                    writeIndex: currentWriteIndexFromRawMeta(rawFallbackCache.metaState)
+                )
+            }
+        } else if let compressedKeys, let compressedValues,
+            turboQuantSupportsPackedFallback(
+                keyCode: compressedKeys,
+                valueCode: compressedValues,
+                groupSize: groupSize
+            ),
+            let decodedKeys = try? MLX.turboQuantMetalDecodeAttention(
+                compressedKeys,
+                outputDType: .float32
+            ),
+            let decodedValues = try? MLX.turboQuantMetalDecodeAttention(
+                compressedValues,
+                outputDType: .float32
+            )
+        {
+            cache.setUnquantizedState(
+                keys: decodedKeys,
+                values: decodedValues,
+                offset: offset,
+                writeIndex: rawFallbackWriteIndex(forOffset: offset)
+            )
+        }
+        packedFallbackCache = cache
+        return cache
+    }
+
+    fileprivate func setPackedFallbackState(
+        keys: MLXArray,
+        values: MLXArray,
+        offset: Int,
+        writeIndex: Int
+    ) {
+        let cache = RotatingQuantizedKVCache(
+            maxSize: maxCacheSize,
+            keep: keep,
+            step: step,
+            groupSize: groupSize,
+            bits: bits,
+            mode: mode
+        )
+        cache.setUnquantizedState(
+            keys: keys,
+            values: values,
+            offset: offset,
+            writeIndex: writeIndex
+        )
+        packedFallbackCache = cache
+        packedKeys = nil
+        packedValues = nil
+    }
+
     private func currentWriteIndexFromRawMeta(_ meta: [String]) -> Int {
         guard meta.count >= 5 else { return nextWriteIndex(afterOffset: offset) }
         return Int(meta[4]) ?? nextWriteIndex(afterOffset: offset)
@@ -1473,6 +1641,12 @@ extension RotatingKVCache {
 
         let currentState = state
         guard currentState.count == 2 else { return cache }
+        cache.setPackedFallbackState(
+            keys: currentState[0],
+            values: currentState[1],
+            offset: offset,
+            writeIndex: rotatingWriteIndex
+        )
 
         if cache.activeBackend == .metalPolarQJL,
             TurboQuantKernelAvailability.current.supportsMetalPolarQJLAttention

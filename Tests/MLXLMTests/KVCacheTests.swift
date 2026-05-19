@@ -464,6 +464,126 @@ extension MLXRuntimeSwiftTests {
             #expect(state.1.2 == nil)
         }
 
+        @Test func testTurboQuantCompressedCacheMaintainsPackedFallbackState() throws {
+            guard TurboQuantKernelAvailability.current.supportsMetalPolarQJLAttention else {
+                return
+            }
+
+            let cache = TurboQuantKVCache(backend: .metalPolarQJL)
+            let keys = MLXArray.ones([1, 2, 3, 64], dtype: .float32)
+            let values = MLXArray.ones([1, 2, 3, 64], dtype: .float32)
+            let queries = MLXArray.ones([1, 4, 1, 64], dtype: .float32)
+            _ = try cache.updateCompressed(keys: keys, values: values)
+
+            let packedState = try #require(cache.getQuantizedState())
+            #expect(packedState.0.0.dim(-2) == 3)
+            #expect(packedState.1.0.dim(-2) == 3)
+
+            let fallback = try #require(
+                packedQuantizedAttentionFallback(
+                    queries: queries,
+                    cache: cache,
+                    scale: 0.125
+                ))
+            let directPacked = attentionWithKVState(
+                queries: queries,
+                state: .quantized(keys: packedState.0, values: packedState.1, cache: cache),
+                scale: 0.125
+            )
+
+            #expect(fallback.shape == [1, 4, 1, 64])
+            #expect(allClose(fallback, directPacked, rtol: 1e-5, atol: 1e-5).item(Bool.self))
+        }
+
+        @Test func testRotatingTurboQuantCompressedCacheMaintainsPackedFallbackState() throws {
+            guard TurboQuantKernelAvailability.current.supportsMetalPolarQJLAttention else {
+                return
+            }
+
+            let cache = RotatingTurboQuantKVCache(
+                maxSize: 4,
+                keep: 1,
+                backend: .metalPolarQJL
+            )
+            let keys = MLXArray.ones([1, 2, 3, 64], dtype: .float32)
+            let values = MLXArray.ones([1, 2, 3, 64], dtype: .float32)
+            let queries = MLXArray.ones([1, 4, 1, 64], dtype: .float32)
+            _ = try cache.updateCompressed(keys: keys, values: values)
+
+            let packedState = try #require(cache.getQuantizedState())
+            #expect(packedState.0.0.dim(-2) == 3)
+            #expect(packedState.1.0.dim(-2) == 3)
+            #expect(cache.attentionDiagnostics.rawFallbackAllocated == false)
+
+            let fallback = try #require(
+                packedQuantizedAttentionFallback(
+                    queries: queries,
+                    cache: cache,
+                    scale: 0.125
+                ))
+
+            #expect(fallback.shape == [1, 4, 1, 64])
+            #expect(cache.attentionDiagnostics.rawFallbackAllocated == false)
+        }
+
+        @Test func testRotatingTurboQuantPackedFallbackTracksWrappedCompressedState() throws {
+            guard TurboQuantKernelAvailability.current.supportsMetalPolarQJLAttention else {
+                return
+            }
+
+            let cache = RotatingTurboQuantKVCache(
+                maxSize: 4,
+                keep: 1,
+                backend: .metalPolarQJL
+            )
+            let directCache = RotatingQuantizedKVCache(
+                maxSize: 4,
+                keep: 1,
+                groupSize: cache.groupSize,
+                bits: cache.bits,
+                mode: cache.mode
+            )
+            let firstKeys = (MLXArray(0 ..< Int32(1 * 2 * 3 * 64)).asType(.float32) / 128)
+                .reshaped([1, 2, 3, 64])
+            let firstValues = firstKeys + 0.5
+            let secondKeys = firstKeys + 1.0
+            let secondValues = firstValues + 1.0
+            let queries = MLXArray.ones([1, 4, 1, 64], dtype: .float32)
+
+            _ = try cache.updateCompressed(keys: firstKeys, values: firstValues)
+            _ = directCache.updateQuantized(keys: firstKeys, values: firstValues)
+            _ = try cache.updateCompressed(keys: secondKeys, values: secondValues)
+            let directPackedState = directCache.updateQuantized(
+                keys: secondKeys,
+                values: secondValues
+            )
+
+            let packedState = try #require(cache.getQuantizedState())
+            #expect(packedState.0.0.dim(-2) == 4)
+            #expect(packedState.1.0.dim(-2) == 4)
+            #expect(cache.attentionDiagnostics.rawFallbackAllocated == false)
+
+            let fallback = try #require(
+                packedQuantizedAttentionFallback(
+                    queries: queries,
+                    cache: cache,
+                    scale: 0.125
+                ))
+            let directPacked = attentionWithKVState(
+                queries: queries,
+                state: .quantized(
+                    keys: directPackedState.0,
+                    values: directPackedState.1,
+                    cache: directCache
+                ),
+                scale: 0.125
+            )
+
+            #expect(fallback.shape == directPacked.shape)
+            #expect(allClose(fallback, directPacked, rtol: 1e-5, atol: 1e-5).item(Bool.self))
+            #expect(cache.attentionDiagnostics.rawFallbackAllocated == false)
+        }
+
         @Test func testTurboQuantCompressedAttentionStateWhenAvailable() throws {
             guard TurboQuantKernelAvailability.current.supportsMetalPolarQJLAttention else {
                 return
