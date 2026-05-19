@@ -1,11 +1,11 @@
-# Agent Notes for the Schtack MLX Swift LM Fork
+# Agent Notes for the RNT56 MLX Swift LM Fork
 
-This repository is the `RNT56/mlx-swift-lm` fork used by Schtack projects. Treat it as an integrated fork layered on top of `RNT56/mlx-swift`.
+This repository is the `RNT56/mlx-swift-lm` fork used by downstream projects. Treat it as an integrated fork layered on top of `RNT56/mlx-swift`.
 
 ## Branch Model
 
 - `main` is the current integrated fork state for downstream consumers.
-- `schtack/turboquant-kv` intentionally points at the same commit as `main`. Keep this branch as a named integration branch for Schtack work.
+- Historical integration branches may point at the same commit as `main`. Treat those as compatibility refs, not as the canonical branch names for new work.
 - Do not assume older topic branches are active. Most remote branches are historical experiments or upstream maintenance work.
 
 As of 2026-05-18, active branches should contain this expected code baseline:
@@ -34,7 +34,7 @@ The expected `Package.swift` dependency is:
 ```swift
 .package(
     url: "https://github.com/RNT56/mlx-swift",
-    revision: "5db40d34a96a9c6889b6583d6cc09f8b8f05ea5e"
+    revision: "f252dd2dc284d2cfd3093c5bbc81ff94d8b2a60d"
 )
 ```
 
@@ -42,13 +42,13 @@ That `mlx-swift` revision points its MLX submodule at:
 
 ```text
 RNT56/mlx:
-f2ed827ef3c51ba7e5a0f7936fcb7c5cfcedb4e6
-Add embedded Metal default library fallback
+8f13e02fa85252f2a569a43c6759f07490b816a5
+Find SwiftPM metallib bundle near test binary
 ```
 
-Do not downgrade this dependency to the older `cf6d72f54e8619e52a746b88a0fb00f172e4ba10` pin when preserving Schtack runtime behavior.
+Do not downgrade this dependency to an older runtime pin when preserving downstream runtime behavior.
 
-## Important Schtack Changes
+## Important Downstream Changes
 
 The active branch must include the LM-side TurboQuant and robustness work, including:
 
@@ -97,7 +97,7 @@ swift test --filter TurboQuantProfileTests
 When this repo gets a new commit that downstream apps should consume:
 
 1. Confirm `Package.swift` still pins the intended `RNT56/mlx-swift` revision.
-2. Push both `main` and `schtack/turboquant-kv` if they are meant to stay equivalent.
+2. Push any compatibility refs only when they are intentionally meant to stay equivalent.
 3. Update downstream app pins, especially `RNT56/pines`, to the matching `mlx-swift` and `mlx-swift-lm` commits.
 
 For `pines`, `project.yml` is the source of truth for XcodeGen package pins. Regenerate/check `Pines.xcodeproj/project.pbxproj` after changing it.
