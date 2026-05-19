@@ -1167,7 +1167,8 @@ public struct MTPTokenIterator: TokenIteratorProtocol {
         let verifyInput = LMInput.Text(tokens: concatenated(verifyTokens))
         let verifyStart = verifyInput.tokens.dim(0) - (draftTokens.count + 1)
 
-        let mtpResult = model.callMTP(verifyInput.tokens[.newAxis], cache: cache, mtpCaches: mtpCaches)
+        let mtpResult = model.callMTP(
+            verifyInput.tokens[.newAxis], cache: cache, mtpCaches: mtpCaches)
         guard !mtpResult.isEmpty else { return }
 
         let mainLogits = mtpResult[0]

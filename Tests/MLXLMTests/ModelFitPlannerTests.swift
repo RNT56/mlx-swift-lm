@@ -73,7 +73,9 @@ extension MLXRuntimeSwiftTests {
             #expect(plan.expertStreamingEligible)
             #expect(plan.expertStreamingWorkingSetBytes != nil)
             #expect(plan.recommendedGPULayerCount == profile.layerCount)
-            #expect(plan.recommendedCacheLimitBytes == ModelFitPlanner.ssdStreamingCacheBudget(totalMemoryBytes: Self.gib(32)))
+            #expect(
+                plan.recommendedCacheLimitBytes
+                    == ModelFitPlanner.ssdStreamingCacheBudget(totalMemoryBytes: Self.gib(32)))
             #expect(plan.warnings.contains { $0.contains("MoE expert streaming") })
         }
 
@@ -116,8 +118,10 @@ extension MLXRuntimeSwiftTests {
 
         @Test func testProfilesModelConfigAndWeightFiles() throws {
             let directory = FileManager.default.temporaryDirectory
-                .appendingPathComponent("ModelFitPlannerTests-\(UUID().uuidString)", isDirectory: true)
-            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+                .appendingPathComponent(
+                    "ModelFitPlannerTests-\(UUID().uuidString)", isDirectory: true)
+            try FileManager.default.createDirectory(
+                at: directory, withIntermediateDirectories: true)
             defer {
                 try? FileManager.default.removeItem(at: directory)
             }
@@ -137,11 +141,13 @@ extension MLXRuntimeSwiftTests {
                   "quantization_config": { "bits": 4 }
                 }
                 """
-            try config.data(using: .utf8)?.write(to: directory.appendingPathComponent("config.json"))
+            try config.data(using: .utf8)?.write(
+                to: directory.appendingPathComponent("config.json"))
             let weights = Data(repeating: 0, count: 4096)
             try weights.write(to: directory.appendingPathComponent("model.safetensors"))
 
-            let profile = try ModelMemoryProfile.profile(modelDirectory: directory, modelID: "test/qwen3-moe-q4")
+            let profile = try ModelMemoryProfile.profile(
+                modelDirectory: directory, modelID: "test/qwen3-moe-q4")
 
             #expect(profile.modelType == "qwen3_moe")
             #expect(profile.layerCount == 12)

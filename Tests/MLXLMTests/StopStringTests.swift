@@ -1,8 +1,8 @@
 // Copyright © 2026 Apple Inc.
 
 import Foundation
-import MLXLMCommon
 import MLXLLM
+import MLXLMCommon
 import MLXVLM
 import XCTest
 

@@ -49,11 +49,12 @@ public final class ExpertStreamingConfig: @unchecked Sendable {
 
     public func activate(modelDirectory: URL, useDirectIO: Bool = false) {
         #if os(macOS)
-        mode = useDirectIO
-            ? .directNVMe(modelDirectory: modelDirectory)
-            : .mmapPageCache(modelDirectory: modelDirectory)
+            mode =
+                useDirectIO
+                ? .directNVMe(modelDirectory: modelDirectory)
+                : .mmapPageCache(modelDirectory: modelDirectory)
         #else
-        mode = .mmapPageCache(modelDirectory: modelDirectory)
+            mode = .mmapPageCache(modelDirectory: modelDirectory)
         #endif
     }
 
@@ -151,15 +152,17 @@ public final class ExpertStreamerManager: @unchecked Sendable {
             return weightMap
         }
 
-        guard let enumerator = FileManager.default.enumerator(
-            at: modelDirectory, includingPropertiesForKeys: nil)
+        guard
+            let enumerator = FileManager.default.enumerator(
+                at: modelDirectory, includingPropertiesForKeys: nil)
         else {
             return [:]
         }
 
         var map = [String: String]()
         for case let url as URL in enumerator where url.pathExtension == "safetensors" {
-            let relativePath = url.path.hasPrefix(modelDirectory.path + "/")
+            let relativePath =
+                url.path.hasPrefix(modelDirectory.path + "/")
                 ? String(url.path.dropFirst(modelDirectory.path.count + 1))
                 : url.lastPathComponent
             for tensorName in (try? tensorNames(in: url)) ?? [] {

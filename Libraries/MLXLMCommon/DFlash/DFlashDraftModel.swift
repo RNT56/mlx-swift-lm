@@ -237,8 +237,10 @@ final class DFlashAttention: Module {
         var contextKeys = kNorm(
             kProj(targetHidden).reshaped(batchSize, contextLength, nKVHeads, headDim)
         ).transposed(0, 2, 1, 3)
-        let contextValues = vProj(targetHidden).reshaped(batchSize, contextLength, nKVHeads, headDim)
-            .transposed(0, 2, 1, 3)
+        let contextValues = vProj(targetHidden).reshaped(
+            batchSize, contextLength, nKVHeads, headDim
+        )
+        .transposed(0, 2, 1, 3)
 
         var noiseKeys = kNorm(
             kProj(hiddenStates).reshaped(batchSize, blockLength, nKVHeads, headDim)
@@ -342,7 +344,8 @@ public final class DFlashDraftModel: Module {
         self.args = args
         modelType = args.modelType
         layers = (0 ..< args.numHiddenLayers).map { _ in DFlashDecoderLayer(args) }
-        targetLayerIDs = args.dflashConfig?.targetLayerIds
+        targetLayerIDs =
+            args.dflashConfig?.targetLayerIds
             ?? buildDFlashTargetLayerIDs(
                 numTargetLayers: args.numTargetLayers,
                 numDraftLayers: args.numHiddenLayers

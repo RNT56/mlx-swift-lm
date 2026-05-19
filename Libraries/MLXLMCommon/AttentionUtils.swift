@@ -72,7 +72,9 @@ public func withTurboQuantCompressedCacheUpdate<T>(
     values: MLXArray,
     cache: KVCache?,
     mask: MLXFast.ScaledDotProductAttentionMaskMode,
-    _ body: (TurboQuantAttentionCode, TurboQuantAttentionCode, any TurboQuantCompressedKVCacheProtocol)
+    _ body: (
+        TurboQuantAttentionCode, TurboQuantAttentionCode, any TurboQuantCompressedKVCacheProtocol
+    )
         throws -> T
 ) -> T? {
     guard var turboQuantCache = cache as? TurboQuantCompressedKVCacheProtocol,
@@ -176,8 +178,10 @@ public func attentionWithKVState(
             )
         } catch {
             cache.recordCompressedAttentionFailure(String(describing: error))
-            if let decodedKeys = try? turboQuantMetalDecodeAttention(keys, outputDType: queries.dtype),
-                let decodedValues = try? turboQuantMetalDecodeAttention(values, outputDType: queries.dtype)
+            if let decodedKeys = try? turboQuantMetalDecodeAttention(
+                keys, outputDType: queries.dtype),
+                let decodedValues = try? turboQuantMetalDecodeAttention(
+                    values, outputDType: queries.dtype)
             {
                 return MLXFast.scaledDotProductAttention(
                     queries: queries,

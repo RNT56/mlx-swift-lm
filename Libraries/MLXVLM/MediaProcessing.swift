@@ -566,9 +566,10 @@ public enum MediaProcessing {
         )!
         try file.read(into: sourceBuffer)
 
-        let convertedFrameCapacity = AVAudioFrameCount(
-            Double(frameCount) * (targetFormat.sampleRate / file.processingFormat.sampleRate)
-        ) + 1024
+        let convertedFrameCapacity =
+            AVAudioFrameCount(
+                Double(frameCount) * (targetFormat.sampleRate / file.processingFormat.sampleRate)
+            ) + 1024
         let convertedBuffer = AVAudioPCMBuffer(
             pcmFormat: targetFormat,
             frameCapacity: convertedFrameCapacity

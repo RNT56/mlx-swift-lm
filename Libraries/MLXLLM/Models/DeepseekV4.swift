@@ -109,19 +109,20 @@ private func headRmsNorm(_ x: MLXArray, eps: Float) -> MLXArray {
 /// Returns pre [B,S,hc], post [B,S,hc], comb [B,S,hc,hc]
 private func hcSplitSinkhorn(
     _ mixes: MLXArray,
-    hcScale: MLXArray,    // [3]
-    hcBase: MLXArray,     // [mix_hc]
+    hcScale: MLXArray,  // [3]
+    hcBase: MLXArray,  // [mix_hc]
     hcMult: Int,
     sinkhornIters: Int,
     eps: Float
 ) -> (MLXArray, MLXArray, MLXArray) {
     let hc = hcMult
-    let B = mixes.dim(0), S = mixes.dim(1)
+    let B = mixes.dim(0)
+    let S = mixes.dim(1)
 
     // Split mixes into 3 parts
-    let preMix = mixes[.ellipsis, ..<hc]            // [B, S, hc]
-    let postMix = mixes[.ellipsis, hc ..< 2 * hc]   // [B, S, hc]
-    let combMix = mixes[.ellipsis, (2 * hc)...]      // [B, S, hc*hc]
+    let preMix = mixes[.ellipsis, ..<hc]  // [B, S, hc]
+    let postMix = mixes[.ellipsis, hc ..< 2 * hc]  // [B, S, hc]
+    let combMix = mixes[.ellipsis, (2 * hc)...]  // [B, S, hc*hc]
 
     // Per-part scale, per-element base
     let preBase = hcBase[..<hc]
@@ -129,10 +130,10 @@ private func hcSplitSinkhorn(
     let combBase = hcBase[(2 * hc)...]
 
     // Apply scale, add bias, then sigmoid + eps
-    var pre = sigmoid(preMix * hcScale[0] + preBase) + eps   // [B, S, hc]
+    var pre = sigmoid(preMix * hcScale[0] + preBase) + eps  // [B, S, hc]
     let post = sigmoid(postMix * hcScale[1] + postBase) + eps  // [B, S, hc]
     var comb = (sigmoid(combMix * hcScale[2] + combBase) + eps)
-        .reshaped(B, S, hc, hc)                               // [B, S, hc, hc]
+        .reshaped(B, S, hc, hc)  // [B, S, hc, hc]
 
     // Normalize pre so it sums to 1 across hc copies
     pre = pre / pre.sum(axis: -1, keepDims: true)
@@ -149,16 +150,19 @@ private func hcSplitSinkhorn(
 /// Hyper-Connection pre-step: reduce [B,S,hc,D] -> [B,S,D] with Sinkhorn weights.
 /// Returns (reduced_x, post_weights, comb_matrix).
 private func hcPre(
-    x: MLXArray,           // [B, S, hc, D]
-    hcFn: MLXArray,        // [mix_hc, hc*D]
-    hcScale: MLXArray,     // [3]
-    hcBase: MLXArray,      // [mix_hc]
+    x: MLXArray,  // [B, S, hc, D]
+    hcFn: MLXArray,  // [mix_hc, hc*D]
+    hcScale: MLXArray,  // [3]
+    hcBase: MLXArray,  // [mix_hc]
     hcMult: Int,
     sinkhornIters: Int,
     eps: Float
 ) -> (MLXArray, MLXArray, MLXArray) {
     let dtype = x.dtype
-    let B = x.dim(0), S = x.dim(1), hc = x.dim(2), D = x.dim(3)
+    let B = x.dim(0)
+    let S = x.dim(1)
+    let hc = x.dim(2)
+    let D = x.dim(3)
 
     // Flatten: [B, S, hc*D]
     let xFlat = x.reshaped(B, S, hc * D).asType(.float32)
@@ -182,10 +186,10 @@ private func hcPre(
 /// Hyper-Connection post-step: expand sublayer output back to [B,S,hc,D].
 /// y[b,s,j,:] = post[b,s,j]*x[b,s,:] + sum_i(comb[b,s,i,j]*residual[b,s,i,:])
 private func hcPost(
-    x: MLXArray,        // [B, S, D] - sublayer output
-    residual: MLXArray, // [B, S, hc, D] - input to this block
-    post: MLXArray,     // [B, S, hc]
-    comb: MLXArray      // [B, S, hc, hc]
+    x: MLXArray,  // [B, S, D] - sublayer output
+    residual: MLXArray,  // [B, S, hc, D] - input to this block
+    post: MLXArray,  // [B, S, hc]
+    comb: MLXArray  // [B, S, hc, hc]
 ) -> MLXArray {
     // term1: post[b,s,j] * x[b,s,:] -> broadcast to [B,S,hc,D]
     let term1 = post.expandedDimensions(axis: -1) * x.expandedDimensions(axis: -2)
@@ -194,9 +198,9 @@ private func hcPost(
     // comb.unsqueeze(-1): [B,S,hc_i,hc_j,1]
     // residual.unsqueeze(-2): [B,S,hc_i,1,D]
     // product: [B,S,hc_i,hc_j,D] -> sum over dim 2 -> [B,S,hc_j,D]
-    let combExp = comb.expandedDimensions(axis: -1)         // [B,S,hc,hc,1]
-    let residualExp = residual.expandedDimensions(axis: -2) // [B,S,hc,1,D]
-    let term2 = (combExp * residualExp).sum(axis: 2)        // [B,S,hc,D]
+    let combExp = comb.expandedDimensions(axis: -1)  // [B,S,hc,hc,1]
+    let residualExp = residual.expandedDimensions(axis: -2)  // [B,S,hc,1,D]
+    let term2 = (combExp * residualExp).sum(axis: 2)  // [B,S,hc,D]
 
     return (term1 + term2).asType(x.dtype)
 }
@@ -220,19 +224,22 @@ class HCParams: Module {
 /// Final HC head: reduce [B,S,hc,D] -> [B,S,D] for lm_head.
 /// No Sinkhorn - just sigmoid + eps weighted sum.
 private func hcHead(
-    x: MLXArray,        // [B, S, hc, D]
-    hcFn: MLXArray,     // [hc, hc*D]
+    x: MLXArray,  // [B, S, hc, D]
+    hcFn: MLXArray,  // [hc, hc*D]
     hcScale: MLXArray,  // [1]
-    hcBase: MLXArray,   // [hc]
+    hcBase: MLXArray,  // [hc]
     eps: Float
 ) -> MLXArray {
     let dtype = x.dtype
-    let B = x.dim(0), S = x.dim(1), hc = x.dim(2), D = x.dim(3)
+    let B = x.dim(0)
+    let S = x.dim(1)
+    let hc = x.dim(2)
+    let D = x.dim(3)
 
     let xFlat = x.reshaped(B, S, hc * D).asType(.float32)
     let normScale = rsqrt(xFlat.square().mean(axis: -1, keepDims: true) + eps)
-    let mixes = matmul(xFlat, hcFn.T) * normScale           // [B, S, hc]
-    let pre = sigmoid(mixes * hcScale + hcBase) + eps        // [B, S, hc]
+    let mixes = matmul(xFlat, hcFn.T) * normScale  // [B, S, hc]
+    let pre = sigmoid(mixes * hcScale + hcBase) + eps  // [B, S, hc]
 
     // Weighted sum: [B, S, D]
     let y = (pre.expandedDimensions(axis: -1).asType(dtype) * x).sum(axis: -2)
@@ -320,7 +327,8 @@ class DeepseekV4Attention: Module {
         // Q projections
         self._wqA.wrappedValue = Linear(config.hiddenSize, config.qLoraRank, bias: false)
         self._qNorm.wrappedValue = RMSNorm(dimensions: config.qLoraRank, eps: config.rmsNormEps)
-        self._wqB.wrappedValue = Linear(config.qLoraRank, config.numAttentionHeads * config.headDim, bias: false)
+        self._wqB.wrappedValue = Linear(
+            config.qLoraRank, config.numAttentionHeads * config.headDim, bias: false)
 
         // Unified KV: single head, headDim dimensional
         self._wkv.wrappedValue = Linear(config.hiddenSize, config.headDim, bias: false)
@@ -328,8 +336,10 @@ class DeepseekV4Attention: Module {
 
         // Grouped output projection
         // wo_a: Linear(nHeadsPerGroup * headDim, oGroups * oLoraRank) per group -> stored as [oGroups*oLoraRank, nHeadsPerGroup*headDim]
-        self._woA.wrappedValue = Linear(nHeadsPerGroup * config.headDim, config.oGroups * config.oLoraRank, bias: false)
-        self._woB.wrappedValue = Linear(config.oGroups * config.oLoraRank, config.hiddenSize, bias: false)
+        self._woA.wrappedValue = Linear(
+            nHeadsPerGroup * config.headDim, config.oGroups * config.oLoraRank, bias: false)
+        self._woB.wrappedValue = Linear(
+            config.oGroups * config.oLoraRank, config.hiddenSize, bias: false)
 
         // Attention sink: per-head bias [numAttentionHeads], applied to attention logits before softmax.
         // Shape matches numAttentionHeads (== qkRopeHeadDim in this architecture).
@@ -353,7 +363,8 @@ class DeepseekV4Attention: Module {
     /// Input:  [B, L, n_heads, head_dim]
     /// Output: [B, L, oGroups * oLoraRank]
     private func groupedOutputProjection(_ out: MLXArray) -> MLXArray {
-        let B = out.dim(0), L = out.dim(1)
+        let B = out.dim(0)
+        let L = out.dim(1)
         let groupFeat = numHeads * headDim / oGroups  // = nHeadsPerGroup * headDim
 
         // Flatten to [B, L, n_heads * head_dim] for easy group slicing
@@ -363,9 +374,9 @@ class DeepseekV4Attention: Module {
             var pieces: [MLXArray] = []
             for g in 0 ..< oGroups {
                 let gStart = g * groupFeat
-                let gEnd   = (g + 1) * groupFeat
+                let gEnd = (g + 1) * groupFeat
                 let rStart = g * oLoraRank
-                let rEnd   = (g + 1) * oLoraRank
+                let rEnd = (g + 1) * oLoraRank
 
                 // Per-group input: [B, L, groupFeat]
                 let groupInput = outFlat[0..., 0..., gStart ..< gEnd]
@@ -395,12 +406,12 @@ class DeepseekV4Attention: Module {
             var pieces: [MLXArray] = []
             for g in 0 ..< oGroups {
                 let gStart = g * groupFeat
-                let gEnd   = (g + 1) * groupFeat
+                let gEnd = (g + 1) * groupFeat
                 let rStart = g * oLoraRank
-                let rEnd   = (g + 1) * oLoraRank
+                let rEnd = (g + 1) * oLoraRank
                 let groupInput = outFlat[0..., 0..., gStart ..< gEnd]  // [B, L, groupFeat]
-                let wa_g = woA.weight[rStart ..< rEnd]                 // [oLoraRank, groupFeat]
-                pieces.append(matmul(groupInput, wa_g.T))              // [B, L, oLoraRank]
+                let wa_g = woA.weight[rStart ..< rEnd]  // [oLoraRank, groupFeat]
+                pieces.append(matmul(groupInput, wa_g.T))  // [B, L, oLoraRank]
             }
             return concatenated(pieces, axis: -1)
         }
@@ -415,28 +426,28 @@ class DeepseekV4Attention: Module {
 
         // --- Query ---
         // Low-rank Q: wq_a -> q_norm -> wq_b
-        var q = wqB(qNorm(wqA(x)))                       // [B, L, n_heads * head_dim]
+        var q = wqB(qNorm(wqA(x)))  // [B, L, n_heads * head_dim]
         q = q.reshaped(B, L, numHeads, headDim)
-            .transposed(0, 2, 1, 3)                       // [B, n_heads, L, head_dim]
+            .transposed(0, 2, 1, 3)  // [B, n_heads, L, head_dim]
         // Per-head RMS normalization (no learnable scale)
         q = headRmsNorm(q, eps: eps)
 
         // Split Q into nope and rope parts
-        let qNope = q[.ellipsis, ..<nopeHeadDim]          // [B, n_heads, L, nope_head_dim]
-        var qRope = q[.ellipsis, nopeHeadDim...]           // [B, n_heads, L, rope_head_dim]
+        let qNope = q[.ellipsis, ..<nopeHeadDim]  // [B, n_heads, L, nope_head_dim]
+        var qRope = q[.ellipsis, nopeHeadDim...]  // [B, n_heads, L, rope_head_dim]
         qRope = applyRotaryPosition(rope, to: qRope, offset: cache?.ropeOffset)
-        let queries = concatenated([qNope, qRope], axis: -1) // [B, n_heads, L, head_dim]
+        let queries = concatenated([qNope, qRope], axis: -1)  // [B, n_heads, L, head_dim]
 
         // --- KV: k = v (reference: k = v = concat([k_nope, k_pe_roped])) ---
-        let kv = kvNorm(wkv(x))                           // [B, L, head_dim]
+        let kv = kvNorm(wkv(x))  // [B, L, head_dim]
         let kvNope = kv[.ellipsis, ..<nopeHeadDim]
             .reshaped(B, L, 1, nopeHeadDim)
-            .transposed(0, 2, 1, 3)                       // [B, 1, L, nope_head_dim]
+            .transposed(0, 2, 1, 3)  // [B, 1, L, nope_head_dim]
         var kvRope = kv[.ellipsis, nopeHeadDim...]
             .reshaped(B, L, 1, ropeHeadDim)
-            .transposed(0, 2, 1, 3)                       // [B, 1, L, rope_head_dim]
+            .transposed(0, 2, 1, 3)  // [B, 1, L, rope_head_dim]
         kvRope = applyRotaryPosition(rope, to: kvRope, offset: cache?.ropeOffset)
-        let kFull = concatenated([kvNope, kvRope], axis: -1) // [B, 1, L, head_dim]
+        let kFull = concatenated([kvNope, kvRope], axis: -1)  // [B, 1, L, head_dim]
         // In reference k = v = kFull: both K and V have rope applied to their rope dims.
         // attentionWithCacheUpdate handles the KV cache update internally.
 
@@ -446,7 +457,8 @@ class DeepseekV4Attention: Module {
         // Cast to queries.dtype (bfloat16) - attn_sink may be loaded as float32 from the
         // checkpoint, but MLXFast.scaledDotProductAttention requires sinks to promote to
         // the output dtype (bfloat16); float32 does not satisfy this constraint.
-        let sinksToUse: MLXArray? = attn_sink.sum().item(Float.self) != 0
+        let sinksToUse: MLXArray? =
+            attn_sink.sum().item(Float.self) != 0
             ? attn_sink.asType(queries.dtype)
             : nil
         let output = deepseekAttentionWithSinks(
@@ -459,10 +471,10 @@ class DeepseekV4Attention: Module {
             sinks: sinksToUse
         )
         .transposed(0, 2, 1, 3)
-        .reshaped(B, L, numHeads, headDim)               // [B, L, n_heads, head_dim]
+        .reshaped(B, L, numHeads, headDim)  // [B, L, n_heads, head_dim]
 
         // --- Grouped output projection ---
-        let oLora = groupedOutputProjection(output)        // [B, L, oGroups * oLoraRank]
+        let oLora = groupedOutputProjection(output)  // [B, L, oGroups * oLoraRank]
         return woB(oLora)
     }
 }
@@ -503,7 +515,7 @@ class DeepseekV4Gate: Module {
     let normTopkProb: Bool
     let scoringFunc: String
 
-    var weight: MLXArray              // [n_routed_experts, hidden_size]
+    var weight: MLXArray  // [n_routed_experts, hidden_size]
     var e_score_correction_bias: MLXArray  // [n_routed_experts]
 
     init(config: DeepseekV4Configuration) {
@@ -533,7 +545,7 @@ class DeepseekV4Gate: Module {
 
     func callAsFunction(_ x: MLXArray) -> (MLXArray, MLXArray) {
         // Compute expert scores
-        let logits = x.matmul(weight.T)       // [B, S, n_experts]
+        let logits = x.matmul(weight.T)  // [B, S, n_experts]
         var scores: MLXArray
         switch scoringFunc {
         case "softmax":
@@ -710,7 +722,9 @@ public class DeepseekV4ModelInner: Module {
     // Underscore name matches checkpoint path `model.hc_head.fn/base/scale`
     var hc_head: HCParams
 
-    public var totalLayerCount: Int { layers.count - (MTPConfig.retainMTPWeights ? config.numNextnPredictLayers : 0) }
+    public var totalLayerCount: Int {
+        layers.count - (MTPConfig.retainMTPWeights ? config.numNextnPredictLayers : 0)
+    }
 
     init(config: DeepseekV4Configuration) {
         self.config = config
@@ -733,7 +747,8 @@ public class DeepseekV4ModelInner: Module {
 
     func callAsFunction(_ x: MLXArray, cache: [KVCache]?) -> MLXArray {
         // x: [B, S] token IDs
-        let B = x.dim(0), S = x.dim(1)
+        let B = x.dim(0)
+        let S = x.dim(1)
         let hc = config.hcMult
 
         // Embed tokens: [B, S, D]
@@ -741,8 +756,8 @@ public class DeepseekV4ModelInner: Module {
 
         // Expand to hc copies: [B, S, hc, D]
         // Repeat along new hc dimension
-        h = h.expandedDimensions(axis: 2)                  // [B, S, 1, D]
-        h = repeated(h, count: hc, axis: 2)                // [B, S, hc, D]
+        h = h.expandedDimensions(axis: 2)  // [B, S, 1, D]
+        h = repeated(h, count: hc, axis: 2)  // [B, S, hc, D]
 
         // Create causal attention mask; reshape to 3D so dim(1)==S
         let hForMask = h.reshaped([B, S, hc * config.hiddenSize])  // [B, S, hc*D]
@@ -823,9 +838,11 @@ public class DeepseekV4Model: Module, LLMModel, KVCacheDimensionProvider, LoRAMo
                             newWeights["\(prefix).ffn.experts.\($0).\(projName).\(key)"]
                                 ?? weights["\(prefix).ffn.experts.\($0).\(projName).\(key)"]!
                         }
-                        newWeights["\(prefix).ffn.switch_mlp.\(projName).\(key)"] = MLX.stacked(stacked)
+                        newWeights["\(prefix).ffn.switch_mlp.\(projName).\(key)"] = MLX.stacked(
+                            stacked)
                         for j in 0 ..< args.nRoutedExperts {
-                            newWeights.removeValue(forKey: "\(prefix).ffn.experts.\(j).\(projName).\(key)")
+                            newWeights.removeValue(
+                                forKey: "\(prefix).ffn.experts.\(j).\(projName).\(key)")
                         }
                     }
                 }
@@ -870,7 +887,9 @@ public class DeepseekV4Model: Module, LLMModel, KVCacheDimensionProvider, LoRAMo
 /// They share the same architecture as the main blocks but operate on the final hidden state.
 /// The main `lm_head` is reused for all MTP depth projections.
 extension DeepseekV4Model: MTPLanguageModel {
-    public func callMTP(_ inputs: MLXArray, cache: [KVCache]?, mtpCaches: [[KVCache]]?) -> [MLXArray] {
+    public func callMTP(_ inputs: MLXArray, cache: [KVCache]?, mtpCaches: [[KVCache]]?)
+        -> [MLXArray]
+    {
         let mtpLayers = model.layers.suffix(args.numNextnPredictLayers)
         guard MTPConfig.retainMTPWeights, !mtpLayers.isEmpty else {
             return [callAsFunction(inputs, cache: cache)]
@@ -884,7 +903,8 @@ extension DeepseekV4Model: MTPLanguageModel {
 
         // Chain MTP blocks stored in `model.mtpLayers`
         var prevHidden = mainHidden
-        let B = prevHidden.dim(0), S = prevHidden.dim(1)
+        let B = prevHidden.dim(0)
+        let S = prevHidden.dim(1)
         let hc = args.hcMult
         for (i, mtpLayer) in mtpLayers.enumerated() {
             let mtpCache = mtpCaches?[i]
@@ -894,14 +914,14 @@ extension DeepseekV4Model: MTPLanguageModel {
 
             let hForMask = h.reshaped([B, S, hc * args.hiddenSize])
             let attentionMask = createAttentionMask(h: hForMask, cache: mtpCache?.first)
-            
+
             h = mtpLayer(h, mask: attentionMask, cache: mtpCache?.first)
-            
+
             // Reduce back to [B, S, D]
             prevHidden = hcHead(
                 x: h, hcFn: model.hc_head.fn, hcScale: model.hc_head.scale,
                 hcBase: model.hc_head.base, eps: args.hcEps)
-                
+
             let mtpLogits = lmHead(model.norm(prevHidden))
             result.append(mtpLogits)
         }

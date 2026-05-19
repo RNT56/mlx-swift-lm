@@ -303,7 +303,9 @@ public protocol DualModelMTP: MTPLanguageModel {
 }
 
 extension MTPLanguageModel {
-    public func callMTP(_ inputs: MLXArray, cache: [KVCache]?, mtpCaches: [[KVCache]]?) -> [MLXArray] {
+    public func callMTP(_ inputs: MLXArray, cache: [KVCache]?, mtpCaches: [[KVCache]]?)
+        -> [MLXArray]
+    {
         callMTP(inputs, cache: cache)
     }
 

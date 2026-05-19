@@ -1,4 +1,4 @@
-// Copyright © 2026 Schtack.
+// Copyright © 2026 RNT56.
 
 import Foundation
 import MLX
@@ -84,8 +84,8 @@ public protocol TurboQuantCompressedKVCacheProtocol: KVCache {
     func recordCompressedAttentionFailure(_ message: String)
 }
 
-public extension TurboQuantCompressedKVCacheProtocol {
-    var prefersOnlineFusedAttention: Bool {
+extension TurboQuantCompressedKVCacheProtocol {
+    public var prefersOnlineFusedAttention: Bool {
         optimizationPolicy != .conservative
     }
 }
@@ -179,12 +179,13 @@ public final class TurboQuantKVCache: QuantizedKVCache, TurboQuantCompressedKVCa
 
     public override var metaState: [String] {
         get {
-            var meta = super.metaState + [
-                preset.rawValue,
-                requestedBackend.rawValue,
-                String(seed),
-                "valueBits=\(valueBits)",
-            ]
+            var meta =
+                super.metaState + [
+                    preset.rawValue,
+                    requestedBackend.rawValue,
+                    String(seed),
+                    "valueBits=\(valueBits)",
+                ]
             if let compressedKeys {
                 let layout = compressedKeys.layout
                 let valueLayout = compressedValues?.layout
@@ -205,9 +206,10 @@ public final class TurboQuantKVCache: QuantizedKVCache, TurboQuantCompressedKVCa
         }
         set {
             super.metaState = Array(newValue.prefix(4))
-            let compressedBase = newValue.firstIndex {
-                $0.hasPrefix("turboq-attn-v")
-            } ?? (UInt64(newValue.dropFirst(6).first ?? "") == nil ? 6 : 7)
+            let compressedBase =
+                newValue.firstIndex {
+                    $0.hasPrefix("turboq-attn-v")
+                } ?? (UInt64(newValue.dropFirst(6).first ?? "") == nil ? 6 : 7)
             if newValue.count >= compressedBase + 7,
                 let capacity = Int(newValue[compressedBase + 1]),
                 let logicalLength = Int(newValue[compressedBase + 2]),
@@ -283,11 +285,14 @@ public final class TurboQuantKVCache: QuantizedKVCache, TurboQuantCompressedKVCa
             }
             if activeBackend == .metalPolarQJL, newValue.count == 10 {
                 let capacity = restoredLayoutMetadata?.capacity ?? newValue[0].dim(2)
-                let keyHeadDimension = restoredLayoutMetadata?.keyHeadDimension
+                let keyHeadDimension =
+                    restoredLayoutMetadata?.keyHeadDimension
                     ?? max(groupSize, (newValue[0].dim(3) * groupSize))
-                let valueHeadDimension = restoredLayoutMetadata?.valueHeadDimension
+                let valueHeadDimension =
+                    restoredLayoutMetadata?.valueHeadDimension
                     ?? max(groupSize, (newValue[5].dim(3) * groupSize))
-                let logicalLength = restoredLayoutMetadata?.logicalLength
+                let logicalLength =
+                    restoredLayoutMetadata?.logicalLength
                     ?? (offset > 0 ? min(offset, capacity) : capacity)
                 let keyLayout = MLX.TurboQuantAttentionLayout(
                     batchSize: newValue[0].dim(0),
@@ -437,12 +442,13 @@ public final class TurboQuantKVCache: QuantizedKVCache, TurboQuantCompressedKVCa
             lastUnsupportedShape = "failed to create compressed attention placeholder"
             return false
         }
-        let supportsTiled = queries.dim(3) == values.dim(3) && prefersOnlineFusedAttention
+        let supportsTiled =
+            queries.dim(3) == values.dim(3) && prefersOnlineFusedAttention
             && MLX.turboQuantMetalSupportsOnlineFusedAttention(
-            queries: queries,
-            keyCode: keyCode,
-            mask: mask
-        )
+                queries: queries,
+                keyCode: keyCode,
+                mask: mask
+            )
         lastAttentionPath = supportsTiled ? .tiledOnlineFused : .twoStageCompressed
         lastUnsupportedShape = nil
         return true
@@ -454,7 +460,8 @@ public final class TurboQuantKVCache: QuantizedKVCache, TurboQuantCompressedKVCa
     ) {
         let previousOffset = offset
         let tokenCount = keys.dim(2)
-        try ensureCompressedCapacity(keys: keys, values: values, requiredLength: previousOffset + tokenCount)
+        try ensureCompressedCapacity(
+            keys: keys, values: values, requiredLength: previousOffset + tokenCount)
 
         let keyConfiguration = TurboQuantConfiguration(
             preset: preset,
@@ -493,7 +500,8 @@ public final class TurboQuantKVCache: QuantizedKVCache, TurboQuantCompressedKVCa
         currentKeys.residualSigns[.ellipsis, range, 0..., 0...] = encodedKeys.residualSigns
         currentKeys.scales[.ellipsis, range, 0..., 0...] = encodedKeys.scales
 
-        currentValues.packedMagnitudes[.ellipsis, range, 0..., 0...] = encodedValues.packedMagnitudes
+        currentValues.packedMagnitudes[.ellipsis, range, 0..., 0...] =
+            encodedValues.packedMagnitudes
         if currentValues.signs.ndim == 5 {
             currentValues.signs[.ellipsis, range, 0..., 0...] = encodedValues.signs
             currentValues.highPrecisionMask[.ellipsis, range, 0..., 0...] =
@@ -534,7 +542,9 @@ public final class TurboQuantKVCache: QuantizedKVCache, TurboQuantCompressedKVCa
         return new
     }
 
-    private func placeholderCode(for array: MLXArray, role: TurboQuantTensorRole) throws -> TurboQuantAttentionCode {
+    private func placeholderCode(for array: MLXArray, role: TurboQuantTensorRole) throws
+        -> TurboQuantAttentionCode
+    {
         let layout = try MLX.turboQuantAttentionLayout(
             for: array,
             preset: preset,
@@ -706,9 +716,11 @@ public final class TurboQuantKVCache: QuantizedKVCache, TurboQuantCompressedKVCa
             seed: code.seed,
             valueBits: code.valueBits,
             scalesPerGroup: code.scalesPerGroup,
-            packedMagnitudes: concatenated([code.packedMagnitudes, zeros.packedMagnitudes], axis: 2),
+            packedMagnitudes: concatenated(
+                [code.packedMagnitudes, zeros.packedMagnitudes], axis: 2),
             signs: concatenated([code.signs, zeros.signs], axis: 2),
-            highPrecisionMask: concatenated([code.highPrecisionMask, zeros.highPrecisionMask], axis: 2),
+            highPrecisionMask: concatenated(
+                [code.highPrecisionMask, zeros.highPrecisionMask], axis: 2),
             residualSigns: concatenated([code.residualSigns, zeros.residualSigns], axis: 2),
             scales: concatenated([code.scales, zeros.scales], axis: 2)
         )
@@ -893,12 +905,13 @@ public final class RotatingTurboQuantKVCache: BaseKVCache, QuantizedKVCacheProto
             lastUnsupportedShape = "failed to create compressed attention placeholder"
             return false
         }
-        let supportsTiled = queries.dim(3) == values.dim(3) && prefersOnlineFusedAttention
+        let supportsTiled =
+            queries.dim(3) == values.dim(3) && prefersOnlineFusedAttention
             && MLX.turboQuantMetalSupportsOnlineFusedAttention(
-            queries: queries,
-            keyCode: keyCode,
-            mask: mask
-        )
+                queries: queries,
+                keyCode: keyCode,
+                mask: mask
+            )
         lastAttentionPath = supportsTiled ? .tiledOnlineFused : .twoStageCompressed
         lastUnsupportedShape = nil
         return true
@@ -1016,9 +1029,11 @@ public final class RotatingTurboQuantKVCache: BaseKVCache, QuantizedKVCacheProto
             }
             if activeBackend == .metalPolarQJL, newValue.count == 10 {
                 let capacity = restoredLayoutMetadata?.capacity ?? newValue[0].dim(2)
-                let keyHeadDimension = restoredLayoutMetadata?.keyHeadDimension
+                let keyHeadDimension =
+                    restoredLayoutMetadata?.keyHeadDimension
                     ?? max(groupSize, (newValue[0].dim(3) * groupSize))
-                let valueHeadDimension = restoredLayoutMetadata?.valueHeadDimension
+                let valueHeadDimension =
+                    restoredLayoutMetadata?.valueHeadDimension
                     ?? max(groupSize, (newValue[5].dim(3) * groupSize))
                 let logicalLength = restoredLayoutMetadata?.logicalLength ?? min(offset, capacity)
                 let keyLayout = MLX.TurboQuantAttentionLayout(
@@ -1027,7 +1042,8 @@ public final class RotatingTurboQuantKVCache: BaseKVCache, QuantizedKVCacheProto
                     capacity: capacity,
                     logicalLength: logicalLength,
                     ringOffset: restoredLayoutMetadata?.ringOffset ?? ringOffset(forOffset: offset),
-                    pinnedPrefixLength: restoredLayoutMetadata?.pinnedPrefixLength ?? min(keep, capacity),
+                    pinnedPrefixLength: restoredLayoutMetadata?.pinnedPrefixLength
+                        ?? min(keep, capacity),
                     headDimension: keyHeadDimension,
                     groupsPerVector: newValue[0].dim(3),
                     magnitudeWordsPerGroup: newValue[0].dim(4),
@@ -1039,7 +1055,8 @@ public final class RotatingTurboQuantKVCache: BaseKVCache, QuantizedKVCacheProto
                     capacity: capacity,
                     logicalLength: logicalLength,
                     ringOffset: restoredLayoutMetadata?.ringOffset ?? ringOffset(forOffset: offset),
-                    pinnedPrefixLength: restoredLayoutMetadata?.pinnedPrefixLength ?? min(keep, capacity),
+                    pinnedPrefixLength: restoredLayoutMetadata?.pinnedPrefixLength
+                        ?? min(keep, capacity),
                     headDimension: valueHeadDimension,
                     groupsPerVector: newValue[5].dim(3),
                     magnitudeWordsPerGroup: newValue[5].dim(4),
@@ -1126,9 +1143,10 @@ public final class RotatingTurboQuantKVCache: BaseKVCache, QuantizedKVCacheProto
             if let rawFallbackCache {
                 rawFallbackCache.metaState = Array(newValue.prefix(5))
             }
-            let compressedBase = newValue.firstIndex {
-                $0.hasPrefix("turboq-rot-v")
-            } ?? 9
+            let compressedBase =
+                newValue.firstIndex {
+                    $0.hasPrefix("turboq-rot-v")
+                } ?? 9
             if newValue.count >= compressedBase + 4,
                 let logicalLength = Int(newValue[compressedBase + 1]),
                 let ringOffset = Int(newValue[compressedBase + 2]),
@@ -1199,7 +1217,8 @@ public final class RotatingTurboQuantKVCache: BaseKVCache, QuantizedKVCacheProto
             let actualWindowSize = windowSize ?? maxCacheSize
             let cappedOffset = min(maxCacheSize - 1, offset)
             if cappedOffset + n > actualWindowSize || returnArray {
-                return .array(createCausalMask(n: n, offset: cappedOffset, windowSize: actualWindowSize))
+                return .array(
+                    createCausalMask(n: n, offset: cappedOffset, windowSize: actualWindowSize))
             }
             return .causal
         }
@@ -1282,7 +1301,9 @@ public final class RotatingTurboQuantKVCache: BaseKVCache, QuantizedKVCacheProto
         "\(String(describing: Self.self)) offset: \(offset), maxSize: \(maxSize?.description ?? "-"), preset: \(preset.rawValue), backend: \(activeBackend.rawValue), rawFallback: \(rawFallbackCache != nil)"
     }
 
-    private func placeholderCode(for array: MLXArray, role: TurboQuantTensorRole) throws -> TurboQuantAttentionCode {
+    private func placeholderCode(for array: MLXArray, role: TurboQuantTensorRole) throws
+        -> TurboQuantAttentionCode
+    {
         let layout = try MLX.turboQuantAttentionLayout(
             for: array,
             preset: preset,
@@ -1423,8 +1444,8 @@ public final class RotatingTurboQuantKVCache: BaseKVCache, QuantizedKVCacheProto
     }
 }
 
-public extension RotatingKVCache {
-    func toTurboQuant(
+extension RotatingKVCache {
+    public func toTurboQuant(
         preset: TurboQuantPreset = .turbo3_5,
         groupSize: Int = 64,
         mode: QuantizationMode = .affine,
@@ -1550,8 +1571,8 @@ public extension RotatingKVCache {
     }
 }
 
-public extension KVCacheSimple {
-    func toTurboQuant(
+extension KVCacheSimple {
+    public func toTurboQuant(
         preset: TurboQuantPreset = .turbo3_5,
         groupSize: Int = 64,
         mode: QuantizationMode = .affine,

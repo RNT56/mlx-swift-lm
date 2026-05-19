@@ -36,12 +36,14 @@ struct SwitchLayersStreamingTests {
             numExperts: 2,
             activation: { $0 },
             bias: true)
-        let x = MLXArray([
-            1.0, 0.5, -1.0,
-            -0.25, 0.75, 1.25,
-            0.5, -1.5, 0.25,
-            1.5, 0.25, -0.75,
-        ] as [Float]).reshaped([4, 3])
+        let x = MLXArray(
+            [
+                1.0, 0.5, -1.0,
+                -0.25, 0.75, 1.25,
+                0.5, -1.5, 0.25,
+                1.5, 0.25, -0.75,
+            ] as [Float]
+        ).reshaped([4, 3])
         let indices = MLXArray([0, 1, 0, 1] as [UInt32]).reshaped([4, 1])
 
         ExpertStreamingConfig.shared.deactivate()
@@ -69,12 +71,12 @@ struct SwitchLayersStreamingTests {
         ]
 
         #if os(macOS)
-        let info = layer.resolveSSDInfo(expertIndex: 2)
-        #expect(info?.path.hasSuffix("expert-2.safetensors") == true)
-        #expect(info?.tensorName == "model.layers.0.experts.2.down_proj.weight")
-        #expect(info?.readIndex == 0)
+            let info = layer.resolveSSDInfo(expertIndex: 2)
+            #expect(info?.path.hasSuffix("expert-2.safetensors") == true)
+            #expect(info?.tensorName == "model.layers.0.experts.2.down_proj.weight")
+            #expect(info?.readIndex == 0)
         #else
-        #expect(layer.resolveSSDInfo(expertIndex: 2) == nil)
+            #expect(layer.resolveSSDInfo(expertIndex: 2) == nil)
         #endif
     }
 

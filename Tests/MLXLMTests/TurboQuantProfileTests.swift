@@ -90,7 +90,9 @@ extension MLXRuntimeSwiftTests {
                 .appendingPathComponent("TurboQuantProfiles")
 
             let profiles = try TurboQuantProfileRegistry.loadJSONProfiles(from: profileDirectory)
-            #expect(Set(profiles.map(\.id)) == Set(TurboQuantProfileRegistry.bundled.profiles.map(\.id)))
+            #expect(
+                Set(profiles.map(\.id)) == Set(TurboQuantProfileRegistry.bundled.profiles.map(\.id))
+            )
 
             let registry = TurboQuantProfileRegistry(profiles: profiles)
             let glm = try #require(

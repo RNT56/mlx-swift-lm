@@ -235,7 +235,8 @@ extension MLXRuntimeSwiftTests {
                 turboQuantPreset: .turbo3_5
             )
             var cache: [KVCache] = [
-                makeRawAttentionKVCache(parameters: GenerateParameters(kvCacheStrategy: .turboQuant)),
+                makeRawAttentionKVCache(
+                    parameters: GenerateParameters(kvCacheStrategy: .turboQuant)),
                 makeRawAttentionKVCache(parameters: parameters, maxKVSize: 8, keep: 0),
             ]
             let keys = MLXArray.ones([1, 2, 4, 64], dtype: .float32)
@@ -443,7 +444,8 @@ extension MLXRuntimeSwiftTests {
             )
 
             #expect(result.output.shape == [1, 4, 1, 80])
-            guard case .turboQuant(let compressedKeys, let compressedValues, _) = result.state else {
+            guard case .turboQuant(let compressedKeys, let compressedValues, _) = result.state
+            else {
                 Issue.record("Expected TurboQuant compressed attention state")
                 return
             }

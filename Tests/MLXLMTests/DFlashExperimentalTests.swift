@@ -1,9 +1,9 @@
 import Foundation
 import MLX
-@testable import MLXLLM
 import MLXNN
 import Testing
 
+@testable import MLXLLM
 @testable import MLXLMCommon
 
 extension MLXRuntimeSwiftTests {
@@ -155,60 +155,60 @@ extension MLXRuntimeSwiftTests {
 
         private static func makeQwen3Config() throws -> Qwen3Configuration {
             let json = """
-            {
-                "hidden_size": 8,
-                "num_hidden_layers": 2,
-                "intermediate_size": 16,
-                "num_attention_heads": 2,
-                "num_key_value_heads": 1,
-                "rms_norm_eps": 1e-6,
-                "vocab_size": 16,
-                "head_dim": 4
-            }
-            """
+                {
+                    "hidden_size": 8,
+                    "num_hidden_layers": 2,
+                    "intermediate_size": 16,
+                    "num_attention_heads": 2,
+                    "num_key_value_heads": 1,
+                    "rms_norm_eps": 1e-6,
+                    "vocab_size": 16,
+                    "head_dim": 4
+                }
+                """
             return try JSONDecoder().decode(Qwen3Configuration.self, from: Data(json.utf8))
         }
 
         private static func makeQwen35TextConfig() throws -> Qwen35TextConfiguration {
             let json = """
-            {
-                "model_type": "qwen3_5",
-                "hidden_size": 8,
-                "num_hidden_layers": 2,
-                "intermediate_size": 16,
-                "num_attention_heads": 2,
-                "num_key_value_heads": 1,
-                "linear_num_value_heads": 1,
-                "linear_num_key_heads": 1,
-                "linear_key_head_dim": 4,
-                "linear_value_head_dim": 4,
-                "linear_conv_kernel_dim": 4,
-                "rms_norm_eps": 1e-6,
-                "vocab_size": 16,
-                "full_attention_interval": 2
-            }
-            """
+                {
+                    "model_type": "qwen3_5",
+                    "hidden_size": 8,
+                    "num_hidden_layers": 2,
+                    "intermediate_size": 16,
+                    "num_attention_heads": 2,
+                    "num_key_value_heads": 1,
+                    "linear_num_value_heads": 1,
+                    "linear_num_key_heads": 1,
+                    "linear_key_head_dim": 4,
+                    "linear_value_head_dim": 4,
+                    "linear_conv_kernel_dim": 4,
+                    "rms_norm_eps": 1e-6,
+                    "vocab_size": 16,
+                    "full_attention_interval": 2
+                }
+                """
             return try JSONDecoder().decode(Qwen35TextConfiguration.self, from: Data(json.utf8))
         }
 
         private static func makeQwen3MoEConfig() throws -> Qwen3MoEConfiguration {
             let json = """
-            {
-                "hidden_size": 8,
-                "num_hidden_layers": 2,
-                "intermediate_size": 16,
-                "num_attention_heads": 2,
-                "num_key_value_heads": 1,
-                "rms_norm_eps": 1e-6,
-                "vocab_size": 16,
-                "head_dim": 4,
-                "num_experts": 2,
-                "num_experts_per_tok": 1,
-                "decoder_sparse_step": 1,
-                "mlp_only_layers": [],
-                "moe_intermediate_size": 8
-            }
-            """
+                {
+                    "hidden_size": 8,
+                    "num_hidden_layers": 2,
+                    "intermediate_size": 16,
+                    "num_attention_heads": 2,
+                    "num_key_value_heads": 1,
+                    "rms_norm_eps": 1e-6,
+                    "vocab_size": 16,
+                    "head_dim": 4,
+                    "num_experts": 2,
+                    "num_experts_per_tok": 1,
+                    "decoder_sparse_step": 1,
+                    "mlp_only_layers": [],
+                    "moe_intermediate_size": 8
+                }
+                """
             return try JSONDecoder().decode(Qwen3MoEConfiguration.self, from: Data(json.utf8))
         }
 
@@ -227,32 +227,32 @@ extension MLXRuntimeSwiftTests {
 
         private static func makeQwen3NextConfig() throws -> Qwen3NextConfiguration {
             let json = """
-            {
-                "model_type": "qwen3_next",
-                "hidden_size": 8,
-                "num_hidden_layers": 2,
-                "intermediate_size": 16,
-                "num_attention_heads": 2,
-                "linear_num_value_heads": 1,
-                "linear_num_key_heads": 1,
-                "linear_key_head_dim": 4,
-                "linear_value_head_dim": 4,
-                "linear_conv_kernel_dim": 4,
-                "num_experts": 2,
-                "num_experts_per_tok": 1,
-                "decoder_sparse_step": 1,
-                "shared_expert_intermediate_size": 8,
-                "mlp_only_layers": [],
-                "moe_intermediate_size": 8,
-                "rms_norm_eps": 1e-6,
-                "vocab_size": 16,
-                "num_key_value_heads": 1,
-                "rope_theta": 10000.0,
-                "partial_rotary_factor": 1.0,
-                "max_position_embeddings": 64,
-                "full_attention_interval": 2
-            }
-            """
+                {
+                    "model_type": "qwen3_next",
+                    "hidden_size": 8,
+                    "num_hidden_layers": 2,
+                    "intermediate_size": 16,
+                    "num_attention_heads": 2,
+                    "linear_num_value_heads": 1,
+                    "linear_num_key_heads": 1,
+                    "linear_key_head_dim": 4,
+                    "linear_value_head_dim": 4,
+                    "linear_conv_kernel_dim": 4,
+                    "num_experts": 2,
+                    "num_experts_per_tok": 1,
+                    "decoder_sparse_step": 1,
+                    "shared_expert_intermediate_size": 8,
+                    "mlp_only_layers": [],
+                    "moe_intermediate_size": 8,
+                    "rms_norm_eps": 1e-6,
+                    "vocab_size": 16,
+                    "num_key_value_heads": 1,
+                    "rope_theta": 10000.0,
+                    "partial_rotary_factor": 1.0,
+                    "max_position_embeddings": 64,
+                    "full_attention_interval": 2
+                }
+                """
             return try JSONDecoder().decode(Qwen3NextConfiguration.self, from: Data(json.utf8))
         }
     }

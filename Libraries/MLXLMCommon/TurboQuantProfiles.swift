@@ -183,7 +183,8 @@ public struct TurboQuantProfile: Codable, Equatable, Identifiable, Sendable {
         self.modelPatterns = modelPatterns
         self.architecture = architecture
         self.supportedKeyHeadDimensions = supportedKeyHeadDimensions
-        self.supportedValueHeadDimensions = supportedValueHeadDimensions ?? supportedKeyHeadDimensions
+        self.supportedValueHeadDimensions =
+            supportedValueHeadDimensions ?? supportedKeyHeadDimensions
         self.recommendedScheme = recommendedScheme
         self.fallbackScheme = fallbackScheme
         self.keyBits = keyBits
@@ -276,7 +277,8 @@ public struct TurboQuantProfileRegistry: Sendable {
         )
         let decoder = JSONDecoder()
         decoder.keyDecodingStrategy = .convertFromSnakeCase
-        return try urls
+        return
+            try urls
             .filter { $0.pathExtension.lowercased() == "json" }
             .sorted { $0.lastPathComponent < $1.lastPathComponent }
             .map { url in
@@ -286,15 +288,15 @@ public struct TurboQuantProfileRegistry: Sendable {
     }
 }
 
-public extension GenerateParameters {
-    init(
+extension GenerateParameters {
+    public init(
         turboQuantProfile profile: TurboQuantProfile,
         base parameters: GenerateParameters = GenerateParameters()
     ) {
         self = profile.applying(to: parameters)
     }
 
-    init(
+    public init(
         turboQuantModelID modelID: String,
         registry: TurboQuantProfileRegistry = .bundled,
         keyHeadDimension: Int? = nil,
@@ -316,27 +318,27 @@ public extension GenerateParameters {
         }
     }
 
-    mutating func applyTurboQuantProfile(_ profile: TurboQuantProfile) {
+    public mutating func applyTurboQuantProfile(_ profile: TurboQuantProfile) {
         self = profile.applying(to: self)
     }
 }
 
-private extension TurboQuantProfile {
-    func matches(modelID: String) -> Bool {
+extension TurboQuantProfile {
+    fileprivate func matches(modelID: String) -> Bool {
         let normalizedID = Self.normalized(modelID)
         return modelPatterns.contains { pattern in
             Self.matches(pattern: Self.normalized(pattern), modelID: normalizedID)
         }
     }
 
-    static func normalized(_ value: String) -> String {
+    fileprivate static func normalized(_ value: String) -> String {
         value
             .lowercased()
             .replacingOccurrences(of: "_", with: "-")
             .replacingOccurrences(of: " ", with: "-")
     }
 
-    static func matches(pattern: String, modelID: String) -> Bool {
+    fileprivate static func matches(pattern: String, modelID: String) -> Bool {
         if pattern == modelID || modelID.contains(pattern) {
             return true
         }
@@ -347,7 +349,7 @@ private extension TurboQuantProfile {
         let regexPattern =
             "^"
             + NSRegularExpression.escapedPattern(for: pattern)
-                .replacingOccurrences(of: "\\*", with: ".*")
+            .replacingOccurrences(of: "\\*", with: ".*")
             + "$"
         guard let regex = try? NSRegularExpression(pattern: regexPattern) else {
             return false

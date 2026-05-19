@@ -45,7 +45,8 @@ public struct ModelMemoryProfile: Codable, Equatable, Sendable {
         self.hiddenSize = max(0, hiddenSize)
         self.attentionHeadCount = max(1, attentionHeadCount)
         self.kvHeadCount = max(1, kvHeadCount ?? attentionHeadCount)
-        self.headDimension = max(1, headDimension ?? max(1, hiddenSize / max(1, attentionHeadCount)))
+        self.headDimension = max(
+            1, headDimension ?? max(1, hiddenSize / max(1, attentionHeadCount)))
         self.intermediateSize = max(0, intermediateSize ?? hiddenSize * 4)
         self.vocabularySize = max(0, vocabularySize)
         self.quantizationBits = max(1, quantizationBits)
@@ -84,7 +85,8 @@ public struct ModelMemoryProfile: Codable, Equatable, Sendable {
 
     public func kvCacheBytes(contextLength: Int, bytesPerElement: Int = 2) -> Int {
         guard contextLength > 0, layerCount > 0 else { return 0 }
-        let bytes = Double(2 * max(1, bytesPerElement))
+        let bytes =
+            Double(2 * max(1, bytesPerElement))
             * Double(layerCount)
             * Double(kvHeadCount)
             * Double(headDimension)
@@ -97,7 +99,8 @@ public struct ModelMemoryProfile: Codable, Equatable, Sendable {
         draftWeightBytes: Int = 0,
         overheadMultiplier: Double = ModelFitPlanner.defaultOptions.overheadMultiplier
     ) -> Int {
-        let bytes = Double(resolvedWeightBytes + max(0, draftWeightBytes)) * overheadMultiplier
+        let bytes =
+            Double(resolvedWeightBytes + max(0, draftWeightBytes)) * overheadMultiplier
             + Double(kvCacheBytes(contextLength: contextLength))
         return ModelFitPlanner.clampedInt(bytes)
     }
@@ -159,12 +162,18 @@ public struct ModelMemoryProfile: Codable, Equatable, Sendable {
 
         let layerCount = config.numHiddenLayers ?? config.textConfig?.numHiddenLayers ?? 32
         let hiddenSize = config.hiddenSize ?? config.textConfig?.hiddenSize ?? 4096
-        let attentionHeadCount = config.numAttentionHeads ?? config.textConfig?.numAttentionHeads ?? 32
-        let kvHeadCount = config.numKeyValueHeads ?? config.textConfig?.numKeyValueHeads ?? attentionHeadCount
-        let headDimension = config.headDim ?? config.textConfig?.headDim ?? (hiddenSize / max(1, attentionHeadCount))
-        let intermediateSize = config.intermediateSize ?? config.textConfig?.intermediateSize ?? (hiddenSize * 4)
+        let attentionHeadCount =
+            config.numAttentionHeads ?? config.textConfig?.numAttentionHeads ?? 32
+        let kvHeadCount =
+            config.numKeyValueHeads ?? config.textConfig?.numKeyValueHeads ?? attentionHeadCount
+        let headDimension =
+            config.headDim ?? config.textConfig?.headDim
+            ?? (hiddenSize / max(1, attentionHeadCount))
+        let intermediateSize =
+            config.intermediateSize ?? config.textConfig?.intermediateSize ?? (hiddenSize * 4)
         let vocabularySize = config.vocabSize ?? config.textConfig?.vocabSize ?? 32000
-        let quantizationBits = config.quantizationConfig?.bits ?? detectQuantizationBits(modelID: modelID)
+        let quantizationBits =
+            config.quantizationConfig?.bits ?? detectQuantizationBits(modelID: modelID)
         let expertCount = config.numExperts ?? config.textConfig?.numExperts
         let activeExpertCount = config.numExpertsPerToken ?? config.textConfig?.numExpertsPerToken
         let isMixtureOfExperts = (expertCount ?? 0) > 1
@@ -190,18 +199,22 @@ public struct ModelMemoryProfile: Codable, Equatable, Sendable {
 
     private static func measureWeightFiles(directory: URL) -> Int {
         let fileManager = FileManager.default
-        guard let enumerator = fileManager.enumerator(
-            at: directory,
-            includingPropertiesForKeys: [.fileSizeKey, .isRegularFileKey],
-            options: [.skipsHiddenFiles]
-        ) else {
+        guard
+            let enumerator = fileManager.enumerator(
+                at: directory,
+                includingPropertiesForKeys: [.fileSizeKey, .isRegularFileKey],
+                options: [.skipsHiddenFiles]
+            )
+        else {
             return 0
         }
 
         var total = 0
         for case let fileURL as URL in enumerator {
             let name = fileURL.lastPathComponent
-            guard name.hasSuffix(".safetensors") || name.hasSuffix(".bin") || name.hasSuffix(".gguf") else {
+            guard
+                name.hasSuffix(".safetensors") || name.hasSuffix(".bin") || name.hasSuffix(".gguf")
+            else {
                 continue
             }
             let resolvedURL = fileURL.resolvingSymlinksInPath()
@@ -319,7 +332,10 @@ public struct ModelFitPlanner: Sendable {
         let availableMemoryBytes = max(0, normalizedSystemMemoryBytes - options.osReservedBytes)
         let workingSetBytes =
             recommendedWorkingSetBytes
-            ?? max(0, Int(Double(normalizedSystemMemoryBytes) * options.usableMemoryFraction) - options.osReservedBytes)
+            ?? max(
+                0,
+                Int(Double(normalizedSystemMemoryBytes) * options.usableMemoryFraction)
+                    - options.osReservedBytes)
         let weightBytes = profile.resolvedWeightBytes
         let kvBytes = profile.kvCacheBytes(contextLength: normalizedContextLength)
         let totalRequiredBytes = totalBytes(
@@ -353,7 +369,8 @@ public struct ModelFitPlanner: Sendable {
             warnings: &warnings
         )
 
-        let residentWeightForKV = strategy == .streamAssisted
+        let residentWeightForKV =
+            strategy == .streamAssisted
             ? (profile.estimatedStreamingResidentWeightBytes ?? weightBytes)
             : weightBytes
         let recommendedMaxKVSize = recommendMaxKVSize(
@@ -369,7 +386,8 @@ public struct ModelFitPlanner: Sendable {
             kvCacheBytes: min(kvBytes, profile.kvCacheBytes(contextLength: recommendedMaxKVSize)),
             availableMemoryBytes: availableMemoryBytes
         )
-        let recommendedGPULayerCount = strategy == .streamAssisted
+        let recommendedGPULayerCount =
+            strategy == .streamAssisted
             ? profile.layerCount
             : partitionPlan.gpuLayerCount
         let memoryLimitBytes = recommendedMemoryLimitBytes(
@@ -431,7 +449,8 @@ public struct ModelFitPlanner: Sendable {
         osReservedBytes: Int = defaultOptions.osReservedBytes,
         usableMemoryFraction: Double = defaultOptions.usableMemoryFraction
     ) -> Int {
-        let raw = Int(Double(max(0, totalMemoryBytes)) * usableMemoryFraction)
+        let raw =
+            Int(Double(max(0, totalMemoryBytes)) * usableMemoryFraction)
             - max(0, osReservedBytes)
             - max(0, draftWeightBytes)
         return max(raw, 2 * 1024 * 1024 * 1024)
@@ -472,7 +491,8 @@ public struct ModelFitPlanner: Sendable {
             return .fullGPU
         }
         if required <= available {
-            warnings.append("Model fits available memory but leaves limited headroom for concurrent work.")
+            warnings.append(
+                "Model fits available memory but leaves limited headroom for concurrent work.")
             return .fullGPU
         }
 
@@ -487,7 +507,9 @@ public struct ModelFitPlanner: Sendable {
         }
 
         if profile.expertStreamingEligible, expertStreamingWorkingSetBytes != nil {
-            warnings.append("Expert streaming is available, but the estimated active working set still exceeds memory.")
+            warnings.append(
+                "Expert streaming is available, but the estimated active working set still exceeds memory."
+            )
         }
         return .tooLarge
     }
@@ -509,7 +531,9 @@ public struct ModelFitPlanner: Sendable {
         }
 
         if strategy == .layerPartitioned {
-            warnings.append("Layer partitioning is recommended; throughput depends on model support for GPU/CPU layer placement.")
+            warnings.append(
+                "Layer partitioning is recommended; throughput depends on model support for GPU/CPU layer placement."
+            )
         }
 
         if strategy == .streamAssisted,
@@ -519,7 +543,9 @@ public struct ModelFitPlanner: Sendable {
                 "MoE expert streaming can keep the active working set near \(formatGB(expertStreamingWorkingSetBytes)) instead of loading all expert weights."
             )
             if draftWeightBytes > 0 {
-                warnings.append("Draft models increase page-cache pressure during expert streaming; use a small draft model or one draft token per round.")
+                warnings.append(
+                    "Draft models increase page-cache pressure during expert streaming; use a small draft model or one draft token per round."
+                )
             }
         }
 
@@ -527,11 +553,14 @@ public struct ModelFitPlanner: Sendable {
             let expertCount = profile.expertCount,
             let activeExpertCount = profile.activeExpertCount
         {
-            warnings.append("MoE model activates \(activeExpertCount) of \(expertCount) experts per token.")
+            warnings.append(
+                "MoE model activates \(activeExpertCount) of \(expertCount) experts per token.")
         }
 
         if strategy == .tooLarge {
-            warnings.append("Use a smaller quantization, lower context length, expert streaming for supported MoE models, or a machine with more memory.")
+            warnings.append(
+                "Use a smaller quantization, lower context length, expert streaming for supported MoE models, or a machine with more memory."
+            )
         }
     }
 
@@ -540,7 +569,8 @@ public struct ModelFitPlanner: Sendable {
         kvCacheBytes: Int,
         draftWeightBytes: Int
     ) -> Int? {
-        guard let streamingResidentWeightBytes = profile.estimatedStreamingResidentWeightBytes else {
+        guard let streamingResidentWeightBytes = profile.estimatedStreamingResidentWeightBytes
+        else {
             return nil
         }
         return totalBytes(
@@ -555,7 +585,9 @@ public struct ModelFitPlanner: Sendable {
         kvCacheBytes: Int,
         draftWeightBytes: Int
     ) -> Int {
-        let bytes = Double(max(0, residentWeightBytes) + max(0, draftWeightBytes)) * options.overheadMultiplier
+        let bytes =
+            Double(max(0, residentWeightBytes) + max(0, draftWeightBytes))
+            * options.overheadMultiplier
             + Double(max(0, kvCacheBytes))
         return Self.clampedInt(bytes)
     }
@@ -566,13 +598,16 @@ public struct ModelFitPlanner: Sendable {
         availableMemoryBytes: Int
     ) -> LayerPartitionPlan {
         guard profile.layerCount > 0 else {
-            return LayerPartitionPlan(totalLayerCount: 0, gpuLayerCount: 0, perLayerResidentBytes: 0)
+            return LayerPartitionPlan(
+                totalLayerCount: 0, gpuLayerCount: 0, perLayerResidentBytes: 0)
         }
 
         let perLayerWeight = Double(profile.resolvedWeightBytes) / Double(profile.layerCount)
         let perLayerKV = Double(kvCacheBytes) / Double(profile.layerCount)
-        let perLayerResident = Self.clampedInt((perLayerWeight + perLayerKV) * options.overheadMultiplier)
-        let gpuLayers = perLayerResident > 0
+        let perLayerResident = Self.clampedInt(
+            (perLayerWeight + perLayerKV) * options.overheadMultiplier)
+        let gpuLayers =
+            perLayerResident > 0
             ? Int(Double(max(0, availableMemoryBytes)) / Double(perLayerResident))
             : profile.layerCount
 
@@ -594,7 +629,9 @@ public struct ModelFitPlanner: Sendable {
         let bytesPerToken = profile.kvCacheBytes(contextLength: 1)
         guard bytesPerToken > 0 else { return requestedContextLength }
 
-        let residentBytes = Double(max(0, residentWeightBytes) + max(0, draftWeightBytes)) * options.overheadMultiplier
+        let residentBytes =
+            Double(max(0, residentWeightBytes) + max(0, draftWeightBytes))
+            * options.overheadMultiplier
         let kvBudget = max(0.0, Double(max(0, availableMemoryBytes)) - residentBytes)
         let maxTokens = Int(kvBudget / Double(bytesPerToken))
         let bounded = min(requestedContextLength, maxTokens)
@@ -620,7 +657,8 @@ public struct ModelFitPlanner: Sendable {
             }
             return options.streamMemoryLimitBytes
         case .layerPartitioned, .tooLarge:
-            return Self.clampedInt(Double(max(0, availableMemoryBytes)) * options.fullGPUComfortFraction)
+            return Self.clampedInt(
+                Double(max(0, availableMemoryBytes)) * options.fullGPUComfortFraction)
         }
     }
 
@@ -644,7 +682,8 @@ public struct ModelFitPlanner: Sendable {
         case .layerPartitioned:
             return 2 * 1024 * 1024
         case .tooLarge:
-            return Self.clampedInt(Double(max(0, availableMemoryBytes)) * options.fullGPUComfortFraction)
+            return Self.clampedInt(
+                Double(max(0, availableMemoryBytes)) * options.fullGPUComfortFraction)
         }
     }
 

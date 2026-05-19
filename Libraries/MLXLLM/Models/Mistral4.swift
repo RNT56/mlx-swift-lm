@@ -85,10 +85,12 @@ public struct Mistral4Configuration: Codable, Sendable {
 
         hiddenSize = try c.decode(Int.self, forKey: .hiddenSize)
         moeIntermediateSize = try c.decode(Int.self, forKey: .moeIntermediateSize)
-        intermediateSize = try c.decodeIfPresent(Int.self, forKey: .intermediateSize) ?? moeIntermediateSize
+        intermediateSize =
+            try c.decodeIfPresent(Int.self, forKey: .intermediateSize) ?? moeIntermediateSize
         numHiddenLayers = try c.decode(Int.self, forKey: .numHiddenLayers)
         numAttentionHeads = try c.decode(Int.self, forKey: .numAttentionHeads)
-        numKeyValueHeads = try c.decodeIfPresent(Int.self, forKey: .numKeyValueHeads) ?? numAttentionHeads
+        numKeyValueHeads =
+            try c.decodeIfPresent(Int.self, forKey: .numKeyValueHeads) ?? numAttentionHeads
         nRoutedExperts = try c.decode(Int.self, forKey: .nRoutedExperts)
         nSharedExperts = try c.decodeIfPresent(Int.self, forKey: .nSharedExperts) ?? 1
         numExpertsPerTok = try c.decode(Int.self, forKey: .numExpertsPerTok)
@@ -102,9 +104,11 @@ public struct Mistral4Configuration: Codable, Sendable {
         vHeadDim = try c.decode(Int.self, forKey: .vHeadDim)
         rmsNormEps = try c.decode(Float.self, forKey: .rmsNormEps)
         ropeTheta = try c.decodeIfPresent(Float.self, forKey: .ropeTheta) ?? 10_000.0
-        ropeParameters = try c.decodeIfPresent([String: StringOrNumber].self, forKey: .ropeParameters)
+        ropeParameters = try c.decodeIfPresent(
+            [String: StringOrNumber].self, forKey: .ropeParameters)
         vocabSize = try c.decode(Int.self, forKey: .vocabSize)
-        maxPositionEmbeddings = try c.decodeIfPresent(Int.self, forKey: .maxPositionEmbeddings) ?? 131_072
+        maxPositionEmbeddings =
+            try c.decodeIfPresent(Int.self, forKey: .maxPositionEmbeddings) ?? 131_072
         tieWordEmbeddings =
             (try? c.decodeIfPresent(Bool.self, forKey: .tieWordEmbeddings))
             ?? (try? tlContainer.decodeIfPresent(Bool.self, forKey: .tieWordEmbeddings))
@@ -274,7 +278,7 @@ class Mistral4MoE: Module, UnaryLayer {
 
     func callAsFunction(_ x: MLXArray) -> MLXArray {
         // Softmax gate: n_group=1 / topk_group=1 -> no group masking needed
-        let logits = gate(x)                                    // [B, L, nExperts]
+        let logits = gate(x)  // [B, L, nExperts]
         let scores = softmax(logits.asType(.float32), axis: -1)
 
         let inds = argPartition(-scores, kth: topK - 1, axis: -1)[.ellipsis, ..<topK]
@@ -303,7 +307,8 @@ class Mistral4DecoderLayer: Module {
     init(_ config: Mistral4Configuration) {
         _selfAttn.wrappedValue = Mistral4Attention(config)
         _mlp.wrappedValue = Mistral4MoE(config)
-        _inputLayerNorm.wrappedValue = RMSNorm(dimensions: config.hiddenSize, eps: config.rmsNormEps)
+        _inputLayerNorm.wrappedValue = RMSNorm(
+            dimensions: config.hiddenSize, eps: config.rmsNormEps)
         _postAttentionLayerNorm.wrappedValue = RMSNorm(
             dimensions: config.hiddenSize, eps: config.rmsNormEps)
         super.init()
@@ -331,7 +336,7 @@ public class Mistral4ModelInner: Module {
         self.config = config
         _embedTokens.wrappedValue = Embedding(
             embeddingCount: config.vocabSize, dimensions: config.hiddenSize)
-        layers = (0..<config.numHiddenLayers).map { _ in Mistral4DecoderLayer(config) }
+        layers = (0 ..< config.numHiddenLayers).map { _ in Mistral4DecoderLayer(config) }
         _norm.wrappedValue = RMSNorm(dimensions: config.hiddenSize, eps: config.rmsNormEps)
         super.init()
     }
@@ -427,17 +432,18 @@ public class Mistral4Model: Module, LLMModel, KVCacheDimensionProvider, LoRAMode
         // gate.weight shape [nExperts, packed], dtype U32 - 4 int8 values per uint32
         // gate.scales shape [nExperts, nGroups], dtype BF16
         // group_size = realNIn / nGroups = (packed * 4) / nGroups
-        for l in 0..<args.numHiddenLayers {
+        for l in 0 ..< args.numHiddenLayers {
             let gp = "model.layers.\(l).mlp.gate"
             if let w = out["\(gp).weight"],
-               let scales = out["\(gp).scales"],
-               let biases = out["\(gp).biases"]
+                let scales = out["\(gp).scales"],
+                let biases = out["\(gp).biases"]
             {
-                let packedWidth = w.dim(-1)                       // 1024
-                let realNIn = packedWidth * 4                     // 4096 (8-bit: 4 vals/u32)
-                let groupSize = realNIn / scales.dim(-1)          // 64
-                let dq = dequantized(w, scales: scales, biases: biases,
-                                     groupSize: groupSize, bits: 8)
+                let packedWidth = w.dim(-1)  // 1024
+                let realNIn = packedWidth * 4  // 4096 (8-bit: 4 vals/u32)
+                let groupSize = realNIn / scales.dim(-1)  // 64
+                let dq = dequantized(
+                    w, scales: scales, biases: biases,
+                    groupSize: groupSize, bits: 8)
                 out["\(gp).weight"] = dq
                 out.removeValue(forKey: "\(gp).scales")
                 out.removeValue(forKey: "\(gp).biases")

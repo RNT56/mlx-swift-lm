@@ -273,7 +273,8 @@ class Gemma3nAttention: Module {
 
         if isKvSharedLayer, let sharedKV {
             attentionState = sharedKV
-            let adjustedMask = adjustedAttentionMask(mask, keyLength: sharedKV.keyLength, dtype: queries.dtype)
+            let adjustedMask = adjustedAttentionMask(
+                mask, keyLength: sharedKV.keyLength, dtype: queries.dtype)
             attentionOutput = attentionWithKVState(
                 queries: queries,
                 state: sharedKV,
@@ -886,7 +887,7 @@ public class Gemma3nLanguageModel: Module {
             h[1...] = h[1...] * (targetMagnitude / maximum(mags, epsilonTensor))
         }
 
-        var attentionStates = Array<AttentionKVState?>(
+        var attentionStates = [AttentionKVState?](
             repeating: nil,
             count: max(requiredCacheSize, config.numHiddenLayers)
         )
@@ -910,7 +911,8 @@ public class Gemma3nLanguageModel: Module {
 
             let cacheIdx = layerIdxToCacheIdx[i]
             let layerCache = cacheIdx < cacheArray.count ? cacheArray[cacheIdx] : nil
-            let sharedKV = i >= firstKvSharedLayerIdx && cacheIdx < attentionStates.count
+            let sharedKV =
+                i >= firstKvSharedLayerIdx && cacheIdx < attentionStates.count
                 ? attentionStates[cacheIdx]
                 : nil
 

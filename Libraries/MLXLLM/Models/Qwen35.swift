@@ -763,7 +763,8 @@ final class Qwen35MTPLayer: Module {
     @ModuleInfo(key: "norm") var norm: RMSNorm
 
     init(_ args: Qwen35TextConfiguration, layerIdx: Int) {
-        _preFCNormEmbedding.wrappedValue = RMSNorm(dimensions: args.hiddenSize, eps: args.rmsNormEps)
+        _preFCNormEmbedding.wrappedValue = RMSNorm(
+            dimensions: args.hiddenSize, eps: args.rmsNormEps)
         _preFCNormHidden.wrappedValue = RMSNorm(dimensions: args.hiddenSize, eps: args.rmsNormEps)
         _fc.wrappedValue = Linear(args.hiddenSize * 2, args.hiddenSize, bias: false)
         _layers.wrappedValue = [Qwen35DecoderLayer(args, layerIdx: args.fullAttentionInterval - 1)]
@@ -790,7 +791,9 @@ final class Qwen35MTPLayer: Module {
 }
 
 extension Qwen35TextModel: MTPLanguageModel {
-    public func callMTP(_ inputs: MLXArray, cache: [KVCache]?, mtpCaches: [[KVCache]]?) -> [MLXArray] {
+    public func callMTP(_ inputs: MLXArray, cache: [KVCache]?, mtpCaches: [[KVCache]]?)
+        -> [MLXArray]
+    {
         guard !mtp.isEmpty else {
             return [callAsFunction(inputs, cache: cache)]
         }
@@ -822,7 +825,9 @@ extension Qwen35TextModel: MTPLanguageModel {
 }
 
 extension Qwen35Model: MTPLanguageModel {
-    public func callMTP(_ inputs: MLXArray, cache: [KVCache]?, mtpCaches: [[KVCache]]?) -> [MLXArray] {
+    public func callMTP(_ inputs: MLXArray, cache: [KVCache]?, mtpCaches: [[KVCache]]?)
+        -> [MLXArray]
+    {
         languageModel.callMTP(inputs, cache: cache, mtpCaches: mtpCaches)
     }
 

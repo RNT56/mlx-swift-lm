@@ -24,8 +24,8 @@ public protocol DFlashTargetModel: LanguageModel {
     var dflashUseTapeRollback: Bool { get }
 }
 
-public extension DFlashTargetModel {
-    var dflashUseTapeRollback: Bool { true }
+extension DFlashTargetModel {
+    public var dflashUseTapeRollback: Bool { true }
 }
 
 public enum DFlashEvent: Sendable {
@@ -189,7 +189,8 @@ public enum DFlashRuntime {
         var cache = targetModel.newCache(parameters: nil)
         if targetModel.dflashIsHybridGDN {
             for index in cache.indices where cache[index] is MambaCache {
-                cache[index] = targetModel.dflashUseTapeRollback
+                cache[index] =
+                    targetModel.dflashUseTapeRollback
                     ? RecurrentRollbackCache()
                     : MambaSnapshotCache()
             }
@@ -353,7 +354,8 @@ public enum DFlashRuntime {
                 cache: targetCache,
                 captureLayerIDs: captureLayerIDs
             )
-            guard let feature = contextFeature(captured: captured, targetLayerIDs: targetLayerIDs) else {
+            guard let feature = contextFeature(captured: captured, targetLayerIDs: targetLayerIDs)
+            else {
                 return
             }
 
@@ -467,10 +469,12 @@ public enum DFlashRuntime {
                 cache: targetCache,
                 captureLayerIDs: captureLayerIDs
             )
-            guard let verifyFeature = contextFeature(
-                captured: verifyHiddenStates,
-                targetLayerIDs: targetLayerIDs
-            ) else {
+            guard
+                let verifyFeature = contextFeature(
+                    captured: verifyHiddenStates,
+                    targetLayerIDs: targetLayerIDs
+                )
+            else {
                 return
             }
             asyncEval(verifyLogits)
@@ -539,7 +543,8 @@ public enum DFlashRuntime {
                 }
 
                 generatedTokenIDs.append(tokenID)
-                let acceptanceRatio = Double(acceptedFromDraft) / Double(max(1, generatedTokenIDs.count))
+                let acceptanceRatio =
+                    Double(acceptedFromDraft) / Double(max(1, generatedTokenIDs.count))
                 yield(
                     .token(
                         tokenID: tokenID,

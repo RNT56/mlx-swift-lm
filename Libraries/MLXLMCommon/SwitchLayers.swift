@@ -214,24 +214,24 @@ public class SwitchLinear: Module, Quantizable {
 
     public func resolveSSDInfo() -> (path: String, tensorName: String)? {
         #if os(macOS)
-        guard ExpertStreamingConfig.shared.useDirectNVMe else {
-            return nil
-        }
+            guard ExpertStreamingConfig.shared.useDirectNVMe else {
+                return nil
+            }
 
-        if let firstUnstacked = unstackedSSDMap?[0] {
-            return (firstUnstacked.path, firstUnstacked.tensorName)
-        }
+            if let firstUnstacked = unstackedSSDMap?[0] {
+                return (firstUnstacked.path, firstUnstacked.tensorName)
+            }
 
-        guard let tensorName,
-            let filename = ExpertStreamerManager.shared?.getFile(for: tensorName),
-            let modelDirectory = ExpertStreamingConfig.shared.modelDirectory
-        else {
-            return nil
-        }
+            guard let tensorName,
+                let filename = ExpertStreamerManager.shared?.getFile(for: tensorName),
+                let modelDirectory = ExpertStreamingConfig.shared.modelDirectory
+            else {
+                return nil
+            }
 
-        return (modelDirectory.appendingPathComponent(filename).path, tensorName)
+            return (modelDirectory.appendingPathComponent(filename).path, tensorName)
         #else
-        return nil
+            return nil
         #endif
     }
 
@@ -239,21 +239,21 @@ public class SwitchLinear: Module, Quantizable {
         path: String, tensorName: String, readIndex: UInt32
     )? {
         #if os(macOS)
-        guard ExpertStreamingConfig.shared.useDirectNVMe else {
-            return nil
-        }
+            guard ExpertStreamingConfig.shared.useDirectNVMe else {
+                return nil
+            }
 
-        if let unstacked = unstackedSSDMap?[expertIndex] {
-            return (unstacked.path, unstacked.tensorName, 0)
-        }
+            if let unstacked = unstackedSSDMap?[expertIndex] {
+                return (unstacked.path, unstacked.tensorName, 0)
+            }
 
-        guard let base = resolveSSDInfo() else {
-            return nil
-        }
+            guard let base = resolveSSDInfo() else {
+                return nil
+            }
 
-        return (base.path, base.tensorName, UInt32(expertIndex))
+            return (base.path, base.tensorName, UInt32(expertIndex))
         #else
-        return nil
+            return nil
         #endif
     }
 
@@ -311,7 +311,7 @@ public class SwitchLinear: Module, Quantizable {
     }
 
     public func allocateExpertBuffers(_ count: Int) -> [MLXArray] {
-        (0..<count).map { _ in
+        (0 ..< count).map { _ in
             MLXArray.zeros([1, outputDims, inputDims]).asType(weight.dtype)
         }
     }
@@ -384,8 +384,10 @@ public class SwitchLinear: Module, Quantizable {
 
             if let bias {
                 let expertBias = bias[range.id ..< range.id + 1]
-                expertOutput = expertOutput + MLX.expandedDimensions(
-                    expertBias[expertIndices], axis: -2)
+                expertOutput =
+                    expertOutput
+                    + MLX.expandedDimensions(
+                        expertBias[expertIndices], axis: -2)
             }
 
             expertOutput = canonicalizedExpertOutput(expertOutput, like: rangeX)
@@ -510,8 +512,10 @@ public class QuantizedSwitchLinear: SwitchLinear, Quantized {
 
             if let bias {
                 let expertBias = bias[range.id ..< range.id + 1]
-                expertOutput = expertOutput + MLX.expandedDimensions(
-                    expertBias[expertIndices], axis: -2)
+                expertOutput =
+                    expertOutput
+                    + MLX.expandedDimensions(
+                        expertBias[expertIndices], axis: -2)
             }
 
             expertOutput = canonicalizedExpertOutput(expertOutput, like: rangeX)

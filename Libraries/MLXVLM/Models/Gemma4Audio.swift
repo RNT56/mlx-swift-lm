@@ -15,7 +15,7 @@ public struct Gemma4AudioConfiguration: Codable, Sendable {
     public let useClippedLinears: Bool
     public let rmsNormEps: Float
     public let outputProjDims: Int
-    
+
     // New fields
     public let attentionContextLeft: Int
     public let attentionContextRight: Int
@@ -35,7 +35,7 @@ public struct Gemma4AudioConfiguration: Codable, Sendable {
         case useClippedLinears = "use_clipped_linears"
         case rmsNormEps = "rms_norm_eps"
         case outputProjDims = "output_proj_dims"
-        
+
         case attentionContextLeft = "attention_context_left"
         case attentionContextRight = "attention_context_right"
         case attentionLogitCap = "attention_logit_cap"
@@ -46,23 +46,38 @@ public struct Gemma4AudioConfiguration: Codable, Sendable {
 
     public init(from decoder: any Swift.Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
-        self.modelType = try container.decodeIfPresent(String.self, forKey: .modelType) ?? "gemma4_audio"
+        self.modelType =
+            try container.decodeIfPresent(String.self, forKey: .modelType) ?? "gemma4_audio"
         self.hiddenSize = try container.decodeIfPresent(Int.self, forKey: .hiddenSize) ?? 1024
-        self.numHiddenLayers = try container.decodeIfPresent(Int.self, forKey: .numHiddenLayers) ?? 12
-        self.numAttentionHeads = try container.decodeIfPresent(Int.self, forKey: .numAttentionHeads) ?? 8
-        self.attentionChunkSize = try container.decodeIfPresent(Int.self, forKey: .attentionChunkSize) ?? 12
+        self.numHiddenLayers =
+            try container.decodeIfPresent(Int.self, forKey: .numHiddenLayers) ?? 12
+        self.numAttentionHeads =
+            try container.decodeIfPresent(Int.self, forKey: .numAttentionHeads) ?? 8
+        self.attentionChunkSize =
+            try container.decodeIfPresent(Int.self, forKey: .attentionChunkSize) ?? 12
         self.convKernelSize = try container.decodeIfPresent(Int.self, forKey: .convKernelSize) ?? 5
-        self.subsamplingConvChannels = try container.decodeIfPresent([Int].self, forKey: .subsamplingConvChannels) ?? [128, 32]
-        self.useClippedLinears = try container.decodeIfPresent(Bool.self, forKey: .useClippedLinears) ?? true
+        self.subsamplingConvChannels =
+            try container.decodeIfPresent([Int].self, forKey: .subsamplingConvChannels) ?? [
+                128, 32,
+            ]
+        self.useClippedLinears =
+            try container.decodeIfPresent(Bool.self, forKey: .useClippedLinears) ?? true
         self.rmsNormEps = try container.decodeIfPresent(Float.self, forKey: .rmsNormEps) ?? 1e-6
-        self.outputProjDims = try container.decodeIfPresent(Int.self, forKey: .outputProjDims) ?? 1536
-        
-        self.attentionContextLeft = try container.decodeIfPresent(Int.self, forKey: .attentionContextLeft) ?? 13
-        self.attentionContextRight = try container.decodeIfPresent(Int.self, forKey: .attentionContextRight) ?? 0
-        self.attentionLogitCap = try container.decodeIfPresent(Float.self, forKey: .attentionLogitCap) ?? 50.0
-        self.attentionInvalidLogitsValue = try container.decodeIfPresent(Float.self, forKey: .attentionInvalidLogitsValue) ?? -1e9
-        self.residualWeight = try container.decodeIfPresent(Float.self, forKey: .residualWeight) ?? 0.5
-        self.gradientClipping = try container.decodeIfPresent(Float.self, forKey: .gradientClipping) ?? 1e10
+        self.outputProjDims =
+            try container.decodeIfPresent(Int.self, forKey: .outputProjDims) ?? 1536
+
+        self.attentionContextLeft =
+            try container.decodeIfPresent(Int.self, forKey: .attentionContextLeft) ?? 13
+        self.attentionContextRight =
+            try container.decodeIfPresent(Int.self, forKey: .attentionContextRight) ?? 0
+        self.attentionLogitCap =
+            try container.decodeIfPresent(Float.self, forKey: .attentionLogitCap) ?? 50.0
+        self.attentionInvalidLogitsValue =
+            try container.decodeIfPresent(Float.self, forKey: .attentionInvalidLogitsValue) ?? -1e9
+        self.residualWeight =
+            try container.decodeIfPresent(Float.self, forKey: .residualWeight) ?? 0.5
+        self.gradientClipping =
+            try container.decodeIfPresent(Float.self, forKey: .gradientClipping) ?? 1e10
     }
 }
 
@@ -78,12 +93,12 @@ private class Swish: Module {
 class AudioRMSNorm: Module {
     var weight: MLXArray
     let eps: Float
-    
+
     init(dimensions: Int, eps: Float = 1e-6) {
         self.weight = MLXArray.ones([dimensions])
         self.eps = eps
     }
-    
+
     func callAsFunction(_ x: MLXArray) -> MLXArray {
         let xFloat32 = x.asType(.float32)
         let norm = rsqrt(xFloat32.square().mean(axes: [-1], keepDims: true) + eps)
@@ -95,13 +110,13 @@ class AudioLayerNorm: Module {
     var weight: MLXArray
     var bias: MLXArray?
     let eps: Float
-    
+
     init(dimensions: Int, eps: Float = 1e-6) {
         self.weight = MLXArray.ones([dimensions])
         self.bias = nil  // Not all variants include bias; loaded if present in checkpoint
         self.eps = eps
     }
-    
+
     func callAsFunction(_ x: MLXArray) -> MLXArray {
         let xFloat32 = x.asType(.float32)
         let mean = xFloat32.mean(axes: [-1], keepDims: true)
@@ -134,7 +149,7 @@ private class ClippedLinear: Module {
     @ModuleInfo(key: "input_max") var inputMax: MLXArray?
     @ModuleInfo(key: "output_min") var outputMin: MLXArray?
     @ModuleInfo(key: "output_max") var outputMax: MLXArray?
-    
+
     init(_ inputChannels: Int, _ outputChannels: Int, bias: Bool = false) {
         self._linear.wrappedValue = Linear(inputChannels, outputChannels, bias: bias)
         self._inputMin.wrappedValue = MLXArray(-Float.infinity)
@@ -142,7 +157,7 @@ private class ClippedLinear: Module {
         self._outputMin.wrappedValue = MLXArray(-Float.infinity)
         self._outputMax.wrappedValue = MLXArray(Float.infinity)
     }
-    
+
     func callAsFunction(_ x: MLXArray) -> MLXArray {
         // Apply activation clipping: these bounds are calibrated quantization ranges
         // stored in the 8-bit PTQ checkpoint. Without clipping, activations blow out of
@@ -194,7 +209,7 @@ private class SubsampleConvLayer: Module {
         outMask = outMask[0..., ..<tOut]
 
         out = norm(out)
-        out = MLX.maximum(out, MLXArray(0, dtype: out.dtype)) // ReLU, matches Python nn.relu.
+        out = MLX.maximum(out, MLXArray(0, dtype: out.dtype))  // ReLU, matches Python nn.relu.
 
         return (out, outMask)
     }
@@ -204,33 +219,35 @@ private class SubsampleConvProjection: Module {
     @ModuleInfo(key: "layer0") var layer0: SubsampleConvLayer
     @ModuleInfo(key: "layer1") var layer1: SubsampleConvLayer
     @ModuleInfo(key: "input_proj_linear") var inputProjLinear: Linear
-    
+
     init(channels: [Int] = [128, 32], hiddenSize: Int, eps: Float) {
-        self._layer0.wrappedValue = SubsampleConvLayer(inChannels: 1, outChannels: channels[0], eps: eps)
-        self._layer1.wrappedValue = SubsampleConvLayer(inChannels: channels[0], outChannels: channels[1], eps: eps)
-        
+        self._layer0.wrappedValue = SubsampleConvLayer(
+            inChannels: 1, outChannels: channels[0], eps: eps)
+        self._layer1.wrappedValue = SubsampleConvLayer(
+            inChannels: channels[0], outChannels: channels[1], eps: eps)
+
         // Gemma 4 uses 128 Mel Bins, double stranded: 128 / 4 = 32. 32 * channels[1] = 1024
         let flattendDimensions = channels[1] * (128 / 4)
         self._inputProjLinear.wrappedValue = Linear(flattendDimensions, hiddenSize, bias: false)
     }
 
     func callAsFunction(_ x: MLXArray, mask: MLXArray) -> (MLXArray, MLXArray) {
-        var hidden = x.reshaped(x.dim(0), x.dim(1), x.dim(2), 1) // Shape: [B, L, 128, 1]
+        var hidden = x.reshaped(x.dim(0), x.dim(1), x.dim(2), 1)  // Shape: [B, L, 128, 1]
         var currentMask = mask
-        
+
         let out0 = layer0(hidden, mask: currentMask)
         hidden = out0.0
         currentMask = out0.1
-        
+
         let out1 = layer1(hidden, mask: currentMask)
         hidden = out1.0
         currentMask = out1.1
-        
+
         // Output from layer 1: [B, L/4, 128/4, outChannels=32]
         let (B, L_new, F_new, C_new) = (hidden.dim(0), hidden.dim(1), hidden.dim(2), hidden.dim(3))
-        
-        hidden = hidden.reshaped(B, L_new, F_new * C_new) // Flatten features
-        
+
+        hidden = hidden.reshaped(B, L_new, F_new * C_new)  // Flatten features
+
         return (inputProjLinear(hidden), currentMask)
     }
 }
@@ -243,7 +260,7 @@ private class MacaronFFN: Module {
     @ModuleInfo(key: "ffw_layer_1") var ffwLayer1: ClippedLinear
     @ModuleInfo(key: "ffw_layer_2") var ffwLayer2: ClippedLinear
     @ModuleInfo(key: "post_layer_norm") var postLayerNorm: AudioRMSNorm
-    
+
     let gradientClipping: Float
     let residualWeight: Float
 
@@ -277,7 +294,7 @@ private class ConformerLightConv1d: Module {
     @ModuleInfo(key: "depthwise_conv1d") var depthwiseConv1d: Conv1d
     @ModuleInfo(key: "conv_norm") var convNorm: AudioRMSNorm
     @ModuleInfo(key: "linear_end") var linearEnd: ClippedLinear
-    
+
     let causalPadding: Int
     let gradientClipping: Float
 
@@ -285,8 +302,10 @@ private class ConformerLightConv1d: Module {
         self.gradientClipping = config.gradientClipping
         self.causalPadding = config.convKernelSize - 1
 
-        self._preLayerNorm.wrappedValue = AudioRMSNorm(dimensions: config.hiddenSize, eps: config.rmsNormEps)
-        self._linearStart.wrappedValue = ClippedLinear(config.hiddenSize, config.hiddenSize * 2, bias: false)
+        self._preLayerNorm.wrappedValue = AudioRMSNorm(
+            dimensions: config.hiddenSize, eps: config.rmsNormEps)
+        self._linearStart.wrappedValue = ClippedLinear(
+            config.hiddenSize, config.hiddenSize * 2, bias: false)
 
         self._depthwiseConv1d.wrappedValue = Conv1d(
             inputChannels: config.hiddenSize,
@@ -298,29 +317,31 @@ private class ConformerLightConv1d: Module {
             bias: false
         )
 
-        self._convNorm.wrappedValue = AudioRMSNorm(dimensions: config.hiddenSize, eps: config.rmsNormEps)
-        self._linearEnd.wrappedValue = ClippedLinear(config.hiddenSize, config.hiddenSize, bias: false)
+        self._convNorm.wrappedValue = AudioRMSNorm(
+            dimensions: config.hiddenSize, eps: config.rmsNormEps)
+        self._linearEnd.wrappedValue = ClippedLinear(
+            config.hiddenSize, config.hiddenSize, bias: false)
     }
 
     func callAsFunction(_ x: MLXArray) -> MLXArray {
         let residual = x
-        
+
         var hidden = preLayerNorm(x)
         hidden = linearStart(hidden)
-        
+
         let parts = split(hidden, parts: 2, axis: -1)
         hidden = parts[0] * sigmoid(parts[1])
-        
+
         // Causal padding: [B, L, C]
         hidden = MLX.padded(hidden, widths: [[0, 0], [causalPadding, 0], [0, 0]])
-        
+
         hidden = depthwiseConv1d(hidden)
-        
+
         hidden = MLX.clip(hidden, min: MLXArray(-gradientClipping), max: MLXArray(gradientClipping))
         hidden = convNorm(hidden)
         hidden = MLXNN.silu(hidden)
         hidden = linearEnd(hidden)
-        
+
         return hidden + residual
     }
 }
@@ -345,9 +366,12 @@ private struct AudioRelativePositionEmbedding {
         let minTimescale: Float = 1.0
         let maxTimescale: Float = 10000.0
         let numTimescales = config.hiddenSize / 2
-        let logTimescaleIncrement = log(maxTimescale / minTimescale) / Float(max(numTimescales - 1, 1))
-        
-        let invT = minTimescale * MLX.exp(MLXArray((0..<numTimescales).map { Float($0) }) * -logTimescaleIncrement)
+        let logTimescaleIncrement =
+            log(maxTimescale / minTimescale) / Float(max(numTimescales - 1, 1))
+
+        let invT =
+            minTimescale
+            * MLX.exp(MLXArray((0 ..< numTimescales).map { Float($0) }) * -logTimescaleIncrement)
         self.invTimescales = invT.reshaped(1, 1, numTimescales)
     }
 
@@ -358,10 +382,15 @@ private struct AudioRelativePositionEmbedding {
         return signal.asType(dtype)
     }
 
-    func relativeShift(termBd: MLXArray, batchSize: Int, numHeads: Int, numBlocks: Int, blockSize: Int, contextSize: Int, maxSpanPlus1: Int) -> MLXArray {
+    func relativeShift(
+        termBd: MLXArray, batchSize: Int, numHeads: Int, numBlocks: Int, blockSize: Int,
+        contextSize: Int, maxSpanPlus1: Int
+    ) -> MLXArray {
         let padAmount = (contextSize + 1) - maxSpanPlus1
-        let termPadded = MLX.padded(termBd, widths: [[0, 0], [0, 0], [0, 0], [0, 0], [0, padAmount]])
-        var shifted = termPadded.reshaped(batchSize, numHeads, numBlocks, blockSize * (contextSize + 1))
+        let termPadded = MLX.padded(
+            termBd, widths: [[0, 0], [0, 0], [0, 0], [0, 0], [0, padAmount]])
+        var shifted = termPadded.reshaped(
+            batchSize, numHeads, numBlocks, blockSize * (contextSize + 1))
         shifted = shifted[0..., 0..., 0..., ..<(blockSize * contextSize)]
         return shifted.reshaped(batchSize, numHeads, numBlocks, blockSize, contextSize)
     }
@@ -374,7 +403,9 @@ private struct AudioRelativePositionEmbedding {
         let H = queries.dim(4)
         let C = keys.dim(2)
 
-        let posIndicesRange = stride(from: maxBackward, through: -maxForward, by: -1).map { Int32($0) }
+        let posIndicesRange = stride(from: maxBackward, through: -maxForward, by: -1).map {
+            Int32($0)
+        }
         let posIndices = MLXArray(posIndicesRange).expandedDimensions(axis: 0)
         let maxSpanPlus1 = posIndices.dim(1)
 
@@ -391,7 +422,9 @@ private struct AudioRelativePositionEmbedding {
         let qReshaped = queriesP.reshaped(B, N, U * W, H)
         let termBd = matmul(qReshaped, sinEmbT).reshaped(B, N, U, W, maxSpanPlus1)
 
-        let termBdShifted = relativeShift(termBd: termBd, batchSize: B, numHeads: N, numBlocks: U, blockSize: W, contextSize: C, maxSpanPlus1: maxSpanPlus1)
+        let termBdShifted = relativeShift(
+            termBd: termBd, batchSize: B, numHeads: N, numBlocks: U, blockSize: W, contextSize: C,
+            maxSpanPlus1: maxSpanPlus1)
 
         return termAc + termBdShifted
     }
@@ -405,7 +438,7 @@ private class AudioAttention: Module {
     @ModuleInfo(key: "post") var post: ClippedLinear
     @ModuleInfo(key: "relative_k_proj") var relativeKProj: Linear
     @ModuleInfo(key: "per_dim_scale") var perDimScale: MLXArray
-    
+
     let numHeads: Int
     let hiddenSize: Int
     let headDim: Int
@@ -415,33 +448,33 @@ private class AudioAttention: Module {
     let contextSize: Int
     let invalidLogitsValue: Float
     let softcap: Float
-    
+
     let qScale: Float
     let kScale: Float
     let relPos: AudioRelativePositionEmbedding
-    
+
     init(config: Gemma4AudioConfiguration) {
         self.numHeads = config.numAttentionHeads
         self.hiddenSize = config.hiddenSize
         self.headDim = config.hiddenSize / config.numAttentionHeads
-        
+
         self.chunkSize = config.attentionChunkSize
         self.maxFutureHorizon = config.attentionContextRight
         self.maxPastHorizon = max(0, config.attentionContextLeft - 1)
         self.contextSize = self.chunkSize + self.maxPastHorizon + self.maxFutureHorizon
         self.invalidLogitsValue = config.attentionInvalidLogitsValue
         self.softcap = config.attentionLogitCap
-        
+
         self._qProj.wrappedValue = ClippedLinear(hiddenSize, numHeads * headDim, bias: false)
         self._kProj.wrappedValue = ClippedLinear(hiddenSize, numHeads * headDim, bias: false)
         self._vProj.wrappedValue = ClippedLinear(hiddenSize, numHeads * headDim, bias: false)
         self._post.wrappedValue = ClippedLinear(hiddenSize, hiddenSize, bias: false)
         self._relativeKProj.wrappedValue = Linear(hiddenSize, numHeads * headDim, bias: false)
         self._perDimScale.wrappedValue = MLXArray.zeros([headDim])
-        
+
         self.qScale = Float(pow(Double(headDim), -0.5)) / log(2.0)
         self.kScale = log(1.0 + exp(1.0)) / log(2.0)
-        
+
         self.relPos = AudioRelativePositionEmbedding(config: config)
     }
 
@@ -472,15 +505,18 @@ private class AudioAttention: Module {
         let padded = padDim1(x, padLeft: padLeft, padRight: padRight)
         let tPadded = padded.dim(1)
         let numBlocks = (tPadded - contextSize) / chunkSize + 1
-        
-        let starts = MLXArray(stride(from: 0, to: numBlocks * chunkSize, by: chunkSize).map { Int32($0) })
-        let offsets = MLXArray((0..<contextSize).map { Int32($0) })
+
+        let starts = MLXArray(
+            stride(from: 0, to: numBlocks * chunkSize, by: chunkSize).map { Int32($0) })
+        let offsets = MLXArray((0 ..< contextSize).map { Int32($0) })
         let indices = starts.expandedDimensions(axis: 1) + offsets.expandedDimensions(axis: 0)
-        
+
         return padded[0..., indices]
     }
 
-    func callAsFunction(_ hiddenStates: MLXArray, mask: MLXArray, causalValidMask: MLXArray) -> MLXArray {
+    func callAsFunction(_ hiddenStates: MLXArray, mask: MLXArray, causalValidMask: MLXArray)
+        -> MLXArray
+    {
         let B = hiddenStates.dim(0)
         let T = hiddenStates.dim(1)
         let qkvShape = [B, T, numHeads, headDim]
@@ -499,18 +535,20 @@ private class AudioAttention: Module {
         let U = queryBlocks.dim(1)
 
         let extractedValid = extractBlockContext(mask)
-        
-        let cond1 = extractedValid.reshaped(extractedValid.dim(0), 1, extractedValid.dim(1), 1, extractedValid.dim(2))
-        let cond2 = causalValidMask.reshaped(1, 1, 1, causalValidMask.dim(0), causalValidMask.dim(1))
+
+        let cond1 = extractedValid.reshaped(
+            extractedValid.dim(0), 1, extractedValid.dim(1), 1, extractedValid.dim(2))
+        let cond2 = causalValidMask.reshaped(
+            1, 1, 1, causalValidMask.dim(0), causalValidMask.dim(1))
         let condition = logicalAnd(cond1, cond2)
 
         var logits = relPos(queries: queryBlocks, keys: keyBlocks, posProj: relativeKProj)
-        
+
         logits = MLX.tanh(logits / MLXArray(softcap)) * MLXArray(softcap)
         logits = MLX.where(condition, logits, MLXArray(invalidLogitsValue))
 
         let probs = MLX.softmax(logits, axis: -1)
-        
+
         // einsum("bnuwc,bucnh->buwnh", probs, value_blocks)
         // Manual implementation:
         // probs: [B, N, U, W, C]  -> [B, U, N, W, C]
@@ -519,7 +557,7 @@ private class AudioAttention: Module {
         let vT = valueBlocks.transposed(0, 1, 3, 2, 4)
         var context = matmul(probsT, vT)
         context = context.transposed(0, 1, 3, 2, 4)
-        
+
         context = context.reshaped(B, U * chunkSize, numHeads, headDim)
         context = context[0..., ..<T]
 
@@ -550,10 +588,14 @@ private class ConformerBlock: Module {
         self._normPostAttn.wrappedValue = AudioRMSNorm(dimensions: config.hiddenSize, eps: eps)
         self._normOut.wrappedValue = AudioRMSNorm(dimensions: config.hiddenSize, eps: eps)
 
-        self._ffn1.wrappedValue = MacaronFFN(hiddenSize: config.hiddenSize, eps: eps, gradientClipping: config.gradientClipping, residualWeight: config.residualWeight)
+        self._ffn1.wrappedValue = MacaronFFN(
+            hiddenSize: config.hiddenSize, eps: eps, gradientClipping: config.gradientClipping,
+            residualWeight: config.residualWeight)
         self._selfAttention.wrappedValue = AudioAttention(config: config)
         self._lconv1d.wrappedValue = ConformerLightConv1d(config: config)
-        self._ffn2.wrappedValue = MacaronFFN(hiddenSize: config.hiddenSize, eps: eps, gradientClipping: config.gradientClipping, residualWeight: config.residualWeight)
+        self._ffn2.wrappedValue = MacaronFFN(
+            hiddenSize: config.hiddenSize, eps: eps, gradientClipping: config.gradientClipping,
+            residualWeight: config.residualWeight)
     }
 
     func callAsFunction(_ x: MLXArray, mask: MLXArray, causalValidMask: MLXArray) -> MLXArray {
@@ -575,7 +617,7 @@ private class ConformerBlock: Module {
         hidden = lconv1d(hidden)
         hidden = ffn2(hidden)
         hidden = MLX.clip(hidden, min: MLXArray(-gradientClipping), max: MLXArray(gradientClipping))
-        
+
         return normOut(hidden)
     }
 }
@@ -583,7 +625,8 @@ private class ConformerBlock: Module {
 // MARK: - Audio Model Wrapper
 
 public class Gemma4AudioModel: Module {
-    @ModuleInfo(key: "subsample_conv_projection") fileprivate var subsampleConvProjection: SubsampleConvProjection
+    @ModuleInfo(key: "subsample_conv_projection") fileprivate var subsampleConvProjection:
+        SubsampleConvProjection
     @ModuleInfo(key: "layers") fileprivate var layers: [ConformerBlock]
     @ModuleInfo(key: "output_proj") var outputProj: Linear?
 
@@ -596,13 +639,14 @@ public class Gemma4AudioModel: Module {
             hiddenSize: config.hiddenSize,
             eps: config.rmsNormEps
         )
-        
-        self._layers.wrappedValue = (0..<config.numHiddenLayers).map { _ in
+
+        self._layers.wrappedValue = (0 ..< config.numHiddenLayers).map { _ in
             ConformerBlock(config: config)
         }
-        
+
         if config.outputProjDims != config.hiddenSize {
-            self._outputProj.wrappedValue = Linear(config.hiddenSize, config.outputProjDims, bias: true)
+            self._outputProj.wrappedValue = Linear(
+                config.hiddenSize, config.outputProjDims, bias: true)
         }
     }
 
@@ -628,7 +672,8 @@ public class Gemma4AudioModel: Module {
         let causalValidMask = buildCausalValidMask()
 
         for block in layers {
-            audioEncodings = block(audioEncodings, mask: currentMask, causalValidMask: causalValidMask)
+            audioEncodings = block(
+                audioEncodings, mask: currentMask, causalValidMask: causalValidMask)
         }
 
         if let outputProj = outputProj {

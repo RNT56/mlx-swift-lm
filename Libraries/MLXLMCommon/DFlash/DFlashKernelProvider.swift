@@ -101,13 +101,16 @@ public enum DFlashKernels {
             let value = v[0..., t, 0...]
             let kvMemory = (decayedState * expandedDimensions(key, axis: -2)).sum(axis: -1)
             let delta = (value - kvMemory) * expandedDimensions(beta[0..., t, 0...], axis: -1)
-            let next = decayedState
+            let next =
+                decayedState
                 + expandedDimensions(key, axis: -2) * expandedDimensions(delta, axis: -1)
             let output = (next * expandedDimensions(query, axis: -2)).sum(axis: -1)
 
             if let mask {
-                let stateGate = expandedDimensions(mask[0..., t], axes: [1, 2, 3]).asType(state.dtype)
-                let outputGate = expandedDimensions(mask[0..., t], axes: [1, 2]).asType(output.dtype)
+                let stateGate = expandedDimensions(mask[0..., t], axes: [1, 2, 3]).asType(
+                    state.dtype)
+                let outputGate = expandedDimensions(mask[0..., t], axes: [1, 2]).asType(
+                    output.dtype)
                 state = next * stateGate + state * (1 - stateGate)
                 outputs.append(output * outputGate)
                 tapeEntries.append((delta * outputGate).asType(.float32))

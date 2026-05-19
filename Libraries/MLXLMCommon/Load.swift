@@ -76,7 +76,8 @@ public func loadWeights(
 
     // apply the loaded weights
     let parameters = ModuleParameters.unflattened(weights)
-    let verification: Module.VerifyUpdate = ExpertStreamingConfig.shared.isEnabled
+    let verification: Module.VerifyUpdate =
+        ExpertStreamingConfig.shared.isEnabled
         ? .noUnusedKeys
         : .all
     try model.update(parameters: parameters, verify: verification)
@@ -127,7 +128,8 @@ private func assignExpertStreamingMetadata(
             continue
         }
 
-        let expert0Name = bareName
+        let expert0Name =
+            bareName
             .replacingOccurrences(of: ".switch_mlp.", with: ".experts.")
             .replacingOccurrences(of: ".experts.", with: ".experts.0.")
         let strippedExpert0Name = stripCommonPrefixes(from: expert0Name)
@@ -138,9 +140,11 @@ private func assignExpertStreamingMetadata(
             + knownPrefixes.map { $0 + strippedExpert0Name }
             + knownPrefixes.map { $0 + strippedMTPExpert0Name }
 
-        guard let matchedExpert0 = unstackedCandidates.first(where: {
-            manager.getFile(for: $0) != nil
-        }) else {
+        guard
+            let matchedExpert0 = unstackedCandidates.first(where: {
+                manager.getFile(for: $0) != nil
+            })
+        else {
             continue
         }
 

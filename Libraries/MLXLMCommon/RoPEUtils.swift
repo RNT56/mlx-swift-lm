@@ -57,7 +57,8 @@ public func validateRoPEConfiguration(
         }
     case "longrope":
         guard scalingConfig["original_max_position_embeddings"]?.asInt() != nil else {
-            throw invalidRoPEConfiguration(context, "longrope requires original_max_position_embeddings")
+            throw invalidRoPEConfiguration(
+                context, "longrope requires original_max_position_embeddings")
         }
         guard scalingConfig["short_factor"]?.asFloats() != nil else {
             throw invalidRoPEConfiguration(context, "longrope requires numeric short_factor")
@@ -80,16 +81,18 @@ public func validateMROPESection(
         throw invalidRoPEConfiguration(context, "mrope_section must be an array of integers")
     }
     guard section.count == 3, section.allSatisfy({ $0 > 0 }) else {
-        throw invalidRoPEConfiguration(context, "mrope_section must contain three positive integers")
+        throw invalidRoPEConfiguration(
+            context, "mrope_section must contain three positive integers")
     }
 }
 
 public func cumulativeMROPESection(_ section: [Int]) -> [Int] {
-    Array(sequence(state: (0, section.makeIterator())) { state in
-        guard let value = state.1.next() else { return nil }
-        state.0 += value * 2
-        return state.0
-    }.dropLast())
+    Array(
+        sequence(state: (0, section.makeIterator())) { state in
+            guard let value = state.1.next() else { return nil }
+            state.0 += value * 2
+            return state.0
+        }.dropLast())
 }
 
 public func fallbackMROPESection(headDim: Int) -> [Int] {

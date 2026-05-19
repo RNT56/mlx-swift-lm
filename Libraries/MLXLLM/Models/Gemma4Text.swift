@@ -752,7 +752,9 @@ public class Gemma4AssistantModel: Module, LLMModel, DualModelMTP, KVCacheDimens
         fatalError("Gemma4AssistantModel requires callMTP(_:cache:mtpCaches:) with mainModelRef")
     }
 
-    public func callMTP(_ inputs: MLXArray, cache: [KVCache]?, mtpCaches: [[KVCache]]?) -> [MLXArray] {
+    public func callMTP(_ inputs: MLXArray, cache: [KVCache]?, mtpCaches: [[KVCache]]?)
+        -> [MLXArray]
+    {
         guard let mainModel = mainModelRef as? Gemma4TextModel else {
             fatalError("Gemma4AssistantModel currently requires Gemma4TextModel as mainModelRef")
         }
@@ -847,7 +849,8 @@ public class Gemma4AssistantModel: Module, LLMModel, DualModelMTP, KVCacheDimens
 
     private func sharedKVState(for layerType: String, mainCache: [KVCache]?) -> AttentionKVState? {
         guard let mainCache, !mainCache.isEmpty else { return nil }
-        let index = layerType == "sliding_attention" ? max(0, mainCache.count - 2) : mainCache.count - 1
+        let index =
+            layerType == "sliding_attention" ? max(0, mainCache.count - 2) : mainCache.count - 1
         let state = mainCache[index].state
         guard state.count == 2 else { return nil }
         return .raw(keys: state[0], values: state[1])

@@ -1,9 +1,10 @@
 import Foundation
 import MLX
-@testable import MLXLLM
 import MLXLMCommon
 import MLXNN
 import Testing
+
+@testable import MLXLLM
 
 @Suite(.serialized)
 struct MTPTokenIteratorTests {
@@ -116,26 +117,26 @@ private func makeQwen35TextConfig(
     vocabSize: Int = 16
 ) throws -> Qwen35TextConfiguration {
     let json = """
-    {
-        "model_type": "qwen3_5",
-        "hidden_size": \(hiddenSize),
-        "num_hidden_layers": \(numHiddenLayers),
-        "intermediate_size": 16,
-        "num_attention_heads": 2,
-        "num_key_value_heads": 1,
-        "linear_num_value_heads": 1,
-        "linear_num_key_heads": 1,
-        "linear_key_head_dim": 4,
-        "linear_value_head_dim": 4,
-        "linear_conv_kernel_dim": 4,
-        "rms_norm_eps": 1e-6,
-        "vocab_size": \(vocabSize),
-        "rope_theta": 10000.0,
-        "max_position_embeddings": 64,
-        "full_attention_interval": 2,
-        "num_nextn_predict_layers": \(numMTPLayers)
-    }
-    """
+        {
+            "model_type": "qwen3_5",
+            "hidden_size": \(hiddenSize),
+            "num_hidden_layers": \(numHiddenLayers),
+            "intermediate_size": 16,
+            "num_attention_heads": 2,
+            "num_key_value_heads": 1,
+            "linear_num_value_heads": 1,
+            "linear_num_key_heads": 1,
+            "linear_key_head_dim": 4,
+            "linear_value_head_dim": 4,
+            "linear_conv_kernel_dim": 4,
+            "rms_norm_eps": 1e-6,
+            "vocab_size": \(vocabSize),
+            "rope_theta": 10000.0,
+            "max_position_embeddings": 64,
+            "full_attention_interval": 2,
+            "num_nextn_predict_layers": \(numMTPLayers)
+        }
+        """
     return try JSONDecoder().decode(Qwen35TextConfiguration.self, from: Data(json.utf8))
 }
 
