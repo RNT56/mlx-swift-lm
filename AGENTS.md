@@ -25,6 +25,7 @@ The intended stack is:
 RNT56/mlx-swift-lm
   -> RNT56/mlx-swift
       -> RNT56/mlx
+      -> RNT56/mlx-c
 ```
 
 This repo owns the `RNT56/mlx-swift-lm -> RNT56/mlx-swift` link in `Package.swift`.
@@ -34,7 +35,7 @@ The expected `Package.swift` dependency is:
 ```swift
 .package(
     url: "https://github.com/RNT56/mlx-swift",
-    revision: "f252dd2dc284d2cfd3093c5bbc81ff94d8b2a60d"
+    revision: "8f0718404a323698c7b5730f2de3af2b5e21f854"
 )
 ```
 
@@ -44,6 +45,10 @@ That `mlx-swift` revision points its MLX submodule at:
 RNT56/mlx:
 8f13e02fa85252f2a569a43c6759f07490b816a5
 Find SwiftPM metallib bundle near test binary
+
+RNT56/mlx-c:
+fff19671eed2e556bdf4552328a1791a8f37b651
+Expose quantized SDPA C API
 ```
 
 Do not downgrade this dependency to an older runtime pin when preserving downstream runtime behavior.
