@@ -582,7 +582,9 @@ public final class TurboQuantKVCache: QuantizedKVCache, TurboQuantCompressedKVCa
         }
         currentValues.scales[.ellipsis, range, 0..., 0...] = encodedValues.scales
 
-        if turboQuantSupportsPackedFallback(keys: keys, values: values, groupSize: groupSize) {
+        if turboQuantSupportsPackedFallback(keys: keys, values: values, groupSize: groupSize),
+            super.getQuantizedState() != nil
+        {
             _ = super.updateQuantized(keys: keys, values: values)
         } else {
             offset += tokenCount
@@ -1006,9 +1008,9 @@ public final class RotatingTurboQuantKVCache: BaseKVCache, QuantizedKVCacheProto
         TurboQuantAttentionCode,
         TurboQuantAttentionCode
     ) {
-        let packedFallbackCache =
-            turboQuantSupportsPackedFallback(keys: keys, values: values, groupSize: groupSize)
-            ? materializedPackedFallbackCache() : nil
+        let shouldUpdatePackedFallback =
+            packedFallbackCache != nil
+            && turboQuantSupportsPackedFallback(keys: keys, values: values, groupSize: groupSize)
         let keyConfiguration = TurboQuantConfiguration(
             preset: preset,
             role: .key,
@@ -1069,8 +1071,10 @@ public final class RotatingTurboQuantKVCache: BaseKVCache, QuantizedKVCacheProto
 
         offset += keys.dim(2)
         writeIndex = nextWriteIndex(afterOffset: offset)
-        if let packedFallbackCache {
-            _ = packedFallbackCache.updateQuantized(keys: keys, values: values)
+        if shouldUpdatePackedFallback {
+            _ = packedFallbackCache?.updateQuantized(keys: keys, values: values)
+        } else {
+            packedFallbackCache = nil
         }
         updateCompressedLayouts(keys: &currentKeys, values: &currentValues)
         compressedKeys = currentKeys

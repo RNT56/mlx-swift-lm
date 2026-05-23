@@ -464,7 +464,7 @@ extension MLXRuntimeSwiftTests {
             #expect(state.1.2 == nil)
         }
 
-        @Test func testTurboQuantCompressedCacheMaintainsPackedFallbackState() throws {
+        @Test func testTurboQuantCompressedCacheMaterializesPackedFallbackState() throws {
             guard TurboQuantKernelAvailability.current.supportsMetalPolarQJLAttention else {
                 return
             }
@@ -495,7 +495,7 @@ extension MLXRuntimeSwiftTests {
             #expect(allClose(fallback, directPacked, rtol: 1e-5, atol: 1e-5).item(Bool.self))
         }
 
-        @Test func testRotatingTurboQuantCompressedCacheMaintainsPackedFallbackState() throws {
+        @Test func testRotatingTurboQuantCompressedCacheMaterializesPackedFallbackState() throws {
             guard TurboQuantKernelAvailability.current.supportsMetalPolarQJLAttention else {
                 return
             }
@@ -526,7 +526,7 @@ extension MLXRuntimeSwiftTests {
             #expect(cache.attentionDiagnostics.rawFallbackAllocated == false)
         }
 
-        @Test func testRotatingTurboQuantPackedFallbackTracksWrappedCompressedState() throws {
+        @Test func testRotatingTurboQuantPackedFallbackTracksUpdatesAfterMaterialization() throws {
             guard TurboQuantKernelAvailability.current.supportsMetalPolarQJLAttention else {
                 return
             }
@@ -536,13 +536,6 @@ extension MLXRuntimeSwiftTests {
                 keep: 1,
                 backend: .metalPolarQJL
             )
-            let directCache = RotatingQuantizedKVCache(
-                maxSize: 4,
-                keep: 1,
-                groupSize: cache.groupSize,
-                bits: cache.bits,
-                mode: cache.mode
-            )
             let firstKeys = (MLXArray(0 ..< Int32(1 * 2 * 3 * 64)).asType(.float32) / 128)
                 .reshaped([1, 2, 3, 64])
             let firstValues = firstKeys + 0.5
@@ -551,12 +544,10 @@ extension MLXRuntimeSwiftTests {
             let queries = MLXArray.ones([1, 4, 1, 64], dtype: .float32)
 
             _ = try cache.updateCompressed(keys: firstKeys, values: firstValues)
-            _ = directCache.updateQuantized(keys: firstKeys, values: firstValues)
+            let firstPackedState = try #require(cache.getQuantizedState())
+            #expect(firstPackedState.0.0.dim(-2) == 3)
+            #expect(firstPackedState.1.0.dim(-2) == 3)
             _ = try cache.updateCompressed(keys: secondKeys, values: secondValues)
-            let directPackedState = directCache.updateQuantized(
-                keys: secondKeys,
-                values: secondValues
-            )
 
             let packedState = try #require(cache.getQuantizedState())
             #expect(packedState.0.0.dim(-2) == 4)
@@ -572,9 +563,9 @@ extension MLXRuntimeSwiftTests {
             let directPacked = attentionWithKVState(
                 queries: queries,
                 state: .quantized(
-                    keys: directPackedState.0,
-                    values: directPackedState.1,
-                    cache: directCache
+                    keys: packedState.0,
+                    values: packedState.1,
+                    cache: cache
                 ),
                 scale: 0.125
             )
