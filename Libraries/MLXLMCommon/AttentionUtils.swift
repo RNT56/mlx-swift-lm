@@ -134,6 +134,23 @@ func packedQuantizedAttentionFallback(
     )
 }
 
+private func turboQuantAttentionStorageArrays(_ code: TurboQuantAttentionCode) -> [MLXArray] {
+    [
+        code.packedMagnitudes,
+        code.signs,
+        code.highPrecisionMask,
+        code.residualSigns,
+        code.scales,
+    ]
+}
+
+private func asyncEvalTurboQuantAttentionStorage(
+    keys: TurboQuantAttentionCode,
+    values: TurboQuantAttentionCode
+) {
+    asyncEval(turboQuantAttentionStorageArrays(keys) + turboQuantAttentionStorageArrays(values))
+}
+
 /// Keep prompt logits exact while still installing compressed KV for decode.
 private func turboQuantCompressedPrefillAttention(
     queries: MLXArray,
@@ -173,6 +190,9 @@ private func turboQuantCompressedPrefillAttention(
         )
 
         if previousOffset == 0 {
+            // The exact raw prefill output does not consume the compressed writes, so
+            // schedule them explicitly to avoid carrying raw prompt tensors into decode.
+            asyncEvalTurboQuantAttentionStorage(keys: compressedKeys, values: compressedValues)
             return (
                 MLXFast.scaledDotProductAttention(
                     queries: queries,
