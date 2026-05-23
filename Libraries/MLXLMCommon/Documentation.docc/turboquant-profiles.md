@@ -10,6 +10,7 @@ Use a profile when an application wants a model-aware default for
 ```swift
 let parameters = GenerateParameters(
     turboQuantModelID: "mlx-community/Qwen3-4B-4bit",
+    modelType: "qwen3",
     keyHeadDimension: 128,
     valueHeadDimension: 128
 )
@@ -21,9 +22,10 @@ backend, and optimization policy. If no profile matches, the supplied base
 parameters are returned unchanged.
 
 Profile matching is intentionally conservative. Model ID patterns select
-candidates, but config metadata remains authoritative: a candidate with an
-`architecture` or `model_type` requirement should be rejected when the model's
-`config.json` declares a different family. Matching model sizes should use
+candidates, but config metadata remains authoritative: bundled profiles require
+`model_type` and key/value head dimensions from the model's `config.json`.
+Missing metadata intentionally returns no profile so callers keep their
+conservative base parameters. Matching model sizes should use
 explicit `B` or `M` size tokens only; quantization labels such as `4bit` and
 `8bit` are not evidence that a model is 4B or 8B. Resolution APIs that expose diagnostics should
 include rejection reasons for metadata, size, shape, mask, and context failures.
@@ -32,6 +34,15 @@ The root `TurboQuantProfiles/` directory contains JSON copies of the bundled
 profiles for downstream apps, release tooling, and manual inspection. The Swift
 registry lives in ``TurboQuantProfileRegistry`` so library consumers do not need
 package resources at runtime.
+
+Bundled profiles keep the quality-first TurboQuant default of 3.5-bit keys,
+4-bit values, and group size 64. Per-profile optimization policy is then tuned
+from config-backed model shape and context metadata: small short-context dense
+profiles prefer throughput, large/long-context/MoE/VLM profiles prefer memory,
+and nonstandard split-dimension latent attention profiles use conservative
+compressed attention routing. Safe context lengths mirror the public model
+configuration or model card where available; callers should still apply their
+own memory-fit policy before admitting very long prompts.
 
 Bundled Qwen3.5/Qwen3.6 profiles cover current MLX Community dense and MoE
 families with config-backed 256-dimensional KV head checks: `qwen3.5-0.8b`,
@@ -109,6 +120,7 @@ weight, scale, and bias tensors.
 ## Scheme Aliases
 
 ``TurboQuantScheme/turbo4v2`` maps to the `.turbo4v2` runtime preset with
-4-bit keys and values. It is the balanced default profile scheme. ``TurboQuantScheme/turbo3``
+the profile-declared key/value bit widths. It is the balanced default profile
+scheme. ``TurboQuantScheme/turbo3``
 maps to the more memory-oriented `.turbo2_5` runtime preset and should be reserved
 for memory-pressure profiles.

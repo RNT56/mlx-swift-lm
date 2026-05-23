@@ -23,6 +23,7 @@ extension MLXRuntimeSwiftTests {
             let qwen = try #require(
                 registry.profile(
                     for: "mlx-community/Qwen3-4B-4bit",
+                    modelType: "qwen3",
                     keyHeadDimension: 128,
                     valueHeadDimension: 128
                 )
@@ -42,10 +43,155 @@ extension MLXRuntimeSwiftTests {
 
             let unsupported = registry.profile(
                 for: "mlx-community/Qwen3-4B-4bit",
+                modelType: "qwen3",
                 keyHeadDimension: 512,
                 valueHeadDimension: 512
             )
             #expect(unsupported == nil)
+        }
+
+        @Test func testBundledRegistryAppliesPerFamilyOptimizationMetadata() throws {
+            let registry = TurboQuantProfileRegistry.bundled
+
+            let qwen35 = try #require(
+                registry.profile(
+                    for: "mlx-community/Qwen3.5-4B-4bit",
+                    modelType: "qwen3_5",
+                    textConfigModelType: "qwen3_5_text",
+                    modality: .visionText,
+                    parameterCountB: 4,
+                    keyHeadDimension: 256,
+                    valueHeadDimension: 256,
+                    contextLength: 262144
+                )
+            )
+            #expect(qwen35.id == "qwen3.5-4b")
+            #expect(qwen35.safeContextLength == 262144)
+            #expect(qwen35.optimizationPolicy == TurboQuantOptimizationPolicy.preferMemory)
+
+            let gemma3Small = try #require(
+                registry.profile(
+                    for: "mlx-community/gemma-3-270m-it-4bit",
+                    modelType: "gemma3_text",
+                    parameterCountB: 0.27,
+                    keyHeadDimension: 256,
+                    valueHeadDimension: 256,
+                    contextLength: 32768
+                )
+            )
+            #expect(gemma3Small.id == "gemma-3-270m")
+            #expect(gemma3Small.safeContextLength == 32768)
+            #expect(
+                gemma3Small.optimizationPolicy == TurboQuantOptimizationPolicy.preferThroughput
+            )
+            #expect(
+                registry.profile(
+                    for: "mlx-community/gemma-3-270m-it-4bit",
+                    modelType: "gemma3_text",
+                    parameterCountB: 0.27,
+                    keyHeadDimension: 256,
+                    valueHeadDimension: 256,
+                    contextLength: 65536
+                ) == nil
+            )
+
+            let llama33 = try #require(
+                registry.profile(
+                    for: "mlx-community/Llama-3.3-70B-Instruct-4bit",
+                    modelType: "llama",
+                    parameterCountB: 70,
+                    keyHeadDimension: 128,
+                    valueHeadDimension: 128,
+                    contextLength: 131072
+                )
+            )
+            #expect(llama33.id == "llama-3.3-70b")
+            #expect(llama33.optimizationPolicy == TurboQuantOptimizationPolicy.preferMemory)
+
+            let mistral4 = try #require(
+                registry.profile(
+                    for: "mlx-community/Mistral-Small-4-119B-Instruct-2603-4bit",
+                    modelType: "mistral3",
+                    textConfigModelType: "mistral4",
+                    parameterCountB: 119,
+                    routedExperts: 128,
+                    expertsPerToken: 4,
+                    keyHeadDimension: 128,
+                    valueHeadDimension: 128,
+                    contextLength: 1048576
+                )
+            )
+            #expect(mistral4.id == "mistral-small-4-119b-a6b")
+            #expect(mistral4.safeContextLength == 1048576)
+            #expect(mistral4.optimizationPolicy == TurboQuantOptimizationPolicy.preferMemory)
+        }
+
+        @Test func testBundledProfilesRequireStrictModelAndHeadMetadata() throws {
+            let bundledProfiles = TurboQuantProfileRegistry.bundled.profiles
+            #expect(!bundledProfiles.isEmpty)
+            #expect(bundledProfiles.allSatisfy { $0.requiresModelType })
+            #expect(bundledProfiles.allSatisfy { $0.requiresHeadDimensions })
+
+            let profileDirectory = URL(fileURLWithPath: #filePath)
+                .deletingLastPathComponent()
+                .deletingLastPathComponent()
+                .deletingLastPathComponent()
+                .appendingPathComponent("TurboQuantProfiles")
+            let jsonProfiles = try TurboQuantProfileRegistry.loadJSONProfiles(from: profileDirectory)
+            #expect(jsonProfiles.allSatisfy { $0.requiresModelType })
+            #expect(jsonProfiles.allSatisfy { $0.requiresHeadDimensions })
+        }
+
+        @Test func testLegacySmallProfilesFailClosedForMissingMetadata() throws {
+            let registry = TurboQuantProfileRegistry.bundled
+
+            let strictCases: [
+                (
+                    modelID: String,
+                    modelType: String,
+                    keyHeadDimension: Int,
+                    valueHeadDimension: Int,
+                    expectedProfileID: String
+                )
+            ] = [
+                ("mlx-community/Qwen3-4B-4bit", "qwen3", 128, 128, "qwen3-4b"),
+                ("mlx-community/Phi-4-mini-instruct-4bit", "phi3", 128, 128, "phi-4-mini"),
+                ("mlx-community/SmolLM3-3B-4bit", "llama", 128, 128, "smollm3-3b"),
+                ("mlx-community/Granite-3.3-8B-Instruct-4bit", "granite", 128, 128, "granite-small"),
+                ("mlx-community/LFM2-1.2B-4bit", "lfm2", 128, 128, "lfm2-small"),
+                ("mlx-community/GLM-4.7-Flash-4bit", "glm4_moe_lite", 96, 64, "glm4-moe-lite"),
+            ]
+
+            for profileCase in strictCases {
+                #expect(
+                    registry.profile(
+                        for: profileCase.modelID,
+                        keyHeadDimension: profileCase.keyHeadDimension,
+                        valueHeadDimension: profileCase.valueHeadDimension
+                    ) == nil
+                )
+                #expect(
+                    registry.profile(
+                        for: profileCase.modelID,
+                        modelType: profileCase.modelType
+                    ) == nil
+                )
+
+                let matched = try #require(
+                    registry.profile(
+                        for: profileCase.modelID,
+                        modelType: profileCase.modelType,
+                        keyHeadDimension: profileCase.keyHeadDimension,
+                        valueHeadDimension: profileCase.valueHeadDimension
+                    )
+                )
+                #expect(matched.id == profileCase.expectedProfileID)
+                #expect(matched.supports(
+                    keyHeadDimension: profileCase.keyHeadDimension,
+                    valueHeadDimension: profileCase.valueHeadDimension
+                ))
+                #expect(!matched.supports())
+            }
         }
 
         @Test func testQuantizationBitSuffixDoesNotImplyModelSize() throws {
@@ -930,6 +1076,7 @@ extension MLXRuntimeSwiftTests {
         @Test func testProfileAppliesGenerateParameters() {
             let parameters = GenerateParameters(
                 turboQuantModelID: "mlx-community/Qwen3-4B-4bit",
+                modelType: "qwen3",
                 keyHeadDimension: 128,
                 valueHeadDimension: 128
             )
@@ -938,7 +1085,7 @@ extension MLXRuntimeSwiftTests {
             #expect(parameters.kvGroupSize == 64)
             #expect(parameters.turboQuantPreset == .turbo4v2)
             #expect(parameters.turboQuantBackend == .metalPolarQJL)
-            #expect(parameters.turboQuantOptimizationPolicy == .auto)
+            #expect(parameters.turboQuantOptimizationPolicy == .preferThroughput)
             #expect(parameters.turboQuantValueBits == 4)
         }
 
@@ -1013,8 +1160,25 @@ extension MLXRuntimeSwiftTests {
                     bundledProfile.supportedValueHeadDimensions
                         == jsonProfile.supportedValueHeadDimensions
                 )
+                #expect(bundledProfile.recommendedScheme == jsonProfile.recommendedScheme)
+                #expect(bundledProfile.fallbackScheme == jsonProfile.fallbackScheme)
+                #expect(bundledProfile.keyBits == jsonProfile.keyBits)
+                #expect(bundledProfile.valueBits == jsonProfile.valueBits)
+                #expect(bundledProfile.groupSize == jsonProfile.groupSize)
+                #expect(bundledProfile.safeMaskModes == jsonProfile.safeMaskModes)
                 #expect(bundledProfile.supportedContextLengths == jsonProfile.supportedContextLengths)
                 #expect(bundledProfile.safeContextLength == jsonProfile.safeContextLength)
+                #expect(bundledProfile.qualityProfile == jsonProfile.qualityProfile)
+                #expect(bundledProfile.backend == jsonProfile.backend)
+                #expect(bundledProfile.optimizationPolicy == jsonProfile.optimizationPolicy)
+                #expect(
+                    bundledProfile.requiresMetalSelfTest
+                        == jsonProfile.requiresMetalSelfTest
+                )
+                #expect(
+                    bundledProfile.requiresFusedAttentionSelfTest
+                        == jsonProfile.requiresFusedAttentionSelfTest
+                )
                 #expect(bundledProfile.status == jsonProfile.status)
                 #expect(bundledProfile.source == jsonProfile.source)
                 #expect(bundledProfile.confidence == jsonProfile.confidence)
@@ -1024,6 +1188,7 @@ extension MLXRuntimeSwiftTests {
             let glm = try #require(
                 registry.profile(
                     for: "RNT56/GLM4-MoE-Lite-4bit",
+                    modelType: "glm4_moe_lite",
                     keyHeadDimension: 96,
                     valueHeadDimension: 64
                 )

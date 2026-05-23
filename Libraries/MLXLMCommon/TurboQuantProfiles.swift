@@ -467,6 +467,12 @@ public struct TurboQuantProfile: Codable, Equatable, Identifiable, Sendable {
         maskMode: TurboQuantMaskMode = .causal,
         contextLength: Int? = nil
     ) -> Bool {
+        if requiresHeadDimensions, keyHeadDimension == nil {
+            return false
+        }
+        if requiresHeadDimensions, valueHeadDimension == nil {
+            return false
+        }
         if let keyHeadDimension,
             !supportedKeyHeadDimensions.contains(keyHeadDimension)
         {
@@ -829,6 +835,19 @@ private let turboQuantProfileNotes = [
 private let commonSafeMasks: [TurboQuantMaskMode] = [.none, .causal]
 
 private let bundledProfileDefaultContextLengths = [4096, 8192, 16384, 32768, 65536]
+private let bundledProfile8KContextLengths = [4096, 8192]
+private let bundledProfile32KContextLengths = [4096, 8192, 16384, 32768]
+private let bundledProfile40KContextLengths = [4096, 8192, 16384, 32768, 40960]
+private let bundledProfile128KContextLengths =
+    bundledProfileDefaultContextLengths + [131072]
+private let bundledProfile256KContextLengths =
+    bundledProfile128KContextLengths + [262144]
+private let bundledProfile384KContextLengths =
+    bundledProfile256KContextLengths + [393216]
+private let bundledProfile1MContextLengths =
+    bundledProfile256KContextLengths + [524288, 1048576]
+private let bundledProfileMistralNemoContextLengths =
+    bundledProfile128KContextLengths
 
 private func bundledProfile(
     id: String,
@@ -883,6 +902,133 @@ private func bundledProfile(
         confidence: confidence,
         notes: turboQuantProfileNotes + extraNotes
     )
+}
+
+private let bundledProfileContextLengthOverrides: [String: [Int]] = [
+    "gemma-3-270m": bundledProfile32KContextLengths,
+    "gemma-3-1b": bundledProfile32KContextLengths,
+    "gemma-3-4b": bundledProfile128KContextLengths,
+    "gemma-3-12b": bundledProfile128KContextLengths,
+    "gemma-3-27b": bundledProfile128KContextLengths,
+    "gemma-3n-e2b": bundledProfile32KContextLengths,
+    "gemma-3n-e4b": bundledProfile32KContextLengths,
+    "gemma-4-e2b": bundledProfile128KContextLengths,
+    "gemma-4-e4b": bundledProfile128KContextLengths,
+    "gemma-4-26b-a4b": bundledProfile256KContextLengths,
+    "gemma-4-31b": bundledProfile256KContextLengths,
+    "llama-3-3b": bundledProfile8KContextLengths,
+    "llama-3-8b": bundledProfile8KContextLengths,
+    "llama-3-16b": bundledProfile8KContextLengths,
+    "llama-3-70b": bundledProfile8KContextLengths,
+    "llama-3-120b": bundledProfile8KContextLengths,
+    "llama-3.1-4b": bundledProfile128KContextLengths,
+    "llama-3.1-8b": bundledProfile128KContextLengths,
+    "llama-3.1-16b": bundledProfile128KContextLengths,
+    "llama-3.1-70b": bundledProfile128KContextLengths,
+    "llama-3.1-120b": bundledProfile128KContextLengths,
+    "llama-3.1-405b": bundledProfile128KContextLengths,
+    "llama-3.2-1b": bundledProfile128KContextLengths,
+    "llama-3.2-3b": bundledProfile128KContextLengths,
+    "llama-3.3-3b": bundledProfile128KContextLengths,
+    "llama-3.3-70b": bundledProfile128KContextLengths,
+    "mistral-7b": bundledProfile32KContextLengths,
+    "mistral-nemo-12b": bundledProfileMistralNemoContextLengths,
+    "ministral-8b-2410": bundledProfile32KContextLengths,
+    "codestral-22b": bundledProfile32KContextLengths,
+    "mistral-small-22b": bundledProfile128KContextLengths,
+    "mistral-small-24b": bundledProfile128KContextLengths,
+    "mistral-large-2407": bundledProfile128KContextLengths,
+    "devstral-small-24b": bundledProfile128KContextLengths,
+    "magistral-small-24b": bundledProfile32KContextLengths,
+    "ministral3-3b": bundledProfile256KContextLengths,
+    "ministral3-8b": bundledProfile256KContextLengths,
+    "ministral3-14b": bundledProfile256KContextLengths,
+    "mistral-small-3.1-24b": bundledProfile128KContextLengths,
+    "mistral-small-3.2-24b": bundledProfile128KContextLengths,
+    "devstral-small-2-24b": bundledProfile384KContextLengths,
+    "mistral-medium-3.5-128b": bundledProfile256KContextLengths,
+    "devstral-2-123b": bundledProfile256KContextLengths,
+    "mistral-small-4-119b-a6b": bundledProfile1MContextLengths,
+    "pixtral-12b": bundledProfile128KContextLengths,
+    "qwen3-0.6b": bundledProfile40KContextLengths,
+    "qwen3-1.7b": bundledProfile40KContextLengths,
+    "qwen3-4b": bundledProfile40KContextLengths,
+    "qwen3-8b": bundledProfile40KContextLengths,
+    "qwen3.5-0.8b": bundledProfile256KContextLengths,
+    "qwen3.5-2b": bundledProfile256KContextLengths,
+    "qwen3.5-4b": bundledProfile256KContextLengths,
+    "qwen3.5-9b": bundledProfile256KContextLengths,
+    "qwen3.5-27b": bundledProfile256KContextLengths,
+    "qwen3.6-27b": bundledProfile256KContextLengths,
+    "qwen3.5-40b": bundledProfile256KContextLengths,
+    "qwen3.6-40b": bundledProfile256KContextLengths,
+    "qwen3.5-35b-a3b": bundledProfile256KContextLengths,
+    "qwen3.6-35b-a3b": bundledProfile256KContextLengths,
+    "qwen3.5-97b-a10b": bundledProfile256KContextLengths,
+    "qwen3.5-122b-a10b": bundledProfile256KContextLengths,
+    "qwen3.5-397b-a17b": bundledProfile256KContextLengths,
+]
+
+private let bundledConservativeOptimizationProfileIDs: Set<String> = [
+    "glm4-moe-lite"
+]
+
+private let bundledThroughputOptimizationProfileIDs: Set<String> = [
+    "phi-2",
+    "phi-3-mini",
+    "phi-3.5-mini",
+    "phi-4-mini",
+]
+
+private func defaultBundledOptimizationPolicy(
+    for profile: TurboQuantProfile,
+    safeContextLength: Int?
+) -> TurboQuantOptimizationPolicy {
+    if bundledConservativeOptimizationProfileIDs.contains(profile.id) {
+        return .conservative
+    }
+    if bundledThroughputOptimizationProfileIDs.contains(profile.id) {
+        return .preferThroughput
+    }
+    if profile.modalities.contains(where: { $0 != .text }) {
+        return .preferMemory
+    }
+    if let architecture = profile.architecture?.lowercased(),
+        architecture.contains("moe")
+    {
+        return .preferMemory
+    }
+    if profile.minRoutedExperts != nil || profile.maxRoutedExperts != nil {
+        return .preferMemory
+    }
+    if let safeContextLength, safeContextLength > 65536 {
+        return .preferMemory
+    }
+    if let maxParametersB = profile.maxParametersB, maxParametersB <= 8.5 {
+        return .preferThroughput
+    }
+    if let minParametersB = profile.minParametersB, minParametersB >= 8.5 {
+        return .preferMemory
+    }
+    if let maxParametersB = profile.maxParametersB, maxParametersB >= 9 {
+        return .preferMemory
+    }
+    return .auto
+}
+
+private func applyingBundledProfileOptimizations(_ profile: TurboQuantProfile)
+    -> TurboQuantProfile
+{
+    var profile = profile
+    if let supportedContextLengths = bundledProfileContextLengthOverrides[profile.id] {
+        profile.supportedContextLengths = supportedContextLengths
+        profile.safeContextLength = supportedContextLengths.last
+    }
+    profile.optimizationPolicy = defaultBundledOptimizationPolicy(
+        for: profile,
+        safeContextLength: profile.safeContextLength
+    )
+    return profile
 }
 
 private let commonNonTextExcludePatterns = [
@@ -1109,6 +1255,8 @@ private let bundledProfiles: [TurboQuantProfile] = [
         modelTypes: ["exaone", "exaone4"],
         minParametersB: 1,
         maxParametersB: 4.5,
+        requiresModelType: true,
+        requiresHeadDimensions: true,
         supportedKeyHeadDimensions: [64, 80, 128],
         confidence: 0.65,
         extraNotes: ["Covers EXAONE dense <=8B variants with runtime head-dimension checks."]
@@ -1451,6 +1599,8 @@ private let bundledProfiles: [TurboQuantProfile] = [
         excludePatterns: commonNonTextExcludePatterns,
         architecture: "glm4_moe_lite",
         modelTypes: ["glm4_moe_lite"],
+        requiresModelType: true,
+        requiresHeadDimensions: true,
         supportedKeyHeadDimensions: [64, 96, 128, 192],
         supportedValueHeadDimensions: [64, 128],
         confidence: 0.65,
@@ -1837,6 +1987,8 @@ private let bundledProfiles: [TurboQuantProfile] = [
         modelTypes: ["granite"],
         minParametersB: 1.5,
         maxParametersB: 8.5,
+        requiresModelType: true,
+        requiresHeadDimensions: true,
         supportedKeyHeadDimensions: [64, 80, 128],
         confidence: 0.65,
         extraNotes: ["Covers Granite dense <=8B variants with runtime head-dimension checks."]
@@ -1853,6 +2005,8 @@ private let bundledProfiles: [TurboQuantProfile] = [
         modelTypes: ["lfm2"],
         minParametersB: 0.2,
         maxParametersB: 1.5,
+        requiresModelType: true,
+        requiresHeadDimensions: true,
         supportedKeyHeadDimensions: [64, 128],
         confidence: 0.65,
         extraNotes: ["Covers LFM2 small dense variants with runtime head-dimension checks."]
@@ -2322,6 +2476,8 @@ private let bundledProfiles: [TurboQuantProfile] = [
         excludePatterns: commonNonTextExcludePatterns,
         architecture: "phi",
         modelTypes: ["phi"],
+        requiresModelType: true,
+        requiresHeadDimensions: true,
         supportedKeyHeadDimensions: [80],
         supportedContextLengths: [2048, 4096],
         safeContextLength: 4096,
@@ -2333,6 +2489,8 @@ private let bundledProfiles: [TurboQuantProfile] = [
         excludePatterns: commonNonTextExcludePatterns,
         architecture: "phi3",
         modelTypes: ["phi3"],
+        requiresModelType: true,
+        requiresHeadDimensions: true,
         supportedKeyHeadDimensions: [96],
         confidence: 0.75
     ),
@@ -2345,6 +2503,8 @@ private let bundledProfiles: [TurboQuantProfile] = [
         excludePatterns: commonNonTextExcludePatterns,
         architecture: "phi3",
         modelTypes: ["phi3"],
+        requiresModelType: true,
+        requiresHeadDimensions: true,
         supportedKeyHeadDimensions: [96],
         confidence: 0.75
     ),
@@ -2354,6 +2514,8 @@ private let bundledProfiles: [TurboQuantProfile] = [
         excludePatterns: commonNonTextExcludePatterns,
         architecture: "phi3",
         modelTypes: ["phi3"],
+        requiresModelType: true,
+        requiresHeadDimensions: true,
         supportedKeyHeadDimensions: [128],
         confidence: 0.75
     ),
@@ -2367,6 +2529,8 @@ private let bundledProfiles: [TurboQuantProfile] = [
         modelTypes: ["qwen2"],
         minParametersB: 0.4,
         maxParametersB: 7.5,
+        requiresModelType: true,
+        requiresHeadDimensions: true,
         supportedKeyHeadDimensions: [64, 128],
         confidence: 0.65,
         extraNotes: ["Covers Qwen2.5 dense <=7B variants with runtime head-dimension checks."]
@@ -2379,6 +2543,8 @@ private let bundledProfiles: [TurboQuantProfile] = [
         modelTypes: ["qwen3"],
         minParametersB: 0.5,
         maxParametersB: 0.7,
+        requiresModelType: true,
+        requiresHeadDimensions: true,
         supportedKeyHeadDimensions: [128],
         confidence: 0.75
     ),
@@ -2390,6 +2556,8 @@ private let bundledProfiles: [TurboQuantProfile] = [
         modelTypes: ["qwen3"],
         minParametersB: 1.5,
         maxParametersB: 1.9,
+        requiresModelType: true,
+        requiresHeadDimensions: true,
         supportedKeyHeadDimensions: [128],
         confidence: 0.75
     ),
@@ -2401,6 +2569,8 @@ private let bundledProfiles: [TurboQuantProfile] = [
         modelTypes: ["qwen3"],
         minParametersB: 3.5,
         maxParametersB: 4.5,
+        requiresModelType: true,
+        requiresHeadDimensions: true,
         supportedKeyHeadDimensions: [128],
         confidence: 0.85
     ),
@@ -2412,6 +2582,8 @@ private let bundledProfiles: [TurboQuantProfile] = [
         modelTypes: ["qwen3"],
         minParametersB: 7.5,
         maxParametersB: 8.5,
+        requiresModelType: true,
+        requiresHeadDimensions: true,
         supportedKeyHeadDimensions: [128],
         confidence: 0.75
     ),
@@ -2623,6 +2795,8 @@ private let bundledProfiles: [TurboQuantProfile] = [
         modelTypes: ["llama", "smollm", "smollm2"],
         minParametersB: 0.1,
         maxParametersB: 2,
+        requiresModelType: true,
+        requiresHeadDimensions: true,
         supportedKeyHeadDimensions: [64, 128],
         confidence: 0.65,
         extraNotes: ["Covers SmolLM and SmolLM2 small dense variants with runtime head-dimension checks."]
@@ -2635,7 +2809,9 @@ private let bundledProfiles: [TurboQuantProfile] = [
         modelTypes: ["llama", "smollm3"],
         minParametersB: 2.5,
         maxParametersB: 3.5,
+        requiresModelType: true,
+        requiresHeadDimensions: true,
         supportedKeyHeadDimensions: [64, 128],
         confidence: 0.75
     ),
-]
+].map(applyingBundledProfileOptimizations)

@@ -60,6 +60,8 @@
   ],
   "min_parameters_b": 0.1,
   "max_parameters_b": 2,
+  "requires_model_type": true,
+  "requires_head_dimensions": true,
   "supported_key_head_dimensions": [
     64,
     128
@@ -87,7 +89,7 @@
   "safe_context_length": 65536,
   "quality_profile": "balanced",
   "backend": "metalPolarQJL",
-  "optimization_policy": "auto",
+  "optimization_policy": "preferThroughput",
   "requires_metal_self_test": true,
   "requires_fused_attention_self_test": false,
   "status": "experimental",

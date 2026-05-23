@@ -35,6 +35,7 @@ weights. They do not require calibrated or retrained model files.
 ```swift
 let parameters = GenerateParameters(
     turboQuantModelID: "mlx-community/Qwen3-4B-4bit",
+    modelType: "qwen3",
     keyHeadDimension: 128,
     valueHeadDimension: 128
 )
@@ -45,10 +46,17 @@ and as JSON files in the repository root `TurboQuantProfiles/` directory.
 Measured perplexity and throughput fields are left empty until reproduced for a
 specific model revision and target device.
 
+Profiles use 3.5-bit keys, 4-bit values, and group size 64 by default. The
+registry tunes safe context windows and optimization policy per family:
+small short-context dense profiles prefer throughput, while long-context,
+large, MoE, and VLM profiles prefer memory. Applications still need to apply
+their own device memory-fit gates before admitting large contexts.
+
 Profile selection should be gated by the model's `config.json` metadata when it
-is available. Name patterns identify candidate profiles, then `architecture` and
-`model_type` must agree with the candidate before TurboQuant parameters are
-applied. Size matching should use explicit `B` or `M` model-size tokens, so
+is available. Name patterns identify candidate profiles, but bundled profiles
+require `model_type` plus explicit key/value head dimensions before TurboQuant
+parameters are applied. Missing metadata fails closed and leaves the caller's
+base parameters unchanged. Size matching should use explicit `B` or `M` model-size tokens, so
 quantization suffixes such as `4bit` and `8bit` are not treated as `4B` or `8B`
 model sizes.
 Rejected candidates should preserve a diagnostic reason when the resolving API
