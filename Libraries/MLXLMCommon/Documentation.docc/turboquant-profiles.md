@@ -54,6 +54,31 @@ configs omit it. These profiles require both `model_type` and KV head
 dimensions; models whose configs omit non-inferable head dimensions
 intentionally fall back to the caller's conservative defaults.
 
+Bundled Llama profiles cover config-backed text-only Llama families and small
+Llama-compatible dense derivatives: `llama-2-7b`, `llama-2-13b`,
+`llama-2-70b`, `llama-3-3b`, `llama-3-8b`, `llama-3-70b`,
+`llama-3.1-4b`, `llama-3.1-8b`, `llama-3.1-16b`, `llama-3.1-70b`,
+`llama-3.1-120b`, `llama-3.1-405b`, `llama-3.2-1b`, `llama-3.2-3b`,
+`llama-3.3-3b`, `llama-3.3-70b`, `llama-compatible-135m`,
+`llama-compatible-160m`, `llama-compatible-1b`, `llama-compatible-2b`,
+`llama-compatible-3b`, and `llama-compatible-4b`. These profiles require
+`model_type=llama` and explicit KV head dimensions. Llama 3.2 Vision, MLLama,
+Llama 4, LLava, Bunny, Idefics, Mixtral, and Mamba-Codestral are intentionally
+excluded until the linked runtime exposes the corresponding supported model
+surface.
+
+Bundled Mistral profiles cover config-backed dense text, nested Mistral3 text,
+Mistral4 MoE, and Pixtral VLM variants: `mistral-7b`, `mistral-nemo-12b`,
+`ministral-8b-2410`, `codestral-22b`, `mistral-small-22b`,
+`mistral-small-24b`, `devstral-small-24b`, `magistral-small-24b`,
+`ministral3-3b`, `ministral3-8b`, `ministral3-14b`,
+`mistral-small-3.1-24b`, `mistral-small-3.2-24b`,
+`devstral-small-2-24b`, `mistral-medium-3.5-128b`,
+`mistral-small-4-119b-a6b`, and `pixtral-12b`. Mistral3 and Pixtral profiles
+require nested `text_config.model_type` metadata. Mistral Small 4 additionally
+requires routed expert metadata matching its MoE config. Mixtral and
+Mamba-Codestral remain unsupported until runtime model support exists.
+
 ## Safety Contract
 
 Profiles are advisory. The runtime still enforces:

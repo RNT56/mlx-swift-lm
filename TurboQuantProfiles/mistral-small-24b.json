@@ -1,18 +1,22 @@
 {
   "schema_version": 2,
-  "id": "mistral-7b",
+  "id": "mistral-small-24b",
   "exact_model_ids": [],
   "model_patterns": [
-    "*mistral-7b",
-    "*mistral-7b-*",
-    "*mistral7b",
-    "*mistral7b-*"
+    "*mistral-small",
+    "*mistral-small-*",
+    "*mistral-small-24b",
+    "*mistral-small-24b-*",
+    "*mistral-small-instruct",
+    "*mistral-small-instruct-*"
   ],
   "include_patterns": [
-    "*mistral-7b",
-    "*mistral-7b-*",
-    "*mistral7b",
-    "*mistral7b-*"
+    "*mistral-small",
+    "*mistral-small-*",
+    "*mistral-small-24b",
+    "*mistral-small-24b-*",
+    "*mistral-small-instruct",
+    "*mistral-small-instruct-*"
   ],
   "exclude_patterns": [
     "*embedding*",
@@ -38,7 +42,11 @@
     "*mamba*codestral*",
     "*mllama*",
     "*llama*",
-    "*e5-*"
+    "*3.1*",
+    "*3-1*",
+    "*3.2*",
+    "*3-2*",
+    "*small-4*"
   ],
   "architecture": "mistral",
   "model_types": [
@@ -47,8 +55,8 @@
   "modalities": [
     "text"
   ],
-  "min_parameters_b": 6.5,
-  "max_parameters_b": 7.5,
+  "min_parameters_b": 23,
+  "max_parameters_b": 25.5,
   "requires_model_type": true,
   "requires_head_dimensions": true,
   "supported_key_head_dimensions": [

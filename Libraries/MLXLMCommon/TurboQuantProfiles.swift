@@ -150,20 +150,29 @@ public struct TurboQuantProfileMeasurements: Codable, Equatable, Sendable {
 public struct TurboQuantModelDescriptor: Equatable, Sendable {
     public var modelID: String
     public var modelType: String?
+    public var textConfigModelType: String?
     public var modality: TurboQuantModelModality?
     public var parameterCountB: Double?
+    public var routedExperts: Int?
+    public var expertsPerToken: Int?
 
     public init(
         modelID: String,
         modelType: String? = nil,
+        textConfigModelType: String? = nil,
         modality: TurboQuantModelModality? = nil,
-        parameterCountB: Double? = nil
+        parameterCountB: Double? = nil,
+        routedExperts: Int? = nil,
+        expertsPerToken: Int? = nil
     ) {
         self.modelID = modelID
         self.modelType = modelType
+        self.textConfigModelType = textConfigModelType
         self.modality = modality
         self.parameterCountB =
             parameterCountB ?? Self.inferParameterCountB(from: modelID)
+        self.routedExperts = routedExperts
+        self.expertsPerToken = expertsPerToken
     }
 
     public static func inferParameterCountB(from modelID: String) -> Double? {
@@ -215,11 +224,16 @@ public struct TurboQuantProfile: Codable, Equatable, Identifiable, Sendable {
     public var excludePatterns: [String]
     public var architecture: String?
     public var modelTypes: [String]
+    public var textConfigModelTypes: [String]
     public var modalities: [TurboQuantModelModality]
     public var minParametersB: Double?
     public var maxParametersB: Double?
     public var requiresModelType: Bool
+    public var requiresTextConfigModelType: Bool
     public var requiresHeadDimensions: Bool
+    public var minRoutedExperts: Int?
+    public var maxRoutedExperts: Int?
+    public var supportedExpertsPerToken: [Int]
     public var supportedKeyHeadDimensions: [Int]
     public var supportedValueHeadDimensions: [Int]
     public var recommendedScheme: TurboQuantScheme
@@ -252,11 +266,16 @@ public struct TurboQuantProfile: Codable, Equatable, Identifiable, Sendable {
         excludePatterns: [String] = [],
         architecture: String? = nil,
         modelTypes: [String] = [],
+        textConfigModelTypes: [String] = [],
         modalities: [TurboQuantModelModality] = [.text],
         minParametersB: Double? = nil,
         maxParametersB: Double? = nil,
         requiresModelType: Bool = false,
+        requiresTextConfigModelType: Bool = false,
         requiresHeadDimensions: Bool = false,
+        minRoutedExperts: Int? = nil,
+        maxRoutedExperts: Int? = nil,
+        supportedExpertsPerToken: [Int] = [],
         supportedKeyHeadDimensions: [Int],
         supportedValueHeadDimensions: [Int]? = nil,
         recommendedScheme: TurboQuantScheme = .turbo4v2,
@@ -288,11 +307,16 @@ public struct TurboQuantProfile: Codable, Equatable, Identifiable, Sendable {
         self.excludePatterns = excludePatterns
         self.architecture = architecture
         self.modelTypes = modelTypes.isEmpty ? [architecture].compactMap { $0 } : modelTypes
+        self.textConfigModelTypes = textConfigModelTypes
         self.modalities = modalities
         self.minParametersB = minParametersB
         self.maxParametersB = maxParametersB
         self.requiresModelType = requiresModelType
+        self.requiresTextConfigModelType = requiresTextConfigModelType
         self.requiresHeadDimensions = requiresHeadDimensions
+        self.minRoutedExperts = minRoutedExperts
+        self.maxRoutedExperts = maxRoutedExperts
+        self.supportedExpertsPerToken = supportedExpertsPerToken
         self.supportedKeyHeadDimensions = supportedKeyHeadDimensions
         self.supportedValueHeadDimensions =
             supportedValueHeadDimensions ?? supportedKeyHeadDimensions
@@ -327,11 +351,16 @@ public struct TurboQuantProfile: Codable, Equatable, Identifiable, Sendable {
         case excludePatterns
         case architecture
         case modelTypes
+        case textConfigModelTypes
         case modalities
         case minParametersB
         case maxParametersB
         case requiresModelType
+        case requiresTextConfigModelType
         case requiresHeadDimensions
+        case minRoutedExperts
+        case maxRoutedExperts
+        case supportedExpertsPerToken
         case supportedKeyHeadDimensions
         case supportedValueHeadDimensions
         case recommendedScheme
@@ -378,14 +407,22 @@ public struct TurboQuantProfile: Codable, Equatable, Identifiable, Sendable {
                 [String].self, forKey: .excludePatterns) ?? [],
             architecture: architecture,
             modelTypes: try container.decodeIfPresent([String].self, forKey: .modelTypes) ?? [],
+            textConfigModelTypes: try container.decodeIfPresent(
+                [String].self, forKey: .textConfigModelTypes) ?? [],
             modalities: try container.decodeIfPresent(
                 [TurboQuantModelModality].self, forKey: .modalities) ?? [.text],
             minParametersB: try container.decodeIfPresent(Double.self, forKey: .minParametersB),
             maxParametersB: try container.decodeIfPresent(Double.self, forKey: .maxParametersB),
             requiresModelType: try container.decodeIfPresent(
                 Bool.self, forKey: .requiresModelType) ?? false,
+            requiresTextConfigModelType: try container.decodeIfPresent(
+                Bool.self, forKey: .requiresTextConfigModelType) ?? false,
             requiresHeadDimensions: try container.decodeIfPresent(
                 Bool.self, forKey: .requiresHeadDimensions) ?? false,
+            minRoutedExperts: try container.decodeIfPresent(Int.self, forKey: .minRoutedExperts),
+            maxRoutedExperts: try container.decodeIfPresent(Int.self, forKey: .maxRoutedExperts),
+            supportedExpertsPerToken: try container.decodeIfPresent(
+                [Int].self, forKey: .supportedExpertsPerToken) ?? [],
             supportedKeyHeadDimensions: supportedKeyHeadDimensions,
             supportedValueHeadDimensions: supportedValueHeadDimensions,
             recommendedScheme: try container.decodeIfPresent(
@@ -476,8 +513,11 @@ public struct TurboQuantProfileRegistry: Sendable {
     public func profile(
         for modelID: String,
         modelType: String? = nil,
+        textConfigModelType: String? = nil,
         modality: TurboQuantModelModality? = nil,
         parameterCountB: Double? = nil,
+        routedExperts: Int? = nil,
+        expertsPerToken: Int? = nil,
         keyHeadDimension: Int? = nil,
         valueHeadDimension: Int? = nil,
         maskMode: TurboQuantMaskMode = .causal,
@@ -486,8 +526,11 @@ public struct TurboQuantProfileRegistry: Sendable {
         let descriptor = TurboQuantModelDescriptor(
             modelID: modelID,
             modelType: modelType,
+            textConfigModelType: textConfigModelType,
             modality: modality,
-            parameterCountB: parameterCountB)
+            parameterCountB: parameterCountB,
+            routedExperts: routedExperts,
+            expertsPerToken: expertsPerToken)
         return selection(
             for: descriptor,
             keyHeadDimension: keyHeadDimension,
@@ -579,8 +622,11 @@ extension GenerateParameters {
         turboQuantModelID modelID: String,
         registry: TurboQuantProfileRegistry = .bundled,
         modelType: String? = nil,
+        textConfigModelType: String? = nil,
         modality: TurboQuantModelModality? = nil,
         parameterCountB: Double? = nil,
+        routedExperts: Int? = nil,
+        expertsPerToken: Int? = nil,
         keyHeadDimension: Int? = nil,
         valueHeadDimension: Int? = nil,
         maskMode: TurboQuantMaskMode = .causal,
@@ -590,8 +636,11 @@ extension GenerateParameters {
         if let profile = registry.profile(
             for: modelID,
             modelType: modelType,
+            textConfigModelType: textConfigModelType,
             modality: modality,
             parameterCountB: parameterCountB,
+            routedExperts: routedExperts,
+            expertsPerToken: expertsPerToken,
             keyHeadDimension: keyHeadDimension,
             valueHeadDimension: valueHeadDimension,
             maskMode: maskMode,
@@ -651,6 +700,16 @@ extension TurboQuantProfile {
                 reasons.append("model type '\(modelType)' is not supported")
             }
         }
+        if requiresTextConfigModelType, descriptor.textConfigModelType == nil {
+            reasons.append("text_config model type metadata is required")
+        }
+        if let textConfigModelType = descriptor.textConfigModelType {
+            let normalizedTextConfigModelType = Self.normalizedModelType(textConfigModelType)
+            let allowedTextTypes = Set(textConfigModelTypes.map(Self.normalizedModelType))
+            if !allowedTextTypes.isEmpty, !allowedTextTypes.contains(normalizedTextConfigModelType) {
+                reasons.append("text_config model type '\(textConfigModelType)' is not supported")
+            }
+        }
 
         if let modality = descriptor.modality, !modalities.contains(modality) {
             reasons.append("modality '\(modality.rawValue)' is not supported")
@@ -676,6 +735,28 @@ extension TurboQuantProfile {
         {
             reasons.append(
                 "model size \(parameterCountB)B exceeds maximum \(effectiveMaxParametersB)B")
+        }
+        if (minRoutedExperts != nil || maxRoutedExperts != nil), descriptor.routedExperts == nil {
+            reasons.append("routed expert count metadata is required")
+        }
+        if let minRoutedExperts, let routedExperts = descriptor.routedExperts,
+            routedExperts < minRoutedExperts
+        {
+            reasons.append("routed expert count \(routedExperts) is below minimum \(minRoutedExperts)")
+        }
+        if let maxRoutedExperts, let routedExperts = descriptor.routedExperts,
+            routedExperts > maxRoutedExperts
+        {
+            reasons.append("routed expert count \(routedExperts) exceeds maximum \(maxRoutedExperts)")
+        }
+        if !supportedExpertsPerToken.isEmpty, descriptor.expertsPerToken == nil {
+            reasons.append("experts-per-token metadata is required")
+        }
+        if let expertsPerToken = descriptor.expertsPerToken,
+            !supportedExpertsPerToken.isEmpty,
+            !supportedExpertsPerToken.contains(expertsPerToken)
+        {
+            reasons.append("experts per token \(expertsPerToken) is not supported")
         }
 
         if requiresHeadDimensions, keyHeadDimension == nil {
@@ -756,11 +837,16 @@ private func bundledProfile(
     excludePatterns: [String] = [],
     architecture: String? = nil,
     modelTypes: [String] = [],
+    textConfigModelTypes: [String] = [],
     modalities: [TurboQuantModelModality] = [.text],
     minParametersB: Double? = nil,
     maxParametersB: Double? = nil,
     requiresModelType: Bool = false,
+    requiresTextConfigModelType: Bool = false,
     requiresHeadDimensions: Bool = false,
+    minRoutedExperts: Int? = nil,
+    maxRoutedExperts: Int? = nil,
+    supportedExpertsPerToken: [Int] = [],
     supportedKeyHeadDimensions: [Int],
     supportedValueHeadDimensions: [Int]? = nil,
     supportedContextLengths: [Int] = bundledProfileDefaultContextLengths,
@@ -777,11 +863,16 @@ private func bundledProfile(
         excludePatterns: excludePatterns,
         architecture: architecture,
         modelTypes: modelTypes,
+        textConfigModelTypes: textConfigModelTypes,
         modalities: modalities,
         minParametersB: minParametersB,
         maxParametersB: maxParametersB,
         requiresModelType: requiresModelType,
+        requiresTextConfigModelType: requiresTextConfigModelType,
         requiresHeadDimensions: requiresHeadDimensions,
+        minRoutedExperts: minRoutedExperts,
+        maxRoutedExperts: maxRoutedExperts,
+        supportedExpertsPerToken: supportedExpertsPerToken,
         supportedKeyHeadDimensions: supportedKeyHeadDimensions,
         supportedValueHeadDimensions: supportedValueHeadDimensions,
         safeMaskModes: commonSafeMasks,
@@ -941,6 +1032,65 @@ private let gemma4ModelTypes = ["gemma4", "gemma4_text", "gemma4_assistant"]
 private let gemmaProfileNotes = [
     "Gemma 2/3/3n/4 profiles are config-backed experimental profiles; measured quality and throughput validation is still pending."
 ]
+
+private let llamaExcludePatterns =
+    commonNonTextExcludePatterns + [
+        "*mllama*",
+        "*llama-3.2-vision*",
+        "*llama3.2-vision*",
+        "*llama-4-*",
+        "*llama4-*",
+        "*llama-4-scout*",
+        "*llama4-scout*",
+        "*llama-4-maverick*",
+        "*llama4-maverick*",
+        "*mixtral*",
+        "*mamba-codestral*",
+        "*mamba*codestral*",
+    ]
+
+private let mistralTextExcludePatterns =
+    commonNonTextExcludePatterns + [
+        "*mixtral*",
+        "*pixtral*",
+        "*mamba-codestral*",
+        "*mamba*codestral*",
+        "*mllama*",
+        "*llama*",
+    ]
+
+private let pixtralExcludePatterns = [
+    "*embedding*",
+    "*embed*",
+    "*reranker*",
+    "*reward*",
+    "*classifier*",
+    "*video*",
+    "*audio*",
+    "*omni*",
+    "*llava*",
+    "*bunny*",
+    "*paligemma*",
+    "*molmo*",
+    "*moondream*",
+    "*idefics*",
+    "*mixtral*",
+]
+
+private let llamaProfileNotes = [
+    "Llama profiles are config-backed experimental profiles gated on model_type=llama and explicit KV head dimensions."
+]
+private let mistralProfileNotes = [
+    "Mistral profiles are config-backed experimental profiles gated on model_type, nested text_config.model_type where required, and explicit KV head dimensions."
+]
+
+private func llamaFamilyPatterns(_ bases: [String]) -> [String] {
+    modelIDPatterns(bases)
+}
+
+private func mistralFamilyPatterns(_ bases: [String]) -> [String] {
+    modelIDPatterns(bases)
+}
 
 private let bundledProfiles: [TurboQuantProfile] = [
     bundledProfile(
@@ -1309,14 +1459,271 @@ private let bundledProfiles: [TurboQuantProfile] = [
     ),
     bundledProfile(
         id: "mistral-7b",
-        patterns: ["*mistral-7b", "*mistral-7b-*", "*mistral*7b*"],
-        excludePatterns: commonNonTextExcludePatterns + ["*e5-*"],
+        patterns: mistralFamilyPatterns(["mistral-7b", "mistral7b"]),
+        excludePatterns: mistralTextExcludePatterns + ["*e5-*"],
         architecture: "mistral",
         modelTypes: ["mistral"],
         minParametersB: 6.5,
         maxParametersB: 7.5,
+        requiresModelType: true,
+        requiresHeadDimensions: true,
         supportedKeyHeadDimensions: [128],
-        confidence: 0.75
+        confidence: 0.75,
+        extraNotes: mistralProfileNotes
+    ),
+    bundledProfile(
+        id: "mistral-nemo-12b",
+        patterns: mistralFamilyPatterns(["mistral-nemo", "mistral-nemo-12b", "nemo-12b"]),
+        excludePatterns: mistralTextExcludePatterns,
+        architecture: "mistral",
+        modelTypes: ["mistral"],
+        minParametersB: 11,
+        maxParametersB: 13,
+        requiresModelType: true,
+        requiresHeadDimensions: true,
+        supportedKeyHeadDimensions: [128],
+        confidence: 0.8,
+        extraNotes: mistralProfileNotes
+    ),
+    bundledProfile(
+        id: "ministral-8b-2410",
+        patterns: mistralFamilyPatterns(["ministral-8b", "ministral-8b-2410"]),
+        excludePatterns: mistralTextExcludePatterns,
+        architecture: "mistral",
+        modelTypes: ["mistral"],
+        minParametersB: 7.5,
+        maxParametersB: 8.5,
+        requiresModelType: true,
+        requiresHeadDimensions: true,
+        supportedKeyHeadDimensions: [128],
+        confidence: 0.8,
+        extraNotes: mistralProfileNotes
+    ),
+    bundledProfile(
+        id: "codestral-22b",
+        patterns: mistralFamilyPatterns(["codestral-22b", "codestral-22b-v0.1"]),
+        excludePatterns: mistralTextExcludePatterns + ["*mamba-codestral*", "*mamba*codestral*"],
+        architecture: "mistral",
+        modelTypes: ["mistral"],
+        minParametersB: 21,
+        maxParametersB: 23,
+        requiresModelType: true,
+        requiresHeadDimensions: true,
+        supportedKeyHeadDimensions: [128],
+        confidence: 0.75,
+        extraNotes: mistralProfileNotes
+    ),
+    bundledProfile(
+        id: "mistral-small-22b",
+        patterns: mistralFamilyPatterns([
+            "mistral-small-22b", "mistral-small-instruct-22b",
+            "mistral-small-instruct-2409",
+        ]),
+        excludePatterns: mistralTextExcludePatterns,
+        architecture: "mistral",
+        modelTypes: ["mistral"],
+        minParametersB: 21,
+        maxParametersB: 23,
+        requiresModelType: true,
+        requiresHeadDimensions: true,
+        supportedKeyHeadDimensions: [128],
+        confidence: 0.75,
+        extraNotes: mistralProfileNotes
+    ),
+    bundledProfile(
+        id: "mistral-small-24b",
+        patterns: mistralFamilyPatterns(["mistral-small", "mistral-small-24b", "mistral-small-instruct"]),
+        excludePatterns: mistralTextExcludePatterns + ["*3.1*", "*3-1*", "*3.2*", "*3-2*", "*small-4*"],
+        architecture: "mistral",
+        modelTypes: ["mistral"],
+        minParametersB: 23,
+        maxParametersB: 25.5,
+        requiresModelType: true,
+        requiresHeadDimensions: true,
+        supportedKeyHeadDimensions: [128],
+        confidence: 0.75,
+        extraNotes: mistralProfileNotes
+    ),
+    bundledProfile(
+        id: "devstral-small-24b",
+        patterns: mistralFamilyPatterns(["devstral-small", "devstral-small-24b"]),
+        excludePatterns: mistralTextExcludePatterns + [
+            "*devstral-small-2-24b*", "*devstral-small-2.0*",
+        ],
+        architecture: "mistral",
+        modelTypes: ["mistral"],
+        minParametersB: 23,
+        maxParametersB: 25.5,
+        requiresModelType: true,
+        requiresHeadDimensions: true,
+        supportedKeyHeadDimensions: [128],
+        confidence: 0.75,
+        extraNotes: mistralProfileNotes
+    ),
+    bundledProfile(
+        id: "magistral-small-24b",
+        patterns: mistralFamilyPatterns(["magistral-small", "magistral-small-24b"]),
+        excludePatterns: mistralTextExcludePatterns,
+        architecture: "mistral",
+        modelTypes: ["mistral"],
+        minParametersB: 23,
+        maxParametersB: 25.5,
+        requiresModelType: true,
+        requiresHeadDimensions: true,
+        supportedKeyHeadDimensions: [128],
+        confidence: 0.75,
+        extraNotes: mistralProfileNotes
+    ),
+    bundledProfile(
+        id: "ministral3-3b",
+        patterns: mistralFamilyPatterns(["ministral-3-3b", "ministral3-3b"]),
+        excludePatterns: mistralTextExcludePatterns,
+        architecture: "mistral3",
+        modelTypes: ["mistral3", "ministral3"],
+        textConfigModelTypes: ["ministral3"],
+        minParametersB: 2.5,
+        maxParametersB: 3.5,
+        requiresModelType: true,
+        requiresTextConfigModelType: true,
+        requiresHeadDimensions: true,
+        supportedKeyHeadDimensions: [128],
+        confidence: 0.8,
+        extraNotes: mistralProfileNotes
+    ),
+    bundledProfile(
+        id: "ministral3-8b",
+        patterns: mistralFamilyPatterns(["ministral-3-8b", "ministral3-8b"]),
+        excludePatterns: mistralTextExcludePatterns,
+        architecture: "mistral3",
+        modelTypes: ["mistral3", "ministral3"],
+        textConfigModelTypes: ["ministral3"],
+        minParametersB: 7.5,
+        maxParametersB: 8.5,
+        requiresModelType: true,
+        requiresTextConfigModelType: true,
+        requiresHeadDimensions: true,
+        supportedKeyHeadDimensions: [128],
+        confidence: 0.8,
+        extraNotes: mistralProfileNotes
+    ),
+    bundledProfile(
+        id: "ministral3-14b",
+        patterns: mistralFamilyPatterns(["ministral-3-14b", "ministral3-14b"]),
+        excludePatterns: mistralTextExcludePatterns,
+        architecture: "mistral3",
+        modelTypes: ["mistral3", "ministral3"],
+        textConfigModelTypes: ["ministral3"],
+        minParametersB: 13,
+        maxParametersB: 15,
+        requiresModelType: true,
+        requiresTextConfigModelType: true,
+        requiresHeadDimensions: true,
+        supportedKeyHeadDimensions: [128],
+        confidence: 0.75,
+        extraNotes: mistralProfileNotes
+    ),
+    bundledProfile(
+        id: "mistral-small-3.1-24b",
+        patterns: mistralFamilyPatterns(["mistral-small-3.1-24b", "mistral-small-3-1-24b"]),
+        excludePatterns: mistralTextExcludePatterns,
+        architecture: "mistral3",
+        modelTypes: ["mistral3"],
+        textConfigModelTypes: ["mistral"],
+        minParametersB: 23,
+        maxParametersB: 25.5,
+        requiresModelType: true,
+        requiresTextConfigModelType: true,
+        requiresHeadDimensions: true,
+        supportedKeyHeadDimensions: [128],
+        confidence: 0.75,
+        extraNotes: mistralProfileNotes
+    ),
+    bundledProfile(
+        id: "mistral-small-3.2-24b",
+        patterns: mistralFamilyPatterns(["mistral-small-3.2-24b", "mistral-small-3-2-24b"]),
+        excludePatterns: mistralTextExcludePatterns,
+        architecture: "mistral3",
+        modelTypes: ["mistral3"],
+        textConfigModelTypes: ["mistral"],
+        minParametersB: 23,
+        maxParametersB: 25.5,
+        requiresModelType: true,
+        requiresTextConfigModelType: true,
+        requiresHeadDimensions: true,
+        supportedKeyHeadDimensions: [128],
+        confidence: 0.75,
+        extraNotes: mistralProfileNotes
+    ),
+    bundledProfile(
+        id: "devstral-small-2-24b",
+        patterns: mistralFamilyPatterns(["devstral-small-2", "devstral-small-2-24b"]),
+        excludePatterns: mistralTextExcludePatterns,
+        architecture: "mistral3",
+        modelTypes: ["mistral3"],
+        textConfigModelTypes: ["mistral"],
+        minParametersB: 23,
+        maxParametersB: 25.5,
+        requiresModelType: true,
+        requiresTextConfigModelType: true,
+        requiresHeadDimensions: true,
+        supportedKeyHeadDimensions: [128],
+        confidence: 0.75,
+        extraNotes: mistralProfileNotes
+    ),
+    bundledProfile(
+        id: "mistral-medium-3.5-128b",
+        patterns: mistralFamilyPatterns(["mistral-medium-3.5-128b", "mistral-medium-3-5-128b"]),
+        excludePatterns: mistralTextExcludePatterns,
+        architecture: "mistral3",
+        modelTypes: ["mistral3"],
+        textConfigModelTypes: ["mistral"],
+        minParametersB: 120,
+        maxParametersB: 135,
+        requiresModelType: true,
+        requiresTextConfigModelType: true,
+        requiresHeadDimensions: true,
+        supportedKeyHeadDimensions: [128],
+        confidence: 0.65,
+        extraNotes: mistralProfileNotes
+    ),
+    bundledProfile(
+        id: "mistral-small-4-119b-a6b",
+        patterns: mistralFamilyPatterns(["mistral-small-4-119b", "mistral-small-4-119b-a6b"]),
+        excludePatterns: mistralTextExcludePatterns,
+        architecture: "mistral4",
+        modelTypes: ["mistral3"],
+        textConfigModelTypes: ["mistral4"],
+        minParametersB: 110,
+        maxParametersB: 125,
+        requiresModelType: true,
+        requiresTextConfigModelType: true,
+        requiresHeadDimensions: true,
+        minRoutedExperts: 128,
+        maxRoutedExperts: 128,
+        supportedExpertsPerToken: [4],
+        supportedKeyHeadDimensions: [128],
+        supportedValueHeadDimensions: [128],
+        confidence: 0.65,
+        extraNotes: mistralProfileNotes + [
+            "Mistral Small 4 MoE is gated on nested text_config.model_type=mistral4 plus routed expert metadata."
+        ]
+    ),
+    bundledProfile(
+        id: "pixtral-12b",
+        patterns: mistralFamilyPatterns(["pixtral-12b", "pixtral-12b-2409"]),
+        excludePatterns: pixtralExcludePatterns,
+        architecture: "pixtral",
+        modelTypes: ["pixtral"],
+        textConfigModelTypes: ["mistral"],
+        modalities: [.visionText],
+        minParametersB: 11,
+        maxParametersB: 13,
+        requiresModelType: true,
+        requiresTextConfigModelType: true,
+        requiresHeadDimensions: true,
+        supportedKeyHeadDimensions: [128],
+        confidence: 0.75,
+        extraNotes: mistralProfileNotes
     ),
     bundledProfile(
         id: "granite-small",
@@ -1354,57 +1761,321 @@ private let bundledProfiles: [TurboQuantProfile] = [
         extraNotes: ["Covers LFM2 small dense variants with runtime head-dimension checks."]
     ),
     bundledProfile(
+        id: "llama-2-7b",
+        patterns: llamaFamilyPatterns(["llama-2-7b", "llama2-7b"]),
+        excludePatterns: llamaExcludePatterns,
+        architecture: "llama",
+        modelTypes: ["llama"],
+        minParametersB: 6.5,
+        maxParametersB: 7.5,
+        requiresModelType: true,
+        requiresHeadDimensions: true,
+        supportedKeyHeadDimensions: [128],
+        supportedContextLengths: [2048, 4096, 8192],
+        safeContextLength: 8192,
+        confidence: 0.75,
+        extraNotes: llamaProfileNotes
+    ),
+    bundledProfile(
+        id: "llama-2-13b",
+        patterns: llamaFamilyPatterns(["llama-2-13b", "llama2-13b"]),
+        excludePatterns: llamaExcludePatterns,
+        architecture: "llama",
+        modelTypes: ["llama"],
+        minParametersB: 12,
+        maxParametersB: 14,
+        requiresModelType: true,
+        requiresHeadDimensions: true,
+        supportedKeyHeadDimensions: [128],
+        supportedContextLengths: [2048, 4096, 8192],
+        safeContextLength: 8192,
+        confidence: 0.75,
+        extraNotes: llamaProfileNotes
+    ),
+    bundledProfile(
+        id: "llama-2-70b",
+        patterns: llamaFamilyPatterns(["llama-2-70b", "llama2-70b"]),
+        excludePatterns: llamaExcludePatterns,
+        architecture: "llama",
+        modelTypes: ["llama"],
+        minParametersB: 65,
+        maxParametersB: 75,
+        requiresModelType: true,
+        requiresHeadDimensions: true,
+        supportedKeyHeadDimensions: [128],
+        supportedContextLengths: [2048, 4096, 8192],
+        safeContextLength: 8192,
+        confidence: 0.7,
+        extraNotes: llamaProfileNotes
+    ),
+    bundledProfile(
         id: "llama-3-8b",
-        patterns: ["*llama-3-8b", "*llama-3-8b-*", "*llama3-8b", "*llama3-8b-*"],
-        excludePatterns: commonNonTextExcludePatterns,
+        patterns: llamaFamilyPatterns(["llama-3-8b", "llama3-8b"]),
+        excludePatterns: llamaExcludePatterns,
         architecture: "llama",
         modelTypes: ["llama"],
         minParametersB: 7.5,
         maxParametersB: 8.5,
+        requiresModelType: true,
+        requiresHeadDimensions: true,
         supportedKeyHeadDimensions: [128],
-        confidence: 0.75
+        confidence: 0.75,
+        extraNotes: llamaProfileNotes
     ),
     bundledProfile(
-        id: "llama-3.1-8b",
-        patterns: [
-            "*llama-3.1-8b", "*llama-3.1-8b-*", "*llama-3-1-8b",
-            "*llama-3-1-8b-*",
-        ],
-        excludePatterns: commonNonTextExcludePatterns,
-        architecture: "llama",
-        modelTypes: ["llama"],
-        minParametersB: 7.5,
-        maxParametersB: 8.5,
-        supportedKeyHeadDimensions: [128],
-        confidence: 0.85
-    ),
-    bundledProfile(
-        id: "llama-3.2-1b",
-        patterns: [
-            "*llama-3.2-1b", "*llama-3.2-1b-*", "*llama-3-2-1b",
-            "*llama-3-2-1b-*",
-        ],
-        excludePatterns: commonNonTextExcludePatterns,
-        architecture: "llama",
-        modelTypes: ["llama"],
-        minParametersB: 0.9,
-        maxParametersB: 1.2,
-        supportedKeyHeadDimensions: [64],
-        confidence: 0.75
-    ),
-    bundledProfile(
-        id: "llama-3.2-3b",
-        patterns: [
-            "*llama-3.2-3b", "*llama-3.2-3b-*", "*llama-3-2-3b",
-            "*llama-3-2-3b-*",
-        ],
-        excludePatterns: commonNonTextExcludePatterns,
+        id: "llama-3-3b",
+        patterns: llamaFamilyPatterns(["llama-3-3b", "llama3-3b"]),
+        excludePatterns: llamaExcludePatterns,
         architecture: "llama",
         modelTypes: ["llama"],
         minParametersB: 2.5,
         maxParametersB: 3.5,
+        requiresModelType: true,
+        requiresHeadDimensions: true,
         supportedKeyHeadDimensions: [128],
-        confidence: 0.85
+        confidence: 0.7,
+        extraNotes: llamaProfileNotes
+    ),
+    bundledProfile(
+        id: "llama-3-70b",
+        patterns: llamaFamilyPatterns(["llama-3-70b", "llama3-70b"]),
+        excludePatterns: llamaExcludePatterns,
+        architecture: "llama",
+        modelTypes: ["llama"],
+        minParametersB: 65,
+        maxParametersB: 75,
+        requiresModelType: true,
+        requiresHeadDimensions: true,
+        supportedKeyHeadDimensions: [128],
+        confidence: 0.7,
+        extraNotes: llamaProfileNotes
+    ),
+    bundledProfile(
+        id: "llama-3.1-8b",
+        patterns: llamaFamilyPatterns(["llama-3.1-8b", "llama-3-1-8b", "llama3.1-8b"]),
+        excludePatterns: llamaExcludePatterns,
+        architecture: "llama",
+        modelTypes: ["llama"],
+        minParametersB: 7.5,
+        maxParametersB: 8.5,
+        requiresModelType: true,
+        requiresHeadDimensions: true,
+        supportedKeyHeadDimensions: [128],
+        confidence: 0.85,
+        extraNotes: llamaProfileNotes
+    ),
+    bundledProfile(
+        id: "llama-3.1-4b",
+        patterns: llamaFamilyPatterns(["llama-3.1-4b", "llama-3-1-4b", "llama3.1-4b"]),
+        excludePatterns: llamaExcludePatterns,
+        architecture: "llama",
+        modelTypes: ["llama"],
+        minParametersB: 3.5,
+        maxParametersB: 4.5,
+        requiresModelType: true,
+        requiresHeadDimensions: true,
+        supportedKeyHeadDimensions: [128],
+        confidence: 0.75,
+        extraNotes: llamaProfileNotes
+    ),
+    bundledProfile(
+        id: "llama-3.1-16b",
+        patterns: llamaFamilyPatterns(["llama-3.1-16b", "llama-3-1-16b", "llama3.1-16b"]),
+        excludePatterns: llamaExcludePatterns,
+        architecture: "llama",
+        modelTypes: ["llama"],
+        minParametersB: 15,
+        maxParametersB: 17,
+        requiresModelType: true,
+        requiresHeadDimensions: true,
+        supportedKeyHeadDimensions: [128],
+        confidence: 0.7,
+        extraNotes: llamaProfileNotes
+    ),
+    bundledProfile(
+        id: "llama-3.1-70b",
+        patterns: llamaFamilyPatterns([
+            "llama-3.1-70b", "llama-3-1-70b", "llama3.1-70b",
+            "llama-3.1-nemotron-70b",
+        ]),
+        excludePatterns: llamaExcludePatterns,
+        architecture: "llama",
+        modelTypes: ["llama"],
+        minParametersB: 65,
+        maxParametersB: 75,
+        requiresModelType: true,
+        requiresHeadDimensions: true,
+        supportedKeyHeadDimensions: [128],
+        confidence: 0.75,
+        extraNotes: llamaProfileNotes
+    ),
+    bundledProfile(
+        id: "llama-3.1-120b",
+        patterns: llamaFamilyPatterns(["llama-3.1-120b", "llama-3-1-120b", "llama3.1-120b"]),
+        excludePatterns: llamaExcludePatterns,
+        architecture: "llama",
+        modelTypes: ["llama"],
+        minParametersB: 110,
+        maxParametersB: 130,
+        requiresModelType: true,
+        requiresHeadDimensions: true,
+        supportedKeyHeadDimensions: [128],
+        confidence: 0.65,
+        extraNotes: llamaProfileNotes
+    ),
+    bundledProfile(
+        id: "llama-3.1-405b",
+        patterns: llamaFamilyPatterns(["llama-3.1-405b", "llama-3-1-405b", "llama3.1-405b"]),
+        excludePatterns: llamaExcludePatterns,
+        architecture: "llama",
+        modelTypes: ["llama"],
+        minParametersB: 390,
+        maxParametersB: 420,
+        requiresModelType: true,
+        requiresHeadDimensions: true,
+        supportedKeyHeadDimensions: [128],
+        confidence: 0.65,
+        extraNotes: llamaProfileNotes
+    ),
+    bundledProfile(
+        id: "llama-3.2-1b",
+        patterns: llamaFamilyPatterns(["llama-3.2-1b", "llama-3-2-1b", "llama3.2-1b"]),
+        excludePatterns: llamaExcludePatterns,
+        architecture: "llama",
+        modelTypes: ["llama"],
+        minParametersB: 0.9,
+        maxParametersB: 1.2,
+        requiresModelType: true,
+        requiresHeadDimensions: true,
+        supportedKeyHeadDimensions: [64],
+        confidence: 0.75,
+        extraNotes: llamaProfileNotes
+    ),
+    bundledProfile(
+        id: "llama-3.2-3b",
+        patterns: llamaFamilyPatterns(["llama-3.2-3b", "llama-3-2-3b", "llama3.2-3b"]),
+        excludePatterns: llamaExcludePatterns,
+        architecture: "llama",
+        modelTypes: ["llama"],
+        minParametersB: 2.5,
+        maxParametersB: 3.5,
+        requiresModelType: true,
+        requiresHeadDimensions: true,
+        supportedKeyHeadDimensions: [128],
+        confidence: 0.85,
+        extraNotes: llamaProfileNotes
+    ),
+    bundledProfile(
+        id: "llama-3.3-3b",
+        patterns: llamaFamilyPatterns(["llama-3.3-3b", "llama-3-3-3b", "llama3.3-3b"]),
+        excludePatterns: llamaExcludePatterns,
+        architecture: "llama",
+        modelTypes: ["llama"],
+        minParametersB: 2.5,
+        maxParametersB: 3.5,
+        requiresModelType: true,
+        requiresHeadDimensions: true,
+        supportedKeyHeadDimensions: [128],
+        confidence: 0.7,
+        extraNotes: llamaProfileNotes
+    ),
+    bundledProfile(
+        id: "llama-3.3-70b",
+        patterns: llamaFamilyPatterns(["llama-3.3-70b", "llama-3-3-70b", "llama3.3-70b"]),
+        excludePatterns: llamaExcludePatterns,
+        architecture: "llama",
+        modelTypes: ["llama"],
+        minParametersB: 65,
+        maxParametersB: 75,
+        requiresModelType: true,
+        requiresHeadDimensions: true,
+        supportedKeyHeadDimensions: [128],
+        confidence: 0.75,
+        extraNotes: llamaProfileNotes
+    ),
+    bundledProfile(
+        id: "llama-compatible-135m",
+        patterns: llamaFamilyPatterns(["amd-llama-135m", "llama-135m"]),
+        excludePatterns: llamaExcludePatterns,
+        architecture: "llama",
+        modelTypes: ["llama"],
+        minParametersB: 0.1,
+        maxParametersB: 0.16,
+        requiresModelType: true,
+        requiresHeadDimensions: true,
+        supportedKeyHeadDimensions: [64, 128],
+        confidence: 0.65,
+        extraNotes: llamaProfileNotes
+    ),
+    bundledProfile(
+        id: "llama-compatible-160m",
+        patterns: llamaFamilyPatterns(["llama-160m", "llama3-160m"]),
+        excludePatterns: llamaExcludePatterns,
+        architecture: "llama",
+        modelTypes: ["llama"],
+        minParametersB: 0.15,
+        maxParametersB: 0.2,
+        requiresModelType: true,
+        requiresHeadDimensions: true,
+        supportedKeyHeadDimensions: [64, 128],
+        confidence: 0.65,
+        extraNotes: llamaProfileNotes
+    ),
+    bundledProfile(
+        id: "llama-compatible-1b",
+        patterns: llamaFamilyPatterns(["llama-1b", "llama3-1b"]),
+        excludePatterns: llamaExcludePatterns,
+        architecture: "llama",
+        modelTypes: ["llama"],
+        minParametersB: 0.8,
+        maxParametersB: 1.3,
+        requiresModelType: true,
+        requiresHeadDimensions: true,
+        supportedKeyHeadDimensions: [64, 128],
+        confidence: 0.65,
+        extraNotes: llamaProfileNotes
+    ),
+    bundledProfile(
+        id: "llama-compatible-2b",
+        patterns: llamaFamilyPatterns(["llama-2b", "llama3-2b"]),
+        excludePatterns: llamaExcludePatterns + ["*llama-2-*", "*llama2-*"],
+        architecture: "llama",
+        modelTypes: ["llama"],
+        minParametersB: 1.5,
+        maxParametersB: 2.5,
+        requiresModelType: true,
+        requiresHeadDimensions: true,
+        supportedKeyHeadDimensions: [64, 128],
+        confidence: 0.65,
+        extraNotes: llamaProfileNotes
+    ),
+    bundledProfile(
+        id: "llama-compatible-3b",
+        patterns: llamaFamilyPatterns(["llama-3b", "llama3-3b"]),
+        excludePatterns: llamaExcludePatterns,
+        architecture: "llama",
+        modelTypes: ["llama"],
+        minParametersB: 2.5,
+        maxParametersB: 3.5,
+        requiresModelType: true,
+        requiresHeadDimensions: true,
+        supportedKeyHeadDimensions: [64, 128],
+        confidence: 0.65,
+        extraNotes: llamaProfileNotes
+    ),
+    bundledProfile(
+        id: "llama-compatible-4b",
+        patterns: llamaFamilyPatterns(["llama-4b", "llama3-4b"]),
+        excludePatterns: llamaExcludePatterns,
+        architecture: "llama",
+        modelTypes: ["llama"],
+        minParametersB: 3.5,
+        maxParametersB: 4.5,
+        requiresModelType: true,
+        requiresHeadDimensions: true,
+        supportedKeyHeadDimensions: [64, 128],
+        confidence: 0.65,
+        extraNotes: llamaProfileNotes
     ),
     bundledProfile(
         id: "phi-2",

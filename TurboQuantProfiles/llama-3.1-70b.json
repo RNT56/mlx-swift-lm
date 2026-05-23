@@ -1,18 +1,26 @@
 {
   "schema_version": 2,
-  "id": "mistral-7b",
+  "id": "llama-3.1-70b",
   "exact_model_ids": [],
   "model_patterns": [
-    "*mistral-7b",
-    "*mistral-7b-*",
-    "*mistral7b",
-    "*mistral7b-*"
+    "*llama-3.1-70b",
+    "*llama-3.1-70b-*",
+    "*llama-3-1-70b",
+    "*llama-3-1-70b-*",
+    "*llama3.1-70b",
+    "*llama3.1-70b-*",
+    "*llama-3.1-nemotron-70b",
+    "*llama-3.1-nemotron-70b-*"
   ],
   "include_patterns": [
-    "*mistral-7b",
-    "*mistral-7b-*",
-    "*mistral7b",
-    "*mistral7b-*"
+    "*llama-3.1-70b",
+    "*llama-3.1-70b-*",
+    "*llama-3-1-70b",
+    "*llama-3-1-70b-*",
+    "*llama3.1-70b",
+    "*llama3.1-70b-*",
+    "*llama-3.1-nemotron-70b",
+    "*llama-3.1-nemotron-70b-*"
   ],
   "exclude_patterns": [
     "*embedding*",
@@ -32,23 +40,28 @@
     "*molmo*",
     "*moondream*",
     "*idefics*",
-    "*mixtral*",
-    "*pixtral*",
-    "*mamba-codestral*",
-    "*mamba*codestral*",
     "*mllama*",
-    "*llama*",
-    "*e5-*"
+    "*llama-3.2-vision*",
+    "*llama3.2-vision*",
+    "*llama-4-*",
+    "*llama4-*",
+    "*llama-4-scout*",
+    "*llama4-scout*",
+    "*llama-4-maverick*",
+    "*llama4-maverick*",
+    "*mixtral*",
+    "*mamba-codestral*",
+    "*mamba*codestral*"
   ],
-  "architecture": "mistral",
+  "architecture": "llama",
   "model_types": [
-    "mistral"
+    "llama"
   ],
   "modalities": [
     "text"
   ],
-  "min_parameters_b": 6.5,
-  "max_parameters_b": 7.5,
+  "min_parameters_b": 65,
+  "max_parameters_b": 75,
   "requires_model_type": true,
   "requires_head_dimensions": true,
   "supported_key_head_dimensions": [
@@ -84,6 +97,6 @@
   "confidence": 0.75,
   "measured": {},
   "notes": [
-    "Mistral profiles are config-backed experimental profiles gated on model_type, nested text_config.model_type where required, and explicit KV head dimensions."
+    "Llama profiles are config-backed experimental profiles gated on model_type=llama and explicit KV head dimensions."
   ]
 }

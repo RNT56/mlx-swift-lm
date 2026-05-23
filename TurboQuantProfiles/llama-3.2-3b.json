@@ -6,13 +6,17 @@
     "*llama-3.2-3b",
     "*llama-3.2-3b-*",
     "*llama-3-2-3b",
-    "*llama-3-2-3b-*"
+    "*llama-3-2-3b-*",
+    "*llama3.2-3b",
+    "*llama3.2-3b-*"
   ],
   "include_patterns": [
     "*llama-3.2-3b",
     "*llama-3.2-3b-*",
     "*llama-3-2-3b",
-    "*llama-3-2-3b-*"
+    "*llama-3-2-3b-*",
+    "*llama3.2-3b",
+    "*llama3.2-3b-*"
   ],
   "exclude_patterns": [
     "*embedding*",
@@ -31,7 +35,19 @@
     "*pixtral*",
     "*molmo*",
     "*moondream*",
-    "*idefics*"
+    "*idefics*",
+    "*mllama*",
+    "*llama-3.2-vision*",
+    "*llama3.2-vision*",
+    "*llama-4-*",
+    "*llama4-*",
+    "*llama-4-scout*",
+    "*llama4-scout*",
+    "*llama-4-maverick*",
+    "*llama4-maverick*",
+    "*mixtral*",
+    "*mamba-codestral*",
+    "*mamba*codestral*"
   ],
   "architecture": "llama",
   "model_types": [
@@ -42,6 +58,8 @@
   ],
   "min_parameters_b": 2.5,
   "max_parameters_b": 3.5,
+  "requires_model_type": true,
+  "requires_head_dimensions": true,
   "supported_key_head_dimensions": [
     128
   ],
@@ -75,8 +93,6 @@
   "confidence": 0.85,
   "measured": {},
   "notes": [
-    "Uses ordinary MLX model weights; TurboQuant applies only to runtime KV-cache state.",
-    "Measured quality and throughput fields are intentionally empty until reproduced on target hardware.",
-    "Runtime shape checks and Metal self-tests remain authoritative."
+    "Llama profiles are config-backed experimental profiles gated on model_type=llama and explicit KV head dimensions."
   ]
 }

@@ -1,18 +1,18 @@
 {
   "schema_version": 2,
-  "id": "mistral-7b",
+  "id": "mistral-small-4-119b-a6b",
   "exact_model_ids": [],
   "model_patterns": [
-    "*mistral-7b",
-    "*mistral-7b-*",
-    "*mistral7b",
-    "*mistral7b-*"
+    "*mistral-small-4-119b",
+    "*mistral-small-4-119b-*",
+    "*mistral-small-4-119b-a6b",
+    "*mistral-small-4-119b-a6b-*"
   ],
   "include_patterns": [
-    "*mistral-7b",
-    "*mistral-7b-*",
-    "*mistral7b",
-    "*mistral7b-*"
+    "*mistral-small-4-119b",
+    "*mistral-small-4-119b-*",
+    "*mistral-small-4-119b-a6b",
+    "*mistral-small-4-119b-a6b-*"
   ],
   "exclude_patterns": [
     "*embedding*",
@@ -37,20 +37,28 @@
     "*mamba-codestral*",
     "*mamba*codestral*",
     "*mllama*",
-    "*llama*",
-    "*e5-*"
+    "*llama*"
   ],
-  "architecture": "mistral",
+  "architecture": "mistral4",
   "model_types": [
-    "mistral"
+    "mistral3"
   ],
   "modalities": [
     "text"
   ],
-  "min_parameters_b": 6.5,
-  "max_parameters_b": 7.5,
+  "min_parameters_b": 110,
+  "max_parameters_b": 125,
+  "text_config_model_types": [
+    "mistral4"
+  ],
   "requires_model_type": true,
+  "requires_text_config_model_type": true,
   "requires_head_dimensions": true,
+  "min_routed_experts": 128,
+  "max_routed_experts": 128,
+  "supported_experts_per_token": [
+    4
+  ],
   "supported_key_head_dimensions": [
     128
   ],
@@ -81,9 +89,10 @@
   "requires_fused_attention_self_test": false,
   "status": "experimental",
   "source": "profile-audit-2026-05-23",
-  "confidence": 0.75,
+  "confidence": 0.65,
   "measured": {},
   "notes": [
-    "Mistral profiles are config-backed experimental profiles gated on model_type, nested text_config.model_type where required, and explicit KV head dimensions."
+    "Mistral profiles are config-backed experimental profiles gated on model_type, nested text_config.model_type where required, and explicit KV head dimensions.",
+    "Mistral Small 4 MoE is gated on nested text_config.model_type=mistral4 plus routed expert metadata."
   ]
 }

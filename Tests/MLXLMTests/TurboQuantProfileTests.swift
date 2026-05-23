@@ -33,6 +33,7 @@ extension MLXRuntimeSwiftTests {
             let llama = try #require(
                 registry.profile(
                     for: "mlx-community/Llama-3.1-8B-Instruct-4bit",
+                    modelType: "llama",
                     keyHeadDimension: 128,
                     valueHeadDimension: 128
                 )
@@ -421,6 +422,255 @@ extension MLXRuntimeSwiftTests {
             )
         }
 
+        @Test func testLlamaProfilesMatchCurrentMLXCommunityConfigs() throws {
+            let registry = TurboQuantProfileRegistry.bundled
+            let examples: [(String, String, Double, Int)] = [
+                ("mlx-community/Llama-2-7B-Chat-4bit", "llama-2-7b", 7, 128),
+                ("mlx-community/Llama-2-13B-Chat-4bit", "llama-2-13b", 13, 128),
+                ("mlx-community/Llama-2-70B-Chat-4bit", "llama-2-70b", 70, 128),
+                ("mlx-community/Meta-Llama-3-3B-Instruct-4bit", "llama-3-3b", 3, 128),
+                ("mlx-community/Meta-Llama-3-8B-Instruct-4bit", "llama-3-8b", 8, 128),
+                ("mlx-community/Meta-Llama-3-70B-Instruct-4bit", "llama-3-70b", 70, 128),
+                ("mlx-community/Meta-Llama-3.1-4B-Instruct-4bit", "llama-3.1-4b", 4, 128),
+                ("mlx-community/Meta-Llama-3.1-8B-Instruct-4bit", "llama-3.1-8b", 8, 128),
+                ("mlx-community/Meta-Llama-3.1-16B-Instruct-4bit", "llama-3.1-16b", 16, 128),
+                ("mlx-community/Meta-Llama-3.1-70B-Instruct-4bit", "llama-3.1-70b", 70, 128),
+                ("mlx-community/Llama-3.1-Nemotron-70B-Instruct-HF-4bit", "llama-3.1-70b", 70, 128),
+                ("mlx-community/Llama-3.1-120B-4bit", "llama-3.1-120b", 120, 128),
+                ("mlx-community/Meta-Llama-3.1-405B-Instruct-4bit", "llama-3.1-405b", 405, 128),
+                ("mlx-community/Llama-3.2-1B-Instruct-4bit", "llama-3.2-1b", 1, 64),
+                ("mlx-community/Llama-3.2-3B-Instruct-4bit", "llama-3.2-3b", 3, 128),
+                ("mlx-community/Llama-3.3-3B-Instruct-4bit", "llama-3.3-3b", 3, 128),
+                ("mlx-community/Llama-3.3-70B-Instruct-4bit", "llama-3.3-70b", 70, 128),
+                ("mlx-community/AMD-Llama-135M-4bit", "llama-compatible-135m", 0.135, 64),
+                ("mlx-community/Llama-160M-4bit", "llama-compatible-160m", 0.16, 64),
+                ("mlx-community/tiny-llama-1b-4bit", "llama-compatible-1b", 1, 128),
+                ("mlx-community/Custom-Llama-2B-4bit", "llama-compatible-2b", 2, 128),
+                ("mlx-community/Custom-Llama-3B-4bit", "llama-compatible-3b", 3, 128),
+                ("mlx-community/Custom-Llama-4B-4bit", "llama-compatible-4b", 4, 128),
+            ]
+
+            for (modelID, expectedProfileID, parameterCountB, headDimension) in examples {
+                let profile = try #require(
+                    registry.profile(
+                        for: modelID,
+                        modelType: "llama",
+                        parameterCountB: parameterCountB,
+                        keyHeadDimension: headDimension,
+                        valueHeadDimension: headDimension
+                    )
+                )
+                #expect(profile.id == expectedProfileID)
+            }
+        }
+
+        @Test func testMistralProfilesMatchCurrentMLXCommunityConfigs() throws {
+            let registry = TurboQuantProfileRegistry.bundled
+            let textExamples: [(String, String, String, String?, Double)] = [
+                ("mlx-community/Mistral-7B-Instruct-v0.3-4bit", "mistral-7b", "mistral", nil, 7),
+                ("mlx-community/Mistral-Nemo-Instruct-2407-4bit", "mistral-nemo-12b", "mistral", nil, 12),
+                ("mlx-community/Ministral-8B-Instruct-2410-4bit", "ministral-8b-2410", "mistral", nil, 8),
+                ("mlx-community/Codestral-22B-v0.1-4bit", "codestral-22b", "mistral", nil, 22),
+                ("mlx-community/Mistral-Small-Instruct-2409-4bit", "mistral-small-22b", "mistral", nil, 22),
+                ("mlx-community/Mistral-Small-Instruct-2501-4bit", "mistral-small-24b", "mistral", nil, 24),
+                ("mlx-community/Devstral-Small-2505-4bit", "devstral-small-24b", "mistral", nil, 24),
+                ("mlx-community/Magistral-Small-2506-4bit", "magistral-small-24b", "mistral", nil, 24),
+                ("mlx-community/Ministral-3-3B-Instruct-2512-4bit", "ministral3-3b", "mistral3", "ministral3", 3),
+                ("mlx-community/Ministral-3-8B-Instruct-2512-4bit", "ministral3-8b", "mistral3", "ministral3", 8),
+                ("mlx-community/Ministral-3-14B-Instruct-2512-4bit", "ministral3-14b", "mistral3", "ministral3", 14),
+                ("mlx-community/Mistral-Small-3.1-24B-Instruct-2503-4bit", "mistral-small-3.1-24b", "mistral3", "mistral", 24),
+                ("mlx-community/Mistral-Small-3.2-24B-Instruct-2506-4bit", "mistral-small-3.2-24b", "mistral3", "mistral", 24),
+                ("mlx-community/Devstral-Small-2-24B-4bit", "devstral-small-2-24b", "mistral3", "mistral", 24),
+                ("mlx-community/Mistral-Medium-3.5-128B-Instruct-4bit", "mistral-medium-3.5-128b", "mistral3", "mistral", 128),
+            ]
+
+            for (modelID, expectedProfileID, modelType, textConfigModelType, parameterCountB) in textExamples {
+                let profile = try #require(
+                    registry.profile(
+                        for: modelID,
+                        modelType: modelType,
+                        textConfigModelType: textConfigModelType,
+                        parameterCountB: parameterCountB,
+                        keyHeadDimension: 128,
+                        valueHeadDimension: 128
+                    )
+                )
+                #expect(profile.id == expectedProfileID)
+            }
+
+            let small4 = try #require(
+                registry.profile(
+                    for: "mlx-community/Mistral-Small-4-119B-A6B-Instruct-4bit",
+                    modelType: "mistral3",
+                    textConfigModelType: "mistral4",
+                    parameterCountB: 119,
+                    routedExperts: 128,
+                    expertsPerToken: 4,
+                    keyHeadDimension: 128,
+                    valueHeadDimension: 128
+                )
+            )
+            #expect(small4.id == "mistral-small-4-119b-a6b")
+
+            let pixtral = try #require(
+                registry.profile(
+                    for: "mlx-community/Pixtral-12B-2409-4bit",
+                    modelType: "pixtral",
+                    textConfigModelType: "mistral",
+                    modality: .visionText,
+                    parameterCountB: 12,
+                    keyHeadDimension: 128,
+                    valueHeadDimension: 128
+                )
+            )
+            #expect(pixtral.id == "pixtral-12b")
+        }
+
+        @Test func testLlamaAndMistralProfilesFailClosedForIncompatibleMetadata() {
+            let registry = TurboQuantProfileRegistry.bundled
+
+            #expect(
+                registry.profile(
+                    for: "mlx-community/Meta-Llama-3.1-8B-Instruct-4bit",
+                    parameterCountB: 8,
+                    keyHeadDimension: 128,
+                    valueHeadDimension: 128
+                ) == nil
+            )
+            #expect(
+                registry.profile(
+                    for: "mlx-community/Meta-Llama-3.1-8B-Instruct-4bit",
+                    modelType: "llama",
+                    parameterCountB: 8
+                ) == nil
+            )
+            #expect(
+                registry.profile(
+                    for: "mlx-community/Meta-Llama-3.1-8B-Instruct-4bit",
+                    modelType: "mistral",
+                    parameterCountB: 8,
+                    keyHeadDimension: 128,
+                    valueHeadDimension: 128
+                ) == nil
+            )
+            #expect(
+                registry.profile(
+                    for: "mlx-community/Llama-4-Scout-17B-16E-Instruct-4bit",
+                    modelType: "llama",
+                    parameterCountB: 17,
+                    keyHeadDimension: 128,
+                    valueHeadDimension: 128
+                ) == nil
+            )
+            #expect(
+                registry.profile(
+                    for: "mlx-community/Llama-3.2-11B-Vision-Instruct-4bit",
+                    modelType: "mllama",
+                    parameterCountB: 11,
+                    keyHeadDimension: 128,
+                    valueHeadDimension: 128
+                ) == nil
+            )
+            #expect(
+                registry.profile(
+                    for: "mlx-community/llava-llama-3-8b-v1_1-4bit",
+                    modelType: "llama",
+                    parameterCountB: 8,
+                    keyHeadDimension: 128,
+                    valueHeadDimension: 128
+                ) == nil
+            )
+            #expect(
+                registry.profile(
+                    for: "mlx-community/Bunny-Llama-3-8B-V-4bit",
+                    modelType: "llama",
+                    parameterCountB: 8,
+                    keyHeadDimension: 128,
+                    valueHeadDimension: 128
+                ) == nil
+            )
+            #expect(
+                registry.profile(
+                    for: "mlx-community/Idefics-Llama-8B-4bit",
+                    modelType: "llama",
+                    parameterCountB: 8,
+                    keyHeadDimension: 128,
+                    valueHeadDimension: 128
+                ) == nil
+            )
+            #expect(
+                registry.profile(
+                    for: "mlx-community/Mixtral-8x7B-Instruct-v0.1-4bit",
+                    modelType: "mistral",
+                    parameterCountB: 47,
+                    keyHeadDimension: 128,
+                    valueHeadDimension: 128
+                ) == nil
+            )
+            #expect(
+                registry.profile(
+                    for: "mlx-community/Mamba-Codestral-7B-v0.1-4bit",
+                    modelType: "mistral",
+                    parameterCountB: 7,
+                    keyHeadDimension: 128,
+                    valueHeadDimension: 128
+                ) == nil
+            )
+            #expect(
+                registry.profile(
+                    for: "mlx-community/Mistral-Small-3.2-24B-Instruct-2506-4bit",
+                    modelType: "mistral3",
+                    parameterCountB: 24,
+                    keyHeadDimension: 128,
+                    valueHeadDimension: 128
+                ) == nil
+            )
+            #expect(
+                registry.profile(
+                    for: "mlx-community/Mistral-Small-3.2-24B-Instruct-2506-4bit",
+                    modelType: "mistral3",
+                    textConfigModelType: "ministral3",
+                    parameterCountB: 24,
+                    keyHeadDimension: 128,
+                    valueHeadDimension: 128
+                ) == nil
+            )
+            #expect(
+                registry.profile(
+                    for: "mlx-community/Mistral-Small-4-119B-A6B-Instruct-4bit",
+                    modelType: "mistral3",
+                    textConfigModelType: "mistral4",
+                    parameterCountB: 119,
+                    keyHeadDimension: 128,
+                    valueHeadDimension: 128
+                ) == nil
+            )
+            #expect(
+                registry.profile(
+                    for: "mlx-community/Mistral-Small-4-119B-A6B-Instruct-4bit",
+                    modelType: "mistral3",
+                    textConfigModelType: "mistral4",
+                    parameterCountB: 119,
+                    routedExperts: 64,
+                    expertsPerToken: 4,
+                    keyHeadDimension: 128,
+                    valueHeadDimension: 128
+                ) == nil
+            )
+            #expect(
+                registry.profile(
+                    for: "mlx-community/Mistral-Small-4-119B-A6B-Instruct-4bit",
+                    modelType: "mistral3",
+                    textConfigModelType: "mistral4",
+                    parameterCountB: 119,
+                    routedExperts: 128,
+                    expertsPerToken: 2,
+                    keyHeadDimension: 128,
+                    valueHeadDimension: 128
+                ) == nil
+            )
+        }
+
         @Test func testQwen35TwoBUses256HeadDimensions() throws {
             let profile = try #require(
                 TurboQuantProfileRegistry.bundled.profile(
@@ -669,13 +919,21 @@ extension MLXRuntimeSwiftTests {
                 #expect(bundledProfile.excludePatterns == jsonProfile.excludePatterns)
                 #expect(bundledProfile.architecture == jsonProfile.architecture)
                 #expect(bundledProfile.modelTypes == jsonProfile.modelTypes)
+                #expect(bundledProfile.textConfigModelTypes == jsonProfile.textConfigModelTypes)
                 #expect(bundledProfile.modalities == jsonProfile.modalities)
                 #expect(bundledProfile.minParametersB == jsonProfile.minParametersB)
                 #expect(bundledProfile.maxParametersB == jsonProfile.maxParametersB)
                 #expect(bundledProfile.requiresModelType == jsonProfile.requiresModelType)
                 #expect(
+                    bundledProfile.requiresTextConfigModelType
+                        == jsonProfile.requiresTextConfigModelType
+                )
+                #expect(
                     bundledProfile.requiresHeadDimensions == jsonProfile.requiresHeadDimensions
                 )
+                #expect(bundledProfile.minRoutedExperts == jsonProfile.minRoutedExperts)
+                #expect(bundledProfile.maxRoutedExperts == jsonProfile.maxRoutedExperts)
+                #expect(bundledProfile.supportedExpertsPerToken == jsonProfile.supportedExpertsPerToken)
                 #expect(
                     bundledProfile.supportedKeyHeadDimensions
                         == jsonProfile.supportedKeyHeadDimensions

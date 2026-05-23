@@ -1,18 +1,18 @@
 {
   "schema_version": 2,
-  "id": "mistral-7b",
+  "id": "pixtral-12b",
   "exact_model_ids": [],
   "model_patterns": [
-    "*mistral-7b",
-    "*mistral-7b-*",
-    "*mistral7b",
-    "*mistral7b-*"
+    "*pixtral-12b",
+    "*pixtral-12b-*",
+    "*pixtral-12b-2409",
+    "*pixtral-12b-2409-*"
   ],
   "include_patterns": [
-    "*mistral-7b",
-    "*mistral-7b-*",
-    "*mistral7b",
-    "*mistral7b-*"
+    "*pixtral-12b",
+    "*pixtral-12b-*",
+    "*pixtral-12b-2409",
+    "*pixtral-12b-2409-*"
   ],
   "exclude_patterns": [
     "*embedding*",
@@ -20,36 +20,31 @@
     "*reranker*",
     "*reward*",
     "*classifier*",
-    "*vl*",
-    "*vision*",
     "*video*",
     "*audio*",
     "*omni*",
     "*llava*",
     "*bunny*",
     "*paligemma*",
-    "*pixtral*",
     "*molmo*",
     "*moondream*",
     "*idefics*",
-    "*mixtral*",
-    "*pixtral*",
-    "*mamba-codestral*",
-    "*mamba*codestral*",
-    "*mllama*",
-    "*llama*",
-    "*e5-*"
+    "*mixtral*"
   ],
-  "architecture": "mistral",
+  "architecture": "pixtral",
   "model_types": [
-    "mistral"
+    "pixtral"
   ],
   "modalities": [
-    "text"
+    "visionText"
   ],
-  "min_parameters_b": 6.5,
-  "max_parameters_b": 7.5,
+  "min_parameters_b": 11,
+  "max_parameters_b": 13,
+  "text_config_model_types": [
+    "mistral"
+  ],
   "requires_model_type": true,
+  "requires_text_config_model_type": true,
   "requires_head_dimensions": true,
   "supported_key_head_dimensions": [
     128

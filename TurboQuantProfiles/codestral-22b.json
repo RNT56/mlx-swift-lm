@@ -1,18 +1,18 @@
 {
   "schema_version": 2,
-  "id": "mistral-7b",
+  "id": "codestral-22b",
   "exact_model_ids": [],
   "model_patterns": [
-    "*mistral-7b",
-    "*mistral-7b-*",
-    "*mistral7b",
-    "*mistral7b-*"
+    "*codestral-22b",
+    "*codestral-22b-*",
+    "*codestral-22b-v0.1",
+    "*codestral-22b-v0.1-*"
   ],
   "include_patterns": [
-    "*mistral-7b",
-    "*mistral-7b-*",
-    "*mistral7b",
-    "*mistral7b-*"
+    "*codestral-22b",
+    "*codestral-22b-*",
+    "*codestral-22b-v0.1",
+    "*codestral-22b-v0.1-*"
   ],
   "exclude_patterns": [
     "*embedding*",
@@ -38,7 +38,8 @@
     "*mamba*codestral*",
     "*mllama*",
     "*llama*",
-    "*e5-*"
+    "*mamba-codestral*",
+    "*mamba*codestral*"
   ],
   "architecture": "mistral",
   "model_types": [
@@ -47,8 +48,8 @@
   "modalities": [
     "text"
   ],
-  "min_parameters_b": 6.5,
-  "max_parameters_b": 7.5,
+  "min_parameters_b": 21,
+  "max_parameters_b": 23,
   "requires_model_type": true,
   "requires_head_dimensions": true,
   "supported_key_head_dimensions": [

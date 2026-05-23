@@ -1,18 +1,18 @@
 {
   "schema_version": 2,
-  "id": "mistral-7b",
+  "id": "llama-2-13b",
   "exact_model_ids": [],
   "model_patterns": [
-    "*mistral-7b",
-    "*mistral-7b-*",
-    "*mistral7b",
-    "*mistral7b-*"
+    "*llama-2-13b",
+    "*llama-2-13b-*",
+    "*llama2-13b",
+    "*llama2-13b-*"
   ],
   "include_patterns": [
-    "*mistral-7b",
-    "*mistral-7b-*",
-    "*mistral7b",
-    "*mistral7b-*"
+    "*llama-2-13b",
+    "*llama-2-13b-*",
+    "*llama2-13b",
+    "*llama2-13b-*"
   ],
   "exclude_patterns": [
     "*embedding*",
@@ -32,23 +32,28 @@
     "*molmo*",
     "*moondream*",
     "*idefics*",
-    "*mixtral*",
-    "*pixtral*",
-    "*mamba-codestral*",
-    "*mamba*codestral*",
     "*mllama*",
-    "*llama*",
-    "*e5-*"
+    "*llama-3.2-vision*",
+    "*llama3.2-vision*",
+    "*llama-4-*",
+    "*llama4-*",
+    "*llama-4-scout*",
+    "*llama4-scout*",
+    "*llama-4-maverick*",
+    "*llama4-maverick*",
+    "*mixtral*",
+    "*mamba-codestral*",
+    "*mamba*codestral*"
   ],
-  "architecture": "mistral",
+  "architecture": "llama",
   "model_types": [
-    "mistral"
+    "llama"
   ],
   "modalities": [
     "text"
   ],
-  "min_parameters_b": 6.5,
-  "max_parameters_b": 7.5,
+  "min_parameters_b": 12,
+  "max_parameters_b": 14,
   "requires_model_type": true,
   "requires_head_dimensions": true,
   "supported_key_head_dimensions": [
@@ -67,13 +72,11 @@
     "causal"
   ],
   "supported_context_lengths": [
+    2048,
     4096,
-    8192,
-    16384,
-    32768,
-    65536
+    8192
   ],
-  "safe_context_length": 65536,
+  "safe_context_length": 8192,
   "quality_profile": "balanced",
   "backend": "metalPolarQJL",
   "optimization_policy": "auto",
@@ -84,6 +87,6 @@
   "confidence": 0.75,
   "measured": {},
   "notes": [
-    "Mistral profiles are config-backed experimental profiles gated on model_type, nested text_config.model_type where required, and explicit KV head dimensions."
+    "Llama profiles are config-backed experimental profiles gated on model_type=llama and explicit KV head dimensions."
   ]
 }

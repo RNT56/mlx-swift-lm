@@ -1,18 +1,18 @@
 {
   "schema_version": 2,
-  "id": "mistral-7b",
+  "id": "ministral-8b-2410",
   "exact_model_ids": [],
   "model_patterns": [
-    "*mistral-7b",
-    "*mistral-7b-*",
-    "*mistral7b",
-    "*mistral7b-*"
+    "*ministral-8b",
+    "*ministral-8b-*",
+    "*ministral-8b-2410",
+    "*ministral-8b-2410-*"
   ],
   "include_patterns": [
-    "*mistral-7b",
-    "*mistral-7b-*",
-    "*mistral7b",
-    "*mistral7b-*"
+    "*ministral-8b",
+    "*ministral-8b-*",
+    "*ministral-8b-2410",
+    "*ministral-8b-2410-*"
   ],
   "exclude_patterns": [
     "*embedding*",
@@ -37,8 +37,7 @@
     "*mamba-codestral*",
     "*mamba*codestral*",
     "*mllama*",
-    "*llama*",
-    "*e5-*"
+    "*llama*"
   ],
   "architecture": "mistral",
   "model_types": [
@@ -47,8 +46,8 @@
   "modalities": [
     "text"
   ],
-  "min_parameters_b": 6.5,
-  "max_parameters_b": 7.5,
+  "min_parameters_b": 7.5,
+  "max_parameters_b": 8.5,
   "requires_model_type": true,
   "requires_head_dimensions": true,
   "supported_key_head_dimensions": [
@@ -81,7 +80,7 @@
   "requires_fused_attention_self_test": false,
   "status": "experimental",
   "source": "profile-audit-2026-05-23",
-  "confidence": 0.75,
+  "confidence": 0.8,
   "measured": {},
   "notes": [
     "Mistral profiles are config-backed experimental profiles gated on model_type, nested text_config.model_type where required, and explicit KV head dimensions."

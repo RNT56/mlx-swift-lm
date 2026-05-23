@@ -82,6 +82,7 @@ public enum LLMTypeRegistry {
         "nemotron_h": create(NemotronHConfiguration.self, NemotronHModel.init),
         "afmoe": create(AfMoEConfiguration.self, AfMoEModel.init),
         "jamba": create(JambaConfiguration.self, JambaModel.init),
+        "ministral3": create(Mistral3TextConfiguration.self, Mistral3TextModel.init),
         "mistral3": { data in
             struct InnerType: Decodable {
                 struct TextConfig: Decodable {

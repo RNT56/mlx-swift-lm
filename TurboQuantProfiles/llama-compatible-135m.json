@@ -1,18 +1,18 @@
 {
   "schema_version": 2,
-  "id": "mistral-7b",
+  "id": "llama-compatible-135m",
   "exact_model_ids": [],
   "model_patterns": [
-    "*mistral-7b",
-    "*mistral-7b-*",
-    "*mistral7b",
-    "*mistral7b-*"
+    "*amd-llama-135m",
+    "*amd-llama-135m-*",
+    "*llama-135m",
+    "*llama-135m-*"
   ],
   "include_patterns": [
-    "*mistral-7b",
-    "*mistral-7b-*",
-    "*mistral7b",
-    "*mistral7b-*"
+    "*amd-llama-135m",
+    "*amd-llama-135m-*",
+    "*llama-135m",
+    "*llama-135m-*"
   ],
   "exclude_patterns": [
     "*embedding*",
@@ -32,29 +32,36 @@
     "*molmo*",
     "*moondream*",
     "*idefics*",
-    "*mixtral*",
-    "*pixtral*",
-    "*mamba-codestral*",
-    "*mamba*codestral*",
     "*mllama*",
-    "*llama*",
-    "*e5-*"
+    "*llama-3.2-vision*",
+    "*llama3.2-vision*",
+    "*llama-4-*",
+    "*llama4-*",
+    "*llama-4-scout*",
+    "*llama4-scout*",
+    "*llama-4-maverick*",
+    "*llama4-maverick*",
+    "*mixtral*",
+    "*mamba-codestral*",
+    "*mamba*codestral*"
   ],
-  "architecture": "mistral",
+  "architecture": "llama",
   "model_types": [
-    "mistral"
+    "llama"
   ],
   "modalities": [
     "text"
   ],
-  "min_parameters_b": 6.5,
-  "max_parameters_b": 7.5,
+  "min_parameters_b": 0.1,
+  "max_parameters_b": 0.16,
   "requires_model_type": true,
   "requires_head_dimensions": true,
   "supported_key_head_dimensions": [
+    64,
     128
   ],
   "supported_value_head_dimensions": [
+    64,
     128
   ],
   "recommended_scheme": "turbo4v2",
@@ -81,9 +88,9 @@
   "requires_fused_attention_self_test": false,
   "status": "experimental",
   "source": "profile-audit-2026-05-23",
-  "confidence": 0.75,
+  "confidence": 0.65,
   "measured": {},
   "notes": [
-    "Mistral profiles are config-backed experimental profiles gated on model_type, nested text_config.model_type where required, and explicit KV head dimensions."
+    "Llama profiles are config-backed experimental profiles gated on model_type=llama and explicit KV head dimensions."
   ]
 }
