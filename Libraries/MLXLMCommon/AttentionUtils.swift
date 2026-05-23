@@ -134,6 +134,91 @@ func packedQuantizedAttentionFallback(
     )
 }
 
+/// Keep prompt logits exact while still installing compressed KV for decode.
+private func turboQuantCompressedPrefillAttention(
+    queries: MLXArray,
+    keys: MLXArray,
+    values: MLXArray,
+    cache: KVCache?,
+    scale: Float,
+    mask: MLXFast.ScaledDotProductAttentionMaskMode,
+    sinks: MLXArray?
+) -> (output: MLXArray, state: AttentionKVState)? {
+    guard queries.dim(2) > 1, queries.dim(2) == keys.dim(2) else {
+        return nil
+    }
+    guard var turboQuantCache = cache as? TurboQuantCompressedKVCacheProtocol,
+        turboQuantCache.supportsCompressedAttention(
+            queries: queries,
+            keys: keys,
+            values: values,
+            mask: mask
+        )
+    else {
+        return nil
+    }
+
+    let previousOffset = turboQuantCache.offset
+    let previousState = turboQuantCache.state.map { $0[.ellipsis] }
+    let previousMetaState = turboQuantCache.metaState
+    do {
+        let (compressedKeys, compressedValues) = try turboQuantCache.updateCompressed(
+            keys: keys,
+            values: values
+        )
+        let state = AttentionKVState.turboQuant(
+            keys: compressedKeys,
+            values: compressedValues,
+            cache: turboQuantCache
+        )
+
+        if previousOffset == 0 {
+            return (
+                MLXFast.scaledDotProductAttention(
+                    queries: queries,
+                    keys: keys,
+                    values: values,
+                    scale: scale,
+                    mask: mask,
+                    sinks: sinks
+                ),
+                state
+            )
+        }
+
+        if let decodedKeys = try? turboQuantMetalDecodeAttention(
+            compressedKeys, outputDType: queries.dtype),
+            let decodedValues = try? turboQuantMetalDecodeAttention(
+                compressedValues, outputDType: queries.dtype)
+        {
+            return (
+                MLXFast.scaledDotProductAttention(
+                    queries: queries,
+                    keys: decodedKeys,
+                    values: decodedValues,
+                    scale: scale,
+                    mask: adjustedAttentionMask(
+                        mask,
+                        keyLength: compressedKeys.layout.logicalLength
+                    ),
+                    sinks: sinks
+                ),
+                state
+            )
+        }
+
+        return nil
+    } catch {
+        turboQuantCache.metaState = previousMetaState
+        turboQuantCache.state = previousState
+        if let baseCache = turboQuantCache as? BaseKVCache {
+            baseCache.offset = previousOffset
+        }
+        turboQuantCache.recordCompressedAttentionFailure(String(describing: error))
+        return nil
+    }
+}
+
 public func attentionWithKVState(
     queries: MLXArray,
     state: AttentionKVState,
@@ -286,6 +371,17 @@ public func attentionWithCacheUpdateReturningState(
             ),
             state
         )
+    }
+    if let prefill = turboQuantCompressedPrefillAttention(
+        queries: queries,
+        keys: keys,
+        values: values,
+        cache: cache,
+        scale: scale,
+        mask: mask,
+        sinks: sinks
+    ) {
+        return prefill
     }
     if let result = withTurboQuantCompressedCacheUpdate(
         queries: queries,

@@ -204,6 +204,57 @@ extension MLXRuntimeSwiftTests {
             #expect(cache.attentionDiagnostics.rawFallbackAllocated == false)
         }
 
+        @Test func testTurboQuantPrefillUsesRawAttentionOutputWhenAvailable() {
+            guard TurboQuantKernelAvailability.current.supportsMetalPolarQJLAttention else {
+                return
+            }
+
+            let qValues: [Float] = (0 ..< (1 * 4 * 3 * 256)).map { index in
+                let position = Double(index)
+                return Float(0.27 * sin(position * 0.013) + 0.09 * cos(position * 0.071))
+            }
+            let kValues: [Float] = (0 ..< (1 * 2 * 3 * 256)).map { index in
+                let position = Double(index)
+                return Float(0.22 * cos(position * 0.017) - 0.08 * sin(position * 0.057))
+            }
+            let vValues: [Float] = (0 ..< (1 * 2 * 3 * 256)).map { index in
+                let position = Double(index)
+                return Float(0.18 * sin(position * 0.023) + 0.12 * cos(position * 0.043))
+            }
+            let queries = MLXArray(qValues, [1, 4, 3, 256])
+            let keys = MLXArray(kValues, [1, 2, 3, 256])
+            let values = MLXArray(vValues, [1, 2, 3, 256])
+            let cache = TurboQuantKVCache(
+                preset: .turbo4v2,
+                groupSize: 64,
+                backend: .metalPolarQJL,
+                seed: 0xA17_0000_0000_0001,
+                valueBits: 4
+            )
+
+            let output = attentionWithCacheUpdate(
+                queries: queries,
+                keys: keys,
+                values: values,
+                cache: cache,
+                scale: 1 / sqrt(Float(256)),
+                mask: .causal
+            )
+            let reference = MLXFast.scaledDotProductAttention(
+                queries: queries,
+                keys: keys,
+                values: values,
+                scale: 1 / sqrt(Float(256)),
+                mask: .causal
+            )
+
+            #expect(output.shape == [1, 4, 3, 256])
+            #expect(allClose(output, reference, rtol: 1e-5, atol: 1e-5).item(Bool.self))
+            #expect(cache.offset == 3)
+            #expect(cache.compressedState != nil)
+            #expect(cache.attentionDiagnostics.rawFallbackAllocated == false)
+        }
+
         @Test func testMakeAttentionKVCacheHonorsTurboQuantParameters() throws {
             let parameters = GenerateParameters(
                 maxKVSize: 48,
