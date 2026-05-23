@@ -59,6 +59,15 @@ Current Qwen3.5/Qwen3.6 profile coverage includes MLX Community dense 0.8B, 2B,
 122B-A10B, and 397B-A17B MoE families. Qwen3.7 is not profiled until open MLX
 weights are available.
 
+Current Gemma profile coverage includes config-backed MLX Community Gemma 2 2B,
+9B, and 27B; Gemma 3 270M, 1B, 4B, 12B, and 27B; Gemma 3n E2B and E4B; and
+Gemma 4 E2B, E4B, 26B-A4B, and 31B families. SEA-LION Gemma derivatives are
+covered only when their `config.json` model type and KV head dimensions match the
+underlying Gemma family. Gemma 4 profiles account for both 256-dimensional
+sliding heads and 512-dimensional global heads. These profiles are experimental
+until benchmark and perplexity measurements are reproduced for specific
+revisions.
+
 ## More Loading Scenarios
 
 Load from a local directory:

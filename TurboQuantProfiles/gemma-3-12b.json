@@ -1,27 +1,38 @@
 {
   "schema_version": 2,
-  "id": "gemma-3n",
+  "id": "gemma-3-12b",
   "exact_model_ids": [],
   "model_patterns": [
-    "*gemma-3n",
-    "*gemma-3n-*",
-    "*gemma3n",
-    "*gemma3n-*"
+    "*gemma-3-12b",
+    "*gemma-3-12b-*",
+    "*gemma3-12b",
+    "*gemma3-12b-*",
+    "*gemma-3-text-12b",
+    "*gemma-3-text-12b-*",
+    "*gemma3-text-12b",
+    "*gemma3-text-12b-*",
+    "*gemma-3-glitter-12b",
+    "*gemma-3-glitter-12b-*"
   ],
   "include_patterns": [
-    "*gemma-3n",
-    "*gemma-3n-*",
-    "*gemma3n",
-    "*gemma3n-*"
+    "*gemma-3-12b",
+    "*gemma-3-12b-*",
+    "*gemma3-12b",
+    "*gemma3-12b-*",
+    "*gemma-3-text-12b",
+    "*gemma-3-text-12b-*",
+    "*gemma3-text-12b",
+    "*gemma3-text-12b-*",
+    "*gemma-3-glitter-12b",
+    "*gemma-3-glitter-12b-*"
   ],
   "exclude_patterns": [
     "*embedding*",
     "*embed*",
+    "*embeddinggemma*",
     "*reranker*",
     "*reward*",
     "*classifier*",
-    "*vl*",
-    "*vision*",
     "*video*",
     "*audio*",
     "*omni*",
@@ -32,26 +43,26 @@
     "*molmo*",
     "*moondream*",
     "*idefics*",
-    "*embeddinggemma*"
+    "*gemma-3n*",
+    "*gemma3n*"
   ],
-  "architecture": "gemma3n",
+  "architecture": "gemma3",
   "model_types": [
-    "gemma3n"
+    "gemma3",
+    "gemma3_text"
   ],
   "modalities": [
     "text",
     "visionText"
   ],
-  "min_parameters_b": 0,
-  "max_parameters_b": 8.5,
+  "min_parameters_b": 11,
+  "max_parameters_b": 13.5,
+  "requires_model_type": true,
+  "requires_head_dimensions": true,
   "supported_key_head_dimensions": [
-    64,
-    128,
     256
   ],
   "supported_value_head_dimensions": [
-    64,
-    128,
     256
   ],
   "recommended_scheme": "turbo4v2",
@@ -78,11 +89,12 @@
   "requires_fused_attention_self_test": false,
   "status": "experimental",
   "source": "profile-audit-2026-05-23",
-  "confidence": 0.85,
+  "confidence": 0.8,
   "measured": {},
   "notes": [
     "Uses ordinary MLX model weights; TurboQuant applies only to runtime KV-cache state.",
-    "Shared-KV layers use AttentionKVState so compressed state can be reused without raw KV materialization.",
-    "Runtime shape checks and Metal self-tests remain authoritative."
+    "Measured quality and throughput fields are intentionally empty until reproduced on target hardware.",
+    "Runtime shape checks and Metal self-tests remain authoritative.",
+    "Gemma 2/3/3n/4 profiles are config-backed experimental profiles; measured quality and throughput validation is still pending."
   ]
 }

@@ -192,13 +192,191 @@ extension MLXRuntimeSwiftTests {
             let profile = try #require(
                 TurboQuantProfileRegistry.bundled.profile(
                     for: "mlx-community/gemma-3n-E4B-it-lm-4bit",
+                    modelType: "gemma3n",
+                    parameterCountB: 4,
                     keyHeadDimension: 256,
                     valueHeadDimension: 256
                 )
             )
 
-            #expect(profile.id == "gemma-3n")
+            #expect(profile.id == "gemma-3n-e4b")
             #expect(profile.architecture == "gemma3n")
+        }
+
+        @Test func testGemma2ProfilesMatchCurrentMLXCommunityConfigs() throws {
+            let registry = TurboQuantProfileRegistry.bundled
+            let examples: [(String, String, Double, Int)] = [
+                ("mlx-community/gemma-2-2b-it-4bit", "gemma-2-2b", 2, 256),
+                ("mlx-community/gemma-2-baku-2b-it-4bit", "gemma-2-2b", 2, 256),
+                ("mlx-community/gemma-2-9b-it-4bit", "gemma-2-9b", 9, 256),
+                ("mlx-community/Gemma-SEA-LION-v3-9B-IT-mlx-4bit", "gemma-2-9b", 9, 256),
+                ("mlx-community/gemma-2-27b-it-4bit", "gemma-2-27b", 27, 128),
+                ("mlx-community/TheDrummer_Big-Tiger-Gemma-27B-v1_4bit", "gemma-2-27b", 27, 128),
+            ]
+
+            for (modelID, expectedProfileID, parameterCountB, headDimension) in examples {
+                let profile = try #require(
+                    registry.profile(
+                        for: modelID,
+                        modelType: "gemma2",
+                        parameterCountB: parameterCountB,
+                        keyHeadDimension: headDimension,
+                        valueHeadDimension: headDimension
+                    )
+                )
+                #expect(profile.id == expectedProfileID)
+            }
+        }
+
+        @Test func testGemma3ProfilesMatchCurrentMLXCommunityConfigs() throws {
+            let registry = TurboQuantProfileRegistry.bundled
+            let examples: [(String, String, String, Double, Int)] = [
+                ("mlx-community/gemma-3-270m-it-4bit", "gemma-3-270m", "gemma3_text", 0.27, 256),
+                ("mlx-community/gemma-3-1b-it-4bit", "gemma-3-1b", "gemma3_text", 1, 256),
+                ("mlx-community/gemma-3-4b-it-qat-4bit", "gemma-3-4b", "gemma3", 4, 256),
+                ("mlx-community/gemma-3-text-4b-it-4bit", "gemma-3-4b", "gemma3", 4, 320),
+                ("mlx-community/Gemma-SEA-LION-v4-4B-VL-mlx-3bit", "gemma-3-4b", "gemma3", 4, 256),
+                ("mlx-community/gemma-3-12b-it-qat-4bit", "gemma-3-12b", "gemma3", 12, 256),
+                ("mlx-community/gemma-3-27b-it-4bit", "gemma-3-27b", "gemma3", 27, 128),
+                ("mlx-community/Gemma-SEA-LION-v4-27B-IT-mlx-4bit", "gemma-3-27b", "gemma3", 27, 128),
+            ]
+
+            for (modelID, expectedProfileID, modelType, parameterCountB, headDimension) in examples {
+                let profile = try #require(
+                    registry.profile(
+                        for: modelID,
+                        modelType: modelType,
+                        parameterCountB: parameterCountB,
+                        keyHeadDimension: headDimension,
+                        valueHeadDimension: headDimension
+                    )
+                )
+                #expect(profile.id == expectedProfileID)
+            }
+        }
+
+        @Test func testGemma3nAndGemma4ProfilesMatchCurrentMLXCommunityConfigs() throws {
+            let registry = TurboQuantProfileRegistry.bundled
+            let examples: [(String, String, String, Double)] = [
+                ("mlx-community/gemma-3n-E2B-it-lm-4bit", "gemma-3n-e2b", "gemma3n", 2),
+                ("mlx-community/gemma-3n-E4B-it-lm-4bit", "gemma-3n-e4b", "gemma3n", 4),
+                (
+                    "mlx-community/Huihui-gemma-3n-E4B-it-abliterated-lm-4bit",
+                    "gemma-3n-e4b",
+                    "gemma3n",
+                    4
+                ),
+                ("mlx-community/gemma-4-e2b-it-4bit", "gemma-4-e2b", "gemma4", 2),
+                ("mlx-community/Gemma4-E2B-IT-Text-int4", "gemma-4-e2b", "gemma4_text", 2),
+                ("mlx-community/gemma-4-e4b-it-4bit", "gemma-4-e4b", "gemma4", 4),
+                ("mlx-community/gemma-4-26b-a4b-it-4bit", "gemma-4-26b-a4b", "gemma4", 26),
+                ("mlx-community/gemma-4-26b-it-OptiQ-4bit", "gemma-4-26b-a4b", "gemma4", 26),
+                ("mlx-community/gemma-4-31b-it-4bit", "gemma-4-31b", "gemma4", 31),
+                ("mlx-community/gemma-4-31B-it-assistant-bf16", "gemma-4-31b", "gemma4_assistant", 31),
+            ]
+
+            for (modelID, expectedProfileID, modelType, parameterCountB) in examples {
+                let profile = try #require(
+                    registry.profile(
+                        for: modelID,
+                        modelType: modelType,
+                        parameterCountB: parameterCountB,
+                        keyHeadDimension: 256,
+                        valueHeadDimension: 256
+                    )
+                )
+                #expect(profile.id == expectedProfileID)
+            }
+        }
+
+        @Test func testGemmaProfilesFailClosedForIncompatibleMetadata() {
+            let registry = TurboQuantProfileRegistry.bundled
+
+            #expect(
+                registry.profile(
+                    for: "mlx-community/gemma-3-4b-it-qat-4bit",
+                    parameterCountB: 4,
+                    keyHeadDimension: 256,
+                    valueHeadDimension: 256
+                ) == nil
+            )
+            #expect(
+                registry.profile(
+                    for: "mlx-community/gemma-3-4b-it-qat-4bit",
+                    modelType: "gemma3",
+                    parameterCountB: 4
+                ) == nil
+            )
+            #expect(
+                registry.profile(
+                    for: "mlx-community/gemma-3-4b-it-qat-4bit",
+                    modelType: "gemma2",
+                    parameterCountB: 4,
+                    keyHeadDimension: 256,
+                    valueHeadDimension: 256
+                ) == nil
+            )
+            #expect(
+                registry.profile(
+                    for: "mlx-community/gemma-3-4b-it-qat-4bit",
+                    modelType: "gemma3",
+                    parameterCountB: 4,
+                    keyHeadDimension: 128,
+                    valueHeadDimension: 128
+                ) == nil
+            )
+            #expect(
+                registry.profile(
+                    for: "mlx-community/gemma-3-12b-it-4bit",
+                    modelType: "gemma3",
+                    parameterCountB: 12,
+                    keyHeadDimension: 240,
+                    valueHeadDimension: 240
+                ) == nil
+            )
+            #expect(
+                registry.profile(
+                    for: "mlx-community/gemma-3-4b-it-4bit",
+                    modelType: "gemma3",
+                    parameterCountB: 4
+                ) == nil
+            )
+            #expect(
+                registry.profile(
+                    for: "mlx-community/gemma-3n-E4B-it-lm-4bit",
+                    modelType: "gemma3",
+                    parameterCountB: 4,
+                    keyHeadDimension: 256,
+                    valueHeadDimension: 256
+                ) == nil
+            )
+            #expect(
+                registry.profile(
+                    for: "mlx-community/gemma-4-31b-it-4bit",
+                    modelType: "gemma4",
+                    parameterCountB: 4,
+                    keyHeadDimension: 256,
+                    valueHeadDimension: 256
+                ) == nil
+            )
+            #expect(
+                registry.profile(
+                    for: "mlx-community/embeddinggemma-300m-4bit",
+                    modelType: "gemma3_text",
+                    parameterCountB: 0.3,
+                    keyHeadDimension: 256,
+                    valueHeadDimension: 256
+                ) == nil
+            )
+            #expect(
+                registry.profile(
+                    for: "mlx-community/paligemma-3b-mix-448-8bit",
+                    modelType: "gemma",
+                    parameterCountB: 3,
+                    keyHeadDimension: 256,
+                    valueHeadDimension: 256
+                ) == nil
+            )
         }
 
         @Test func testQwen35TwoBUses256HeadDimensions() throws {

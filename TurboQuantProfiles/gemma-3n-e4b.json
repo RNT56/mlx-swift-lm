@@ -1,27 +1,30 @@
 {
   "schema_version": 2,
-  "id": "gemma-4",
+  "id": "gemma-3n-e4b",
   "exact_model_ids": [],
   "model_patterns": [
-    "*gemma-4",
-    "*gemma-4-*",
-    "*gemma4",
-    "*gemma4-*"
+    "*gemma-3n-e4b",
+    "*gemma-3n-e4b-*",
+    "*gemma3n-e4b",
+    "*gemma3n-e4b-*",
+    "*huihui-gemma-3n-e4b",
+    "*huihui-gemma-3n-e4b-*"
   ],
   "include_patterns": [
-    "*gemma-4",
-    "*gemma-4-*",
-    "*gemma4",
-    "*gemma4-*"
+    "*gemma-3n-e4b",
+    "*gemma-3n-e4b-*",
+    "*gemma3n-e4b",
+    "*gemma3n-e4b-*",
+    "*huihui-gemma-3n-e4b",
+    "*huihui-gemma-3n-e4b-*"
   ],
   "exclude_patterns": [
     "*embedding*",
     "*embed*",
+    "*embeddinggemma*",
     "*reranker*",
     "*reward*",
     "*classifier*",
-    "*vl*",
-    "*vision*",
     "*video*",
     "*audio*",
     "*omni*",
@@ -31,29 +34,25 @@
     "*pixtral*",
     "*molmo*",
     "*moondream*",
-    "*idefics*",
-    "*embeddinggemma*"
+    "*idefics*"
   ],
-  "architecture": "gemma4",
+  "architecture": "gemma3n",
   "model_types": [
-    "gemma4",
-    "gemma4_text",
-    "gemma4_assistant"
+    "gemma3n",
+    "gemma3n_text"
   ],
   "modalities": [
     "text",
     "visionText"
   ],
-  "min_parameters_b": 0,
-  "max_parameters_b": 8.5,
+  "min_parameters_b": 3.5,
+  "max_parameters_b": 4.5,
+  "requires_model_type": true,
+  "requires_head_dimensions": true,
   "supported_key_head_dimensions": [
-    64,
-    128,
     256
   ],
   "supported_value_head_dimensions": [
-    64,
-    128,
     256
   ],
   "recommended_scheme": "turbo4v2",
@@ -84,7 +83,9 @@
   "measured": {},
   "notes": [
     "Uses ordinary MLX model weights; TurboQuant applies only to runtime KV-cache state.",
-    "Shared-KV layers use AttentionKVState so compressed state can be reused without raw KV materialization.",
-    "Runtime shape checks and Metal self-tests remain authoritative."
+    "Measured quality and throughput fields are intentionally empty until reproduced on target hardware.",
+    "Runtime shape checks and Metal self-tests remain authoritative.",
+    "Gemma 2/3/3n/4 profiles are config-backed experimental profiles; measured quality and throughput validation is still pending.",
+    "Shared-KV layers use AttentionKVState so compressed state can be reused without raw KV materialization."
   ]
 }

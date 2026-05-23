@@ -6,22 +6,37 @@
     "*gemma-3-4b",
     "*gemma-3-4b-*",
     "*gemma3-4b",
-    "*gemma3-4b-*"
+    "*gemma3-4b-*",
+    "*gemma-3-text-4b",
+    "*gemma-3-text-4b-*",
+    "*gemma3-text-4b",
+    "*gemma3-text-4b-*",
+    "*text-to-cypher-gemma-3-4b",
+    "*text-to-cypher-gemma-3-4b-*",
+    "*gemma-sea-lion-v4-4b",
+    "*gemma-sea-lion-v4-4b-*"
   ],
   "include_patterns": [
     "*gemma-3-4b",
     "*gemma-3-4b-*",
     "*gemma3-4b",
-    "*gemma3-4b-*"
+    "*gemma3-4b-*",
+    "*gemma-3-text-4b",
+    "*gemma-3-text-4b-*",
+    "*gemma3-text-4b",
+    "*gemma3-text-4b-*",
+    "*text-to-cypher-gemma-3-4b",
+    "*text-to-cypher-gemma-3-4b-*",
+    "*gemma-sea-lion-v4-4b",
+    "*gemma-sea-lion-v4-4b-*"
   ],
   "exclude_patterns": [
     "*embedding*",
     "*embed*",
+    "*embeddinggemma*",
     "*reranker*",
     "*reward*",
     "*classifier*",
-    "*vl*",
-    "*vision*",
     "*video*",
     "*audio*",
     "*omni*",
@@ -33,12 +48,12 @@
     "*moondream*",
     "*idefics*",
     "*gemma-3n*",
-    "*gemma3n*",
-    "*embeddinggemma*"
+    "*gemma3n*"
   ],
   "architecture": "gemma3",
   "model_types": [
-    "gemma3"
+    "gemma3",
+    "gemma3_text"
   ],
   "modalities": [
     "text",
@@ -46,13 +61,15 @@
   ],
   "min_parameters_b": 3.5,
   "max_parameters_b": 4.5,
+  "requires_model_type": true,
+  "requires_head_dimensions": true,
   "supported_key_head_dimensions": [
-    128,
-    256
+    256,
+    320
   ],
   "supported_value_head_dimensions": [
-    128,
-    256
+    256,
+    320
   ],
   "recommended_scheme": "turbo4v2",
   "fallback_scheme": "turbo3_5",
@@ -83,6 +100,7 @@
   "notes": [
     "Uses ordinary MLX model weights; TurboQuant applies only to runtime KV-cache state.",
     "Measured quality and throughput fields are intentionally empty until reproduced on target hardware.",
-    "Runtime shape checks and Metal self-tests remain authoritative."
+    "Runtime shape checks and Metal self-tests remain authoritative.",
+    "Gemma 2/3/3n/4 profiles are config-backed experimental profiles; measured quality and throughput validation is still pending."
   ]
 }

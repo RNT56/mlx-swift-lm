@@ -1,26 +1,22 @@
 {
   "schema_version": 2,
-  "id": "gemma-2-2b",
+  "id": "gemma-2-27b",
   "exact_model_ids": [],
   "model_patterns": [
-    "*gemma-2-2b",
-    "*gemma-2-2b-*",
-    "*gemma2-2b",
-    "*gemma2-2b-*",
-    "*gemma-2-baku-2b",
-    "*gemma-2-baku-2b-*",
-    "*dolphin-gemma2-2b",
-    "*dolphin-gemma2-2b-*"
+    "*gemma-2-27b",
+    "*gemma-2-27b-*",
+    "*gemma2-27b",
+    "*gemma2-27b-*",
+    "*big-tiger-gemma-27b",
+    "*big-tiger-gemma-27b-*"
   ],
   "include_patterns": [
-    "*gemma-2-2b",
-    "*gemma-2-2b-*",
-    "*gemma2-2b",
-    "*gemma2-2b-*",
-    "*gemma-2-baku-2b",
-    "*gemma-2-baku-2b-*",
-    "*dolphin-gemma2-2b",
-    "*dolphin-gemma2-2b-*"
+    "*gemma-2-27b",
+    "*gemma-2-27b-*",
+    "*gemma2-27b",
+    "*gemma2-27b-*",
+    "*big-tiger-gemma-27b",
+    "*big-tiger-gemma-27b-*"
   ],
   "exclude_patterns": [
     "*embedding*",
@@ -50,15 +46,15 @@
   "modalities": [
     "text"
   ],
-  "min_parameters_b": 1.5,
-  "max_parameters_b": 2.5,
+  "min_parameters_b": 25,
+  "max_parameters_b": 29,
   "requires_model_type": true,
   "requires_head_dimensions": true,
   "supported_key_head_dimensions": [
-    256
+    128
   ],
   "supported_value_head_dimensions": [
-    256
+    128
   ],
   "recommended_scheme": "turbo4v2",
   "fallback_scheme": "turbo3_5",

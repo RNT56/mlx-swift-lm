@@ -1,26 +1,26 @@
 {
   "schema_version": 2,
-  "id": "gemma-2-2b",
+  "id": "gemma-2-9b",
   "exact_model_ids": [],
   "model_patterns": [
-    "*gemma-2-2b",
-    "*gemma-2-2b-*",
-    "*gemma2-2b",
-    "*gemma2-2b-*",
-    "*gemma-2-baku-2b",
-    "*gemma-2-baku-2b-*",
-    "*dolphin-gemma2-2b",
-    "*dolphin-gemma2-2b-*"
+    "*gemma-2-9b",
+    "*gemma-2-9b-*",
+    "*gemma2-9b",
+    "*gemma2-9b-*",
+    "*gemma-sea-lion-v3-9b",
+    "*gemma-sea-lion-v3-9b-*",
+    "*tiger-gemma-9b",
+    "*tiger-gemma-9b-*"
   ],
   "include_patterns": [
-    "*gemma-2-2b",
-    "*gemma-2-2b-*",
-    "*gemma2-2b",
-    "*gemma2-2b-*",
-    "*gemma-2-baku-2b",
-    "*gemma-2-baku-2b-*",
-    "*dolphin-gemma2-2b",
-    "*dolphin-gemma2-2b-*"
+    "*gemma-2-9b",
+    "*gemma-2-9b-*",
+    "*gemma2-9b",
+    "*gemma2-9b-*",
+    "*gemma-sea-lion-v3-9b",
+    "*gemma-sea-lion-v3-9b-*",
+    "*tiger-gemma-9b",
+    "*tiger-gemma-9b-*"
   ],
   "exclude_patterns": [
     "*embedding*",
@@ -50,8 +50,8 @@
   "modalities": [
     "text"
   ],
-  "min_parameters_b": 1.5,
-  "max_parameters_b": 2.5,
+  "min_parameters_b": 8.5,
+  "max_parameters_b": 9.5,
   "requires_model_type": true,
   "requires_head_dimensions": true,
   "supported_key_head_dimensions": [

@@ -1,35 +1,30 @@
 {
   "schema_version": 2,
-  "id": "gemma-2-2b",
+  "id": "gemma-3-270m",
   "exact_model_ids": [],
   "model_patterns": [
-    "*gemma-2-2b",
-    "*gemma-2-2b-*",
-    "*gemma2-2b",
-    "*gemma2-2b-*",
-    "*gemma-2-baku-2b",
-    "*gemma-2-baku-2b-*",
-    "*dolphin-gemma2-2b",
-    "*dolphin-gemma2-2b-*"
+    "*gemma-3-270m",
+    "*gemma-3-270m-*",
+    "*gemma3-270m",
+    "*gemma3-270m-*",
+    "*huihui-gemma-3-270m",
+    "*huihui-gemma-3-270m-*"
   ],
   "include_patterns": [
-    "*gemma-2-2b",
-    "*gemma-2-2b-*",
-    "*gemma2-2b",
-    "*gemma2-2b-*",
-    "*gemma-2-baku-2b",
-    "*gemma-2-baku-2b-*",
-    "*dolphin-gemma2-2b",
-    "*dolphin-gemma2-2b-*"
+    "*gemma-3-270m",
+    "*gemma-3-270m-*",
+    "*gemma3-270m",
+    "*gemma3-270m-*",
+    "*huihui-gemma-3-270m",
+    "*huihui-gemma-3-270m-*"
   ],
   "exclude_patterns": [
     "*embedding*",
     "*embed*",
+    "*embeddinggemma*",
     "*reranker*",
     "*reward*",
     "*classifier*",
-    "*vl*",
-    "*vision*",
     "*video*",
     "*audio*",
     "*omni*",
@@ -40,18 +35,19 @@
     "*molmo*",
     "*moondream*",
     "*idefics*",
-    "*embeddinggemma*",
-    "*paligemma*"
+    "*gemma-3n*",
+    "*gemma3n*"
   ],
-  "architecture": "gemma2",
+  "architecture": "gemma3",
   "model_types": [
-    "gemma2"
+    "gemma3",
+    "gemma3_text"
   ],
   "modalities": [
     "text"
   ],
-  "min_parameters_b": 1.5,
-  "max_parameters_b": 2.5,
+  "min_parameters_b": 0.2,
+  "max_parameters_b": 0.35,
   "requires_model_type": true,
   "requires_head_dimensions": true,
   "supported_key_head_dimensions": [
@@ -71,9 +67,12 @@
   ],
   "supported_context_lengths": [
     4096,
-    8192
+    8192,
+    16384,
+    32768,
+    65536
   ],
-  "safe_context_length": 8192,
+  "safe_context_length": 65536,
   "quality_profile": "balanced",
   "backend": "metalPolarQJL",
   "optimization_policy": "auto",
@@ -81,7 +80,7 @@
   "requires_fused_attention_self_test": false,
   "status": "experimental",
   "source": "profile-audit-2026-05-23",
-  "confidence": 0.8,
+  "confidence": 0.75,
   "measured": {},
   "notes": [
     "Uses ordinary MLX model weights; TurboQuant applies only to runtime KV-cache state.",

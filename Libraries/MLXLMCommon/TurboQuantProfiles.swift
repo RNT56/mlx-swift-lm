@@ -903,6 +903,45 @@ private let qwen35ProfileNotes = [
     "Qwen3.5 and Qwen3.6 profiles are config-backed with verified 256-dimensional key and value heads."
 ]
 
+private let gemmaTextExcludePatterns =
+    commonNonTextExcludePatterns + [
+        "*embeddinggemma*",
+        "*paligemma*",
+    ]
+
+private let gemmaVisionTextExcludePatterns = [
+    "*embedding*",
+    "*embed*",
+    "*embeddinggemma*",
+    "*reranker*",
+    "*reward*",
+    "*classifier*",
+    "*video*",
+    "*audio*",
+    "*omni*",
+    "*llava*",
+    "*bunny*",
+    "*paligemma*",
+    "*pixtral*",
+    "*molmo*",
+    "*moondream*",
+    "*idefics*",
+]
+
+private let gemma3ExcludePatterns =
+    gemmaVisionTextExcludePatterns + [
+        "*gemma-3n*",
+        "*gemma3n*",
+    ]
+
+private let gemma2ModelTypes = ["gemma2"]
+private let gemma3ModelTypes = ["gemma3", "gemma3_text"]
+private let gemma3nModelTypes = ["gemma3n", "gemma3n_text"]
+private let gemma4ModelTypes = ["gemma4", "gemma4_text", "gemma4_assistant"]
+private let gemmaProfileNotes = [
+    "Gemma 2/3/3n/4 profiles are config-backed experimental profiles; measured quality and throughput validation is still pending."
+]
+
 private let bundledProfiles: [TurboQuantProfile] = [
     bundledProfile(
         id: "exaone-small",
@@ -925,21 +964,70 @@ private let bundledProfiles: [TurboQuantProfile] = [
     ),
     bundledProfile(
         id: "gemma-2-2b",
-        patterns: ["*gemma-2-2b", "*gemma-2-2b-*", "*gemma2-2b", "*gemma2-2b-*"],
-        excludePatterns: commonNonTextExcludePatterns + ["*embeddinggemma*"],
+        patterns: modelIDPatterns([
+            "gemma-2-2b",
+            "gemma2-2b",
+            "gemma-2-baku-2b",
+            "dolphin-gemma2-2b",
+        ]),
+        excludePatterns: gemmaTextExcludePatterns,
         architecture: "gemma2",
-        modelTypes: ["gemma2"],
+        modelTypes: gemma2ModelTypes,
         minParametersB: 1.5,
         maxParametersB: 2.5,
+        requiresModelType: true,
+        requiresHeadDimensions: true,
         supportedKeyHeadDimensions: [256],
         supportedContextLengths: [4096, 8192],
         safeContextLength: 8192,
-        confidence: 0.75
+        confidence: 0.8,
+        extraNotes: gemmaProfileNotes
+    ),
+    bundledProfile(
+        id: "gemma-2-9b",
+        patterns: modelIDPatterns([
+            "gemma-2-9b",
+            "gemma2-9b",
+            "gemma-sea-lion-v3-9b",
+            "tiger-gemma-9b",
+        ]),
+        excludePatterns: gemmaTextExcludePatterns,
+        architecture: "gemma2",
+        modelTypes: gemma2ModelTypes,
+        minParametersB: 8.5,
+        maxParametersB: 9.5,
+        requiresModelType: true,
+        requiresHeadDimensions: true,
+        supportedKeyHeadDimensions: [256],
+        supportedContextLengths: [4096, 8192],
+        safeContextLength: 8192,
+        confidence: 0.8,
+        extraNotes: gemmaProfileNotes
+    ),
+    bundledProfile(
+        id: "gemma-2-27b",
+        patterns: modelIDPatterns([
+            "gemma-2-27b",
+            "gemma2-27b",
+            "big-tiger-gemma-27b",
+        ]),
+        excludePatterns: gemmaTextExcludePatterns,
+        architecture: "gemma2",
+        modelTypes: gemma2ModelTypes,
+        minParametersB: 25,
+        maxParametersB: 29,
+        requiresModelType: true,
+        requiresHeadDimensions: true,
+        supportedKeyHeadDimensions: [128],
+        supportedContextLengths: [4096, 8192],
+        safeContextLength: 8192,
+        confidence: 0.8,
+        extraNotes: gemmaProfileNotes
     ),
     bundledProfile(
         id: "gemma-2b",
         patterns: ["*gemma-2b", "*gemma-2b-*"],
-        excludePatterns: commonNonTextExcludePatterns + [
+        excludePatterns: gemmaTextExcludePatterns + [
             "*gemma-2-2b*", "*gemma2-2b*", "*embeddinggemma*",
         ],
         architecture: "gemma",
@@ -952,67 +1040,233 @@ private let bundledProfiles: [TurboQuantProfile] = [
         confidence: 0.75
     ),
     bundledProfile(
-        id: "gemma-3-1b",
-        patterns: ["*gemma-3-1b", "*gemma-3-1b-*", "*gemma3-1b", "*gemma3-1b-*"],
-        excludePatterns: commonNonTextExcludePatterns + [
-            "*gemma-3n*", "*gemma3n*", "*embeddinggemma*",
-        ],
+        id: "gemma-3-270m",
+        patterns: modelIDPatterns([
+            "gemma-3-270m",
+            "gemma3-270m",
+            "huihui-gemma-3-270m",
+        ]),
+        excludePatterns: gemma3ExcludePatterns,
         architecture: "gemma3",
-        modelTypes: ["gemma3"],
-        modalities: [.text, .visionText],
+        modelTypes: gemma3ModelTypes,
+        modalities: [.text],
+        minParametersB: 0.2,
+        maxParametersB: 0.35,
+        requiresModelType: true,
+        requiresHeadDimensions: true,
+        supportedKeyHeadDimensions: [256],
+        confidence: 0.75,
+        extraNotes: gemmaProfileNotes
+    ),
+    bundledProfile(
+        id: "gemma-3-1b",
+        patterns: modelIDPatterns([
+            "gemma-3-1b",
+            "gemma3-1b",
+        ]),
+        excludePatterns: gemma3ExcludePatterns,
+        architecture: "gemma3",
+        modelTypes: gemma3ModelTypes,
+        modalities: [.text],
         minParametersB: 0.8,
         maxParametersB: 1.3,
+        requiresModelType: true,
+        requiresHeadDimensions: true,
         supportedKeyHeadDimensions: [256],
-        confidence: 0.75
+        confidence: 0.75,
+        extraNotes: gemmaProfileNotes
     ),
     bundledProfile(
         id: "gemma-3-4b",
-        patterns: ["*gemma-3-4b", "*gemma-3-4b-*", "*gemma3-4b", "*gemma3-4b-*"],
-        excludePatterns: commonNonTextExcludePatterns + [
-            "*gemma-3n*", "*gemma3n*", "*embeddinggemma*",
-        ],
+        patterns: modelIDPatterns([
+            "gemma-3-4b",
+            "gemma3-4b",
+            "gemma-3-text-4b",
+            "gemma3-text-4b",
+            "text-to-cypher-gemma-3-4b",
+            "gemma-sea-lion-v4-4b",
+        ]),
+        excludePatterns: gemma3ExcludePatterns,
         architecture: "gemma3",
-        modelTypes: ["gemma3"],
+        modelTypes: gemma3ModelTypes,
         modalities: [.text, .visionText],
         minParametersB: 3.5,
         maxParametersB: 4.5,
-        supportedKeyHeadDimensions: [128, 256],
-        confidence: 0.85
+        requiresModelType: true,
+        requiresHeadDimensions: true,
+        supportedKeyHeadDimensions: [256, 320],
+        confidence: 0.85,
+        extraNotes: gemmaProfileNotes
     ),
     bundledProfile(
-        id: "gemma-3n",
-        patterns: ["*gemma-3n", "*gemma-3n-*", "*gemma3n", "*gemma3n-*"],
-        excludePatterns: commonNonTextExcludePatterns + ["*embeddinggemma*"],
+        id: "gemma-3-12b",
+        patterns: modelIDPatterns([
+            "gemma-3-12b",
+            "gemma3-12b",
+            "gemma-3-text-12b",
+            "gemma3-text-12b",
+            "gemma-3-glitter-12b",
+        ]),
+        excludePatterns: gemma3ExcludePatterns,
+        architecture: "gemma3",
+        modelTypes: gemma3ModelTypes,
+        modalities: [.text, .visionText],
+        minParametersB: 11,
+        maxParametersB: 13.5,
+        requiresModelType: true,
+        requiresHeadDimensions: true,
+        supportedKeyHeadDimensions: [256],
+        confidence: 0.8,
+        extraNotes: gemmaProfileNotes
+    ),
+    bundledProfile(
+        id: "gemma-3-27b",
+        patterns: modelIDPatterns([
+            "gemma-3-27b",
+            "gemma3-27b",
+            "gemma-3-text-27b",
+            "gemma3-text-27b",
+            "gemma-sea-lion-v4-27b",
+        ]),
+        excludePatterns: gemma3ExcludePatterns,
+        architecture: "gemma3",
+        modelTypes: gemma3ModelTypes,
+        modalities: [.text, .visionText],
+        minParametersB: 25,
+        maxParametersB: 29,
+        requiresModelType: true,
+        requiresHeadDimensions: true,
+        supportedKeyHeadDimensions: [128],
+        confidence: 0.8,
+        extraNotes: gemmaProfileNotes
+    ),
+    bundledProfile(
+        id: "gemma-3n-e2b",
+        patterns: modelIDPatterns([
+            "gemma-3n-e2b",
+            "gemma3n-e2b",
+        ]),
+        excludePatterns: gemmaVisionTextExcludePatterns,
         architecture: "gemma3n",
-        modelTypes: ["gemma3n"],
+        modelTypes: gemma3nModelTypes,
         modalities: [.text, .visionText],
-        minParametersB: 0,
-        maxParametersB: 8.5,
-        supportedKeyHeadDimensions: [64, 128, 256],
+        minParametersB: 1.5,
+        maxParametersB: 2.5,
+        requiresModelType: true,
+        requiresHeadDimensions: true,
+        supportedKeyHeadDimensions: [256],
         confidence: 0.85,
-        extraNotes: [
+        extraNotes: gemmaProfileNotes + [
             "Shared-KV layers use AttentionKVState so compressed state can be reused without raw KV materialization."
         ]
     ),
     bundledProfile(
-        id: "gemma-4",
-        patterns: ["*gemma-4", "*gemma-4-*", "*gemma4", "*gemma4-*"],
-        excludePatterns: commonNonTextExcludePatterns + ["*embeddinggemma*"],
-        architecture: "gemma4",
-        modelTypes: ["gemma4", "gemma4_text", "gemma4_assistant"],
+        id: "gemma-3n-e4b",
+        patterns: modelIDPatterns([
+            "gemma-3n-e4b",
+            "gemma3n-e4b",
+            "huihui-gemma-3n-e4b",
+        ]),
+        excludePatterns: gemmaVisionTextExcludePatterns,
+        architecture: "gemma3n",
+        modelTypes: gemma3nModelTypes,
         modalities: [.text, .visionText],
-        minParametersB: 0,
-        maxParametersB: 8.5,
-        supportedKeyHeadDimensions: [64, 128, 256],
+        minParametersB: 3.5,
+        maxParametersB: 4.5,
+        requiresModelType: true,
+        requiresHeadDimensions: true,
+        supportedKeyHeadDimensions: [256],
         confidence: 0.85,
-        extraNotes: [
+        extraNotes: gemmaProfileNotes + [
             "Shared-KV layers use AttentionKVState so compressed state can be reused without raw KV materialization."
         ]
+    ),
+    bundledProfile(
+        id: "gemma-4-e2b",
+        patterns: modelIDPatterns([
+            "gemma-4-e2b",
+            "gemma4-e2b",
+        ]),
+        excludePatterns: gemmaVisionTextExcludePatterns,
+        architecture: "gemma4",
+        modelTypes: gemma4ModelTypes,
+        modalities: [.text, .visionText],
+        minParametersB: 1.5,
+        maxParametersB: 2.5,
+        requiresModelType: true,
+        requiresHeadDimensions: true,
+        supportedKeyHeadDimensions: [256, 512],
+        confidence: 0.85,
+        extraNotes: gemmaProfileNotes + [
+            "Shared-KV layers use AttentionKVState so compressed state can be reused without raw KV materialization."
+        ]
+    ),
+    bundledProfile(
+        id: "gemma-4-e4b",
+        patterns: modelIDPatterns([
+            "gemma-4-e4b",
+            "gemma4-e4b",
+        ]),
+        excludePatterns: gemmaVisionTextExcludePatterns,
+        architecture: "gemma4",
+        modelTypes: gemma4ModelTypes,
+        modalities: [.text, .visionText],
+        minParametersB: 3.5,
+        maxParametersB: 4.5,
+        requiresModelType: true,
+        requiresHeadDimensions: true,
+        supportedKeyHeadDimensions: [256, 512],
+        confidence: 0.85,
+        extraNotes: gemmaProfileNotes + [
+            "Shared-KV layers use AttentionKVState so compressed state can be reused without raw KV materialization."
+        ]
+    ),
+    bundledProfile(
+        id: "gemma-4-26b-a4b",
+        patterns: modelIDPatterns([
+            "gemma-4-26b",
+            "gemma4-26b",
+            "gemma-4-26b-a4b",
+            "gemma4-26b-a4b",
+            "gemma-4-text-26b-a4b",
+            "gemma4-text-26b-a4b",
+        ]),
+        excludePatterns: gemmaVisionTextExcludePatterns,
+        architecture: "gemma4",
+        modelTypes: gemma4ModelTypes,
+        modalities: [.text, .visionText],
+        minParametersB: 24,
+        maxParametersB: 28,
+        requiresModelType: true,
+        requiresHeadDimensions: true,
+        supportedKeyHeadDimensions: [256, 512],
+        confidence: 0.8,
+        extraNotes: gemmaProfileNotes + [
+            "Gemma 4 MoE active-parameter routing remains gated by config model_type and 256/512-dimensional KV heads."
+        ]
+    ),
+    bundledProfile(
+        id: "gemma-4-31b",
+        patterns: modelIDPatterns([
+            "gemma-4-31b",
+            "gemma4-31b",
+        ]),
+        excludePatterns: gemmaVisionTextExcludePatterns,
+        architecture: "gemma4",
+        modelTypes: gemma4ModelTypes,
+        modalities: [.text, .visionText],
+        minParametersB: 29,
+        maxParametersB: 33,
+        requiresModelType: true,
+        requiresHeadDimensions: true,
+        supportedKeyHeadDimensions: [256, 512],
+        confidence: 0.8,
+        extraNotes: gemmaProfileNotes
     ),
     bundledProfile(
         id: "gemma-7b",
         patterns: ["*gemma-7b", "*gemma-7b-*"],
-        excludePatterns: commonNonTextExcludePatterns + [
+        excludePatterns: gemmaTextExcludePatterns + [
             "*gemma-2-7b*", "*gemma2-7b*", "*embeddinggemma*",
         ],
         architecture: "gemma",
