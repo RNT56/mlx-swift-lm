@@ -7,16 +7,24 @@
     "*qwen3.5-2b-*",
     "*qwen3-5-2b",
     "*qwen3-5-2b-*",
+    "*qwen35-2b",
+    "*qwen35-2b-*",
     "*qwen-3.5-2b",
-    "*qwen-3.5-2b-*"
+    "*qwen-3.5-2b-*",
+    "*qwen-3-5-2b",
+    "*qwen-3-5-2b-*"
   ],
   "include_patterns": [
     "*qwen3.5-2b",
     "*qwen3.5-2b-*",
     "*qwen3-5-2b",
     "*qwen3-5-2b-*",
+    "*qwen35-2b",
+    "*qwen35-2b-*",
     "*qwen-3.5-2b",
-    "*qwen-3.5-2b-*"
+    "*qwen-3.5-2b-*",
+    "*qwen-3-5-2b",
+    "*qwen-3-5-2b-*"
   ],
   "exclude_patterns": [
     "*embedding*",
@@ -36,15 +44,31 @@
     "*molmo*",
     "*moondream*",
     "*idefics*",
-    "*qwen3-2b*",
-    "*qwen-3-2b*",
-    "*122b*",
+    "*qwen2*",
+    "*qwen-2*",
+    "*qwen2.5*",
+    "*qwen-2.5*",
+    "*qwen2-5*",
+    "*qwen-2-5*",
+    "*qwen3-next*",
+    "*qwen3next*",
+    "*qwen-3-next*",
+    "*qwen3.7*",
+    "*qwen-3.7*",
+    "*qwen3-7*",
+    "*qwen-3-7*",
+    "*moe*",
+    "*a3b*",
     "*a10b*",
-    "*moe*"
+    "*a17b*",
+    "*a22b*",
+    "*qwen3-2b*",
+    "*qwen-3-2b*"
   ],
   "architecture": "qwen3_5",
   "model_types": [
-    "qwen3_5"
+    "qwen3_5",
+    "qwen3_5_text"
   ],
   "modalities": [
     "text",
@@ -52,6 +76,8 @@
   ],
   "min_parameters_b": 1.5,
   "max_parameters_b": 2.5,
+  "requires_model_type": true,
+  "requires_head_dimensions": true,
   "supported_key_head_dimensions": [
     256
   ],
@@ -86,8 +112,8 @@
   "measured": {},
   "notes": [
     "Uses ordinary MLX model weights; TurboQuant applies only to runtime KV-cache state.",
-    "Qwen3.5 small profiles use verified 256-dimensional key and value heads.",
     "Measured quality and throughput fields are intentionally empty until reproduced on target hardware.",
-    "Runtime shape checks and Metal self-tests remain authoritative."
+    "Runtime shape checks and Metal self-tests remain authoritative.",
+    "Qwen3.5 and Qwen3.6 profiles are config-backed with verified 256-dimensional key and value heads."
   ]
 }

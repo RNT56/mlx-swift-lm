@@ -218,6 +218,8 @@ public struct TurboQuantProfile: Codable, Equatable, Identifiable, Sendable {
     public var modalities: [TurboQuantModelModality]
     public var minParametersB: Double?
     public var maxParametersB: Double?
+    public var requiresModelType: Bool
+    public var requiresHeadDimensions: Bool
     public var supportedKeyHeadDimensions: [Int]
     public var supportedValueHeadDimensions: [Int]
     public var recommendedScheme: TurboQuantScheme
@@ -253,6 +255,8 @@ public struct TurboQuantProfile: Codable, Equatable, Identifiable, Sendable {
         modalities: [TurboQuantModelModality] = [.text],
         minParametersB: Double? = nil,
         maxParametersB: Double? = nil,
+        requiresModelType: Bool = false,
+        requiresHeadDimensions: Bool = false,
         supportedKeyHeadDimensions: [Int],
         supportedValueHeadDimensions: [Int]? = nil,
         recommendedScheme: TurboQuantScheme = .turbo4v2,
@@ -287,6 +291,8 @@ public struct TurboQuantProfile: Codable, Equatable, Identifiable, Sendable {
         self.modalities = modalities
         self.minParametersB = minParametersB
         self.maxParametersB = maxParametersB
+        self.requiresModelType = requiresModelType
+        self.requiresHeadDimensions = requiresHeadDimensions
         self.supportedKeyHeadDimensions = supportedKeyHeadDimensions
         self.supportedValueHeadDimensions =
             supportedValueHeadDimensions ?? supportedKeyHeadDimensions
@@ -324,6 +330,8 @@ public struct TurboQuantProfile: Codable, Equatable, Identifiable, Sendable {
         case modalities
         case minParametersB
         case maxParametersB
+        case requiresModelType
+        case requiresHeadDimensions
         case supportedKeyHeadDimensions
         case supportedValueHeadDimensions
         case recommendedScheme
@@ -374,6 +382,10 @@ public struct TurboQuantProfile: Codable, Equatable, Identifiable, Sendable {
                 [TurboQuantModelModality].self, forKey: .modalities) ?? [.text],
             minParametersB: try container.decodeIfPresent(Double.self, forKey: .minParametersB),
             maxParametersB: try container.decodeIfPresent(Double.self, forKey: .maxParametersB),
+            requiresModelType: try container.decodeIfPresent(
+                Bool.self, forKey: .requiresModelType) ?? false,
+            requiresHeadDimensions: try container.decodeIfPresent(
+                Bool.self, forKey: .requiresHeadDimensions) ?? false,
             supportedKeyHeadDimensions: supportedKeyHeadDimensions,
             supportedValueHeadDimensions: supportedValueHeadDimensions,
             recommendedScheme: try container.decodeIfPresent(
@@ -628,6 +640,9 @@ extension TurboQuantProfile {
             reasons.append("model id matches an exclude pattern")
         }
 
+        if requiresModelType, descriptor.modelType == nil {
+            reasons.append("model type metadata is required")
+        }
         if let modelType = descriptor.modelType {
             let normalizedModelType = Self.normalizedModelType(modelType)
             let allowedTypes = Set((modelTypes.isEmpty ? [architecture].compactMap { $0 } : modelTypes)
@@ -663,6 +678,12 @@ extension TurboQuantProfile {
                 "model size \(parameterCountB)B exceeds maximum \(effectiveMaxParametersB)B")
         }
 
+        if requiresHeadDimensions, keyHeadDimension == nil {
+            reasons.append("key head dimension metadata is required")
+        }
+        if requiresHeadDimensions, valueHeadDimension == nil {
+            reasons.append("value head dimension metadata is required")
+        }
         if let keyHeadDimension,
             !supportedKeyHeadDimensions.contains(keyHeadDimension)
         {
@@ -738,6 +759,8 @@ private func bundledProfile(
     modalities: [TurboQuantModelModality] = [.text],
     minParametersB: Double? = nil,
     maxParametersB: Double? = nil,
+    requiresModelType: Bool = false,
+    requiresHeadDimensions: Bool = false,
     supportedKeyHeadDimensions: [Int],
     supportedValueHeadDimensions: [Int]? = nil,
     supportedContextLengths: [Int] = bundledProfileDefaultContextLengths,
@@ -757,6 +780,8 @@ private func bundledProfile(
         modalities: modalities,
         minParametersB: minParametersB,
         maxParametersB: maxParametersB,
+        requiresModelType: requiresModelType,
+        requiresHeadDimensions: requiresHeadDimensions,
         supportedKeyHeadDimensions: supportedKeyHeadDimensions,
         supportedValueHeadDimensions: supportedValueHeadDimensions,
         safeMaskModes: commonSafeMasks,
@@ -795,6 +820,14 @@ private let qwen3ExcludePatterns =
         "*qwen-3.5*",
         "*qwen3-5*",
         "*qwen-3-5*",
+        "*qwen3.6*",
+        "*qwen-3.6*",
+        "*qwen3-6*",
+        "*qwen-3-6*",
+        "*qwen3.7*",
+        "*qwen-3.7*",
+        "*qwen3-7*",
+        "*qwen-3-7*",
         "*moe*",
         "*a3b*",
         "*a22b*",
@@ -821,6 +854,54 @@ private let qwen25SmallPatterns = modelIDPatterns([
     "qwen-2-5-coder-0.5b", "qwen-2-5-coder-1.5b", "qwen-2-5-coder-3b",
     "qwen-2-5-coder-7b", "qwen-2-5-1-coder-7b",
 ])
+
+private func qwen35FamilyPatterns(_ version: String, size: String) -> [String] {
+    let normalizedVersion = version.replacingOccurrences(of: ".", with: "-")
+    let compactVersion = version.filter(\.isNumber)
+    let names = [
+        "qwen\(version)-\(size)",
+        "qwen\(normalizedVersion)-\(size)",
+        "qwen\(compactVersion)-\(size)",
+        "qwen-\(version)-\(size)",
+        "qwen-\(normalizedVersion)-\(size)",
+    ]
+    return modelIDPatterns(names)
+}
+
+private func qwen35MoEPatterns(_ version: String, totalSize: String, activeSize: String) -> [String] {
+    let normalizedVersion = version.replacingOccurrences(of: ".", with: "-")
+    let compactVersion = version.filter(\.isNumber)
+    let names = [
+        "qwen\(version)-\(totalSize)-\(activeSize)",
+        "qwen\(normalizedVersion)-\(totalSize)-\(activeSize)",
+        "qwen\(compactVersion)-\(totalSize)-\(activeSize)",
+        "qwen-\(version)-\(totalSize)-\(activeSize)",
+        "qwen-\(normalizedVersion)-\(totalSize)-\(activeSize)",
+    ]
+    return modelIDPatterns(names)
+}
+
+private let qwen35DenseExcludePatterns =
+    commonNonTextExcludePatterns + [
+        "*qwen2*", "*qwen-2*", "*qwen2.5*", "*qwen-2.5*", "*qwen2-5*", "*qwen-2-5*",
+        "*qwen3-next*", "*qwen3next*", "*qwen-3-next*",
+        "*qwen3.7*", "*qwen-3.7*", "*qwen3-7*", "*qwen-3-7*",
+        "*moe*", "*a3b*", "*a10b*", "*a17b*", "*a22b*",
+    ]
+
+private let qwen35MoEExcludePatterns =
+    commonNonTextExcludePatterns + [
+        "*qwen2*", "*qwen-2*", "*qwen2.5*", "*qwen-2.5*", "*qwen2-5*", "*qwen-2-5*",
+        "*qwen3-next*", "*qwen3next*", "*qwen-3-next*",
+        "*qwen3.7*", "*qwen-3.7*", "*qwen3-7*", "*qwen-3-7*",
+    ]
+
+private let qwen35ModelTypes = ["qwen3_5", "qwen3_5_text"]
+private let qwen35MoEModelTypes = ["qwen3_5_moe", "qwen3_5_moe_text"]
+private let qwen35Modalities: [TurboQuantModelModality] = [.text, .visionText]
+private let qwen35ProfileNotes = [
+    "Qwen3.5 and Qwen3.6 profiles are config-backed with verified 256-dimensional key and value heads."
+]
 
 private let bundledProfiles: [TurboQuantProfile] = [
     bundledProfile(
@@ -1156,21 +1237,199 @@ private let bundledProfiles: [TurboQuantProfile] = [
     ),
     bundledProfile(
         id: "qwen3.5-2b",
-        patterns: [
-            "*qwen3.5-2b", "*qwen3.5-2b-*", "*qwen3-5-2b", "*qwen3-5-2b-*",
-            "*qwen-3.5-2b", "*qwen-3.5-2b-*",
-        ],
-        excludePatterns: commonNonTextExcludePatterns + [
-            "*qwen3-2b*", "*qwen-3-2b*", "*122b*", "*a10b*", "*moe*",
-        ],
+        patterns: qwen35FamilyPatterns("3.5", size: "2b"),
+        excludePatterns: qwen35DenseExcludePatterns + ["*qwen3-2b*", "*qwen-3-2b*"],
         architecture: "qwen3_5",
-        modelTypes: ["qwen3_5"],
-        modalities: [.text, .visionText],
+        modelTypes: qwen35ModelTypes,
+        modalities: qwen35Modalities,
         minParametersB: 1.5,
         maxParametersB: 2.5,
+        requiresModelType: true,
+        requiresHeadDimensions: true,
         supportedKeyHeadDimensions: [256],
         confidence: 0.85,
-        extraNotes: ["Qwen3.5 small profiles use verified 256-dimensional key and value heads."]
+        extraNotes: qwen35ProfileNotes
+    ),
+    bundledProfile(
+        id: "qwen3.5-0.8b",
+        patterns: qwen35FamilyPatterns("3.5", size: "0.8b"),
+        excludePatterns: qwen35DenseExcludePatterns,
+        architecture: "qwen3_5",
+        modelTypes: qwen35ModelTypes,
+        modalities: qwen35Modalities,
+        minParametersB: 0.7,
+        maxParametersB: 1,
+        requiresModelType: true,
+        requiresHeadDimensions: true,
+        supportedKeyHeadDimensions: [256],
+        confidence: 0.85,
+        extraNotes: qwen35ProfileNotes
+    ),
+    bundledProfile(
+        id: "qwen3.5-4b",
+        patterns: qwen35FamilyPatterns("3.5", size: "4b"),
+        excludePatterns: qwen35DenseExcludePatterns,
+        architecture: "qwen3_5",
+        modelTypes: qwen35ModelTypes,
+        modalities: qwen35Modalities,
+        minParametersB: 3.5,
+        maxParametersB: 4.5,
+        requiresModelType: true,
+        requiresHeadDimensions: true,
+        supportedKeyHeadDimensions: [256],
+        confidence: 0.85,
+        extraNotes: qwen35ProfileNotes
+    ),
+    bundledProfile(
+        id: "qwen3.5-9b",
+        patterns: qwen35FamilyPatterns("3.5", size: "9b"),
+        excludePatterns: qwen35DenseExcludePatterns,
+        architecture: "qwen3_5",
+        modelTypes: qwen35ModelTypes,
+        modalities: qwen35Modalities,
+        minParametersB: 8,
+        maxParametersB: 10.5,
+        requiresModelType: true,
+        requiresHeadDimensions: true,
+        supportedKeyHeadDimensions: [256],
+        confidence: 0.85,
+        extraNotes: qwen35ProfileNotes
+    ),
+    bundledProfile(
+        id: "qwen3.5-27b",
+        patterns: qwen35FamilyPatterns("3.5", size: "27b"),
+        excludePatterns: qwen35DenseExcludePatterns,
+        architecture: "qwen3_5",
+        modelTypes: qwen35ModelTypes,
+        modalities: qwen35Modalities,
+        minParametersB: 24,
+        maxParametersB: 30,
+        requiresModelType: true,
+        requiresHeadDimensions: true,
+        supportedKeyHeadDimensions: [256],
+        confidence: 0.8,
+        extraNotes: qwen35ProfileNotes
+    ),
+    bundledProfile(
+        id: "qwen3.6-27b",
+        patterns: qwen35FamilyPatterns("3.6", size: "27b"),
+        excludePatterns: qwen35DenseExcludePatterns,
+        architecture: "qwen3_5",
+        modelTypes: qwen35ModelTypes,
+        modalities: qwen35Modalities,
+        minParametersB: 24,
+        maxParametersB: 30,
+        requiresModelType: true,
+        requiresHeadDimensions: true,
+        supportedKeyHeadDimensions: [256],
+        confidence: 0.8,
+        extraNotes: qwen35ProfileNotes
+    ),
+    bundledProfile(
+        id: "qwen3.5-40b",
+        patterns: qwen35FamilyPatterns("3.5", size: "40b"),
+        excludePatterns: qwen35DenseExcludePatterns,
+        architecture: "qwen3_5",
+        modelTypes: qwen35ModelTypes,
+        modalities: qwen35Modalities,
+        minParametersB: 38,
+        maxParametersB: 42,
+        requiresModelType: true,
+        requiresHeadDimensions: true,
+        supportedKeyHeadDimensions: [256],
+        confidence: 0.65,
+        extraNotes: qwen35ProfileNotes
+    ),
+    bundledProfile(
+        id: "qwen3.6-40b",
+        patterns: qwen35FamilyPatterns("3.6", size: "40b"),
+        excludePatterns: qwen35DenseExcludePatterns,
+        architecture: "qwen3_5",
+        modelTypes: qwen35ModelTypes,
+        modalities: qwen35Modalities,
+        minParametersB: 38,
+        maxParametersB: 42,
+        requiresModelType: true,
+        requiresHeadDimensions: true,
+        supportedKeyHeadDimensions: [256],
+        confidence: 0.65,
+        extraNotes: qwen35ProfileNotes
+    ),
+    bundledProfile(
+        id: "qwen3.5-35b-a3b",
+        patterns: qwen35MoEPatterns("3.5", totalSize: "35b", activeSize: "a3b"),
+        excludePatterns: qwen35MoEExcludePatterns + ["*a10b*", "*a17b*", "*a22b*"],
+        architecture: "qwen3_5_moe",
+        modelTypes: qwen35MoEModelTypes,
+        modalities: qwen35Modalities,
+        minParametersB: 34,
+        maxParametersB: 37,
+        requiresModelType: true,
+        requiresHeadDimensions: true,
+        supportedKeyHeadDimensions: [256],
+        confidence: 0.75,
+        extraNotes: qwen35ProfileNotes
+    ),
+    bundledProfile(
+        id: "qwen3.6-35b-a3b",
+        patterns: qwen35MoEPatterns("3.6", totalSize: "35b", activeSize: "a3b"),
+        excludePatterns: qwen35MoEExcludePatterns + ["*a10b*", "*a17b*", "*a22b*"],
+        architecture: "qwen3_5_moe",
+        modelTypes: qwen35MoEModelTypes,
+        modalities: qwen35Modalities,
+        minParametersB: 34,
+        maxParametersB: 37,
+        requiresModelType: true,
+        requiresHeadDimensions: true,
+        supportedKeyHeadDimensions: [256],
+        confidence: 0.75,
+        extraNotes: qwen35ProfileNotes
+    ),
+    bundledProfile(
+        id: "qwen3.5-97b-a10b",
+        patterns: qwen35MoEPatterns("3.5", totalSize: "97b", activeSize: "a10b")
+            + ["*qwen3.5*97b-a10b*", "*qwen-3.5*97b-a10b*", "*qwen3-5*97b-a10b*"],
+        excludePatterns: qwen35MoEExcludePatterns + ["*a3b*", "*a17b*", "*a22b*"],
+        architecture: "qwen3_5_moe",
+        modelTypes: qwen35MoEModelTypes,
+        modalities: qwen35Modalities,
+        minParametersB: 90,
+        maxParametersB: 105,
+        requiresModelType: true,
+        requiresHeadDimensions: true,
+        supportedKeyHeadDimensions: [256],
+        confidence: 0.65,
+        extraNotes: qwen35ProfileNotes
+    ),
+    bundledProfile(
+        id: "qwen3.5-122b-a10b",
+        patterns: qwen35MoEPatterns("3.5", totalSize: "122b", activeSize: "a10b"),
+        excludePatterns: qwen35MoEExcludePatterns + ["*a3b*", "*a17b*", "*a22b*"],
+        architecture: "qwen3_5_moe",
+        modelTypes: qwen35MoEModelTypes,
+        modalities: qwen35Modalities,
+        minParametersB: 115,
+        maxParametersB: 130,
+        requiresModelType: true,
+        requiresHeadDimensions: true,
+        supportedKeyHeadDimensions: [256],
+        confidence: 0.7,
+        extraNotes: qwen35ProfileNotes
+    ),
+    bundledProfile(
+        id: "qwen3.5-397b-a17b",
+        patterns: qwen35MoEPatterns("3.5", totalSize: "397b", activeSize: "a17b"),
+        excludePatterns: qwen35MoEExcludePatterns + ["*a3b*", "*a10b*", "*a22b*"],
+        architecture: "qwen3_5_moe",
+        modelTypes: qwen35MoEModelTypes,
+        modalities: qwen35Modalities,
+        minParametersB: 380,
+        maxParametersB: 410,
+        requiresModelType: true,
+        requiresHeadDimensions: true,
+        supportedKeyHeadDimensions: [256],
+        confidence: 0.65,
+        extraNotes: qwen35ProfileNotes
     ),
     bundledProfile(
         id: "smollm-small",

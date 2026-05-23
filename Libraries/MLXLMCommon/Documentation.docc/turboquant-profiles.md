@@ -33,6 +33,13 @@ profiles for downstream apps, release tooling, and manual inspection. The Swift
 registry lives in ``TurboQuantProfileRegistry`` so library consumers do not need
 package resources at runtime.
 
+Bundled Qwen3.5/Qwen3.6 profiles cover current MLX Community dense and MoE
+families with config-backed 256-dimensional KV head checks: `qwen3.5-0.8b`,
+`qwen3.5-2b`, `qwen3.5-4b`, `qwen3.5-9b`, `qwen3.5-27b`, `qwen3.6-27b`,
+`qwen3.5-40b`, `qwen3.6-40b`, `qwen3.5-35b-a3b`, `qwen3.6-35b-a3b`,
+`qwen3.5-97b-a10b`, `qwen3.5-122b-a10b`, and `qwen3.5-397b-a17b`.
+Qwen3.7 is intentionally not profiled until open MLX weights exist.
+
 ## Safety Contract
 
 Profiles are advisory. The runtime still enforces:

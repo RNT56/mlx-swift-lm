@@ -205,6 +205,7 @@ extension MLXRuntimeSwiftTests {
             let profile = try #require(
                 TurboQuantProfileRegistry.bundled.profile(
                     for: "mlx-community/Qwen3.5-2B-4bit",
+                    modelType: "qwen3_5",
                     keyHeadDimension: 256,
                     valueHeadDimension: 256
                 )
@@ -213,6 +214,124 @@ extension MLXRuntimeSwiftTests {
             #expect(profile.id == "qwen3.5-2b")
             #expect(profile.supports(keyHeadDimension: 256, valueHeadDimension: 256))
             #expect(!profile.supports(keyHeadDimension: 128, valueHeadDimension: 128))
+        }
+
+        @Test func testQwen35AndQwen36DenseProfilesMatchCurrentMLXCommunityConfigs() throws {
+            let registry = TurboQuantProfileRegistry.bundled
+            let examples: [(String, String, Double)] = [
+                ("mlx-community/Qwen3.5-0.8B-MLX-4bit", "qwen3.5-0.8b", 0.8),
+                ("mlx-community/Qwen3.5-2B-MLX-4bit", "qwen3.5-2b", 2),
+                ("mlx-community/Qwen3.5-4B-MLX-4bit", "qwen3.5-4b", 4),
+                ("mlx-community/Qwen3.5-9B-MLX-4bit", "qwen3.5-9b", 9),
+                ("mlx-community/Qwen3.5-27B-4bit", "qwen3.5-27b", 27),
+                ("mlx-community/mlx_qwen35_27b_q6", "qwen3.5-27b", 27),
+                ("mlx-community/Qwen3.6-27B-4bit", "qwen3.6-27b", 27),
+                (
+                    "mlx-community/Qwen3.5-40B-Claude-4.6-Opus-Deckard-Heretic-Uncensored-Thinking-4.5bit-msq",
+                    "qwen3.5-40b",
+                    40
+                ),
+                (
+                    "mlx-community/Qwen3.6-40B-Claude-4.6-Opus-Deckard-Heretic-Uncensored-Thinking-8bit",
+                    "qwen3.6-40b",
+                    40
+                ),
+            ]
+
+            for (modelID, expectedProfileID, parameterCountB) in examples {
+                let profile = try #require(
+                    registry.profile(
+                        for: modelID,
+                        modelType: "qwen3_5",
+                        parameterCountB: parameterCountB,
+                        keyHeadDimension: 256,
+                        valueHeadDimension: 256
+                    )
+                )
+                #expect(profile.id == expectedProfileID)
+                #expect(profile.supports(keyHeadDimension: 256, valueHeadDimension: 256))
+                #expect(!profile.supports(keyHeadDimension: 128, valueHeadDimension: 128))
+            }
+        }
+
+        @Test func testQwen35AndQwen36MoEProfilesMatchCurrentMLXCommunityConfigs() throws {
+            let registry = TurboQuantProfileRegistry.bundled
+            let examples: [(String, String, Double)] = [
+                ("mlx-community/Qwen3.5-35B-A3B-4bit", "qwen3.5-35b-a3b", 35),
+                ("mlx-community/Qwen3.6-35B-A3B-4bit", "qwen3.6-35b-a3b", 35),
+                ("mlx-community/Qwen3.5-REAP-97B-A10B-4bit", "qwen3.5-97b-a10b", 97),
+                ("mlx-community/Qwen3.5-122B-A10B-4bit", "qwen3.5-122b-a10b", 122),
+                ("mlx-community/Qwen3.5-397B-A17B-4bit", "qwen3.5-397b-a17b", 397),
+            ]
+
+            for (modelID, expectedProfileID, parameterCountB) in examples {
+                let profile = try #require(
+                    registry.profile(
+                        for: modelID,
+                        modelType: "qwen3_5_moe",
+                        parameterCountB: parameterCountB,
+                        keyHeadDimension: 256,
+                        valueHeadDimension: 256
+                    )
+                )
+                #expect(profile.id == expectedProfileID)
+            }
+        }
+
+        @Test func testQwen35ProfilesFailClosedForIncompatibleMetadata() {
+            let registry = TurboQuantProfileRegistry.bundled
+
+            #expect(
+                registry.profile(
+                    for: "mlx-community/Qwen3.5-4B-MLX-4bit",
+                    parameterCountB: 4,
+                    keyHeadDimension: 256,
+                    valueHeadDimension: 256
+                ) == nil
+            )
+            #expect(
+                registry.profile(
+                    for: "mlx-community/Qwen3.5-4B-MLX-4bit",
+                    modelType: "qwen3_5",
+                    parameterCountB: 4
+                ) == nil
+            )
+            #expect(
+                registry.profile(
+                    for: "mlx-community/Qwen3.5-4B-MLX-4bit",
+                    modelType: "qwen3",
+                    parameterCountB: 4,
+                    keyHeadDimension: 256,
+                    valueHeadDimension: 256
+                ) == nil
+            )
+            #expect(
+                registry.profile(
+                    for: "mlx-community/Qwen3.5-4B-MLX-4bit",
+                    modelType: "qwen3_5",
+                    parameterCountB: 4,
+                    keyHeadDimension: 128,
+                    valueHeadDimension: 128
+                ) == nil
+            )
+            #expect(
+                registry.profile(
+                    for: "mlx-community/Qwen3.5-122B-A10B-4bit",
+                    modelType: "qwen3_5",
+                    parameterCountB: 122,
+                    keyHeadDimension: 256,
+                    valueHeadDimension: 256
+                ) == nil
+            )
+            #expect(
+                registry.profile(
+                    for: "mlx-community/Qwen3.7-27B-4bit",
+                    modelType: "qwen3_5",
+                    parameterCountB: 27,
+                    keyHeadDimension: 256,
+                    valueHeadDimension: 256
+                ) == nil
+            )
         }
 
         @Test func testExpandedSmallModelProfilesMatchCurrentMLXCommunityConfigs() throws {
@@ -333,6 +452,10 @@ extension MLXRuntimeSwiftTests {
                 #expect(bundledProfile.modalities == jsonProfile.modalities)
                 #expect(bundledProfile.minParametersB == jsonProfile.minParametersB)
                 #expect(bundledProfile.maxParametersB == jsonProfile.maxParametersB)
+                #expect(bundledProfile.requiresModelType == jsonProfile.requiresModelType)
+                #expect(
+                    bundledProfile.requiresHeadDimensions == jsonProfile.requiresHeadDimensions
+                )
                 #expect(
                     bundledProfile.supportedKeyHeadDimensions
                         == jsonProfile.supportedKeyHeadDimensions

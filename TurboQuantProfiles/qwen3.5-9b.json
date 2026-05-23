@@ -1,18 +1,30 @@
 {
   "schema_version": 2,
-  "id": "qwen3-8b",
+  "id": "qwen3.5-9b",
   "exact_model_ids": [],
   "model_patterns": [
-    "*qwen3-8b",
-    "*qwen3-8b-*",
-    "*qwen-3-8b",
-    "*qwen-3-8b-*"
+    "*qwen3.5-9b",
+    "*qwen3.5-9b-*",
+    "*qwen3-5-9b",
+    "*qwen3-5-9b-*",
+    "*qwen35-9b",
+    "*qwen35-9b-*",
+    "*qwen-3.5-9b",
+    "*qwen-3.5-9b-*",
+    "*qwen-3-5-9b",
+    "*qwen-3-5-9b-*"
   ],
   "include_patterns": [
-    "*qwen3-8b",
-    "*qwen3-8b-*",
-    "*qwen-3-8b",
-    "*qwen-3-8b-*"
+    "*qwen3.5-9b",
+    "*qwen3.5-9b-*",
+    "*qwen3-5-9b",
+    "*qwen3-5-9b-*",
+    "*qwen35-9b",
+    "*qwen35-9b-*",
+    "*qwen-3.5-9b",
+    "*qwen-3.5-9b-*",
+    "*qwen-3-5-9b",
+    "*qwen-3-5-9b-*"
   ],
   "exclude_patterns": [
     "*embedding*",
@@ -32,39 +44,43 @@
     "*molmo*",
     "*moondream*",
     "*idefics*",
-    "*qwen3.5*",
-    "*qwen-3.5*",
-    "*qwen3-5*",
-    "*qwen-3-5*",
-    "*qwen3.6*",
-    "*qwen-3.6*",
-    "*qwen3-6*",
-    "*qwen-3-6*",
+    "*qwen2*",
+    "*qwen-2*",
+    "*qwen2.5*",
+    "*qwen-2.5*",
+    "*qwen2-5*",
+    "*qwen-2-5*",
+    "*qwen3-next*",
+    "*qwen3next*",
+    "*qwen-3-next*",
     "*qwen3.7*",
     "*qwen-3.7*",
     "*qwen3-7*",
     "*qwen-3-7*",
     "*moe*",
     "*a3b*",
-    "*a22b*",
-    "*coder*",
-    "*next*",
-    "*deepseek*"
+    "*a10b*",
+    "*a17b*",
+    "*a22b*"
   ],
-  "architecture": "qwen3",
+  "architecture": "qwen3_5",
   "model_types": [
-    "qwen3"
+    "qwen3_5",
+    "qwen3_5_text"
   ],
   "modalities": [
-    "text"
+    "text",
+    "visionText"
   ],
-  "min_parameters_b": 7.5,
-  "max_parameters_b": 8.5,
+  "min_parameters_b": 8,
+  "max_parameters_b": 10.5,
+  "requires_model_type": true,
+  "requires_head_dimensions": true,
   "supported_key_head_dimensions": [
-    128
+    256
   ],
   "supported_value_head_dimensions": [
-    128
+    256
   ],
   "recommended_scheme": "turbo4v2",
   "fallback_scheme": "turbo3_5",
@@ -90,11 +106,12 @@
   "requires_fused_attention_self_test": false,
   "status": "experimental",
   "source": "profile-audit-2026-05-23",
-  "confidence": 0.75,
+  "confidence": 0.85,
   "measured": {},
   "notes": [
     "Uses ordinary MLX model weights; TurboQuant applies only to runtime KV-cache state.",
     "Measured quality and throughput fields are intentionally empty until reproduced on target hardware.",
-    "Runtime shape checks and Metal self-tests remain authoritative."
+    "Runtime shape checks and Metal self-tests remain authoritative.",
+    "Qwen3.5 and Qwen3.6 profiles are config-backed with verified 256-dimensional key and value heads."
   ]
 }

@@ -54,6 +54,11 @@ model sizes.
 Rejected candidates should preserve a diagnostic reason when the resolving API
 returns diagnostics.
 
+Current Qwen3.5/Qwen3.6 profile coverage includes MLX Community dense 0.8B, 2B,
+4B, 9B, 27B, and compatible 40B families plus 35B-A3B, 97B-A10B,
+122B-A10B, and 397B-A17B MoE families. Qwen3.7 is not profiled until open MLX
+weights are available.
+
 ## More Loading Scenarios
 
 Load from a local directory:
