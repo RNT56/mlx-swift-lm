@@ -4,11 +4,23 @@
   "exact_model_ids": [],
   "model_patterns": [
     "*gemma-2b",
-    "*gemma-2b-*"
+    "*gemma-2b-*",
+    "*gemma-1.1-2b",
+    "*gemma-1.1-2b-*",
+    "*gemma1.1-2b",
+    "*gemma1.1-2b-*",
+    "*gemma-1-1-2b",
+    "*gemma-1-1-2b-*"
   ],
   "include_patterns": [
     "*gemma-2b",
-    "*gemma-2b-*"
+    "*gemma-2b-*",
+    "*gemma-1.1-2b",
+    "*gemma-1.1-2b-*",
+    "*gemma1.1-2b",
+    "*gemma1.1-2b-*",
+    "*gemma-1-1-2b",
+    "*gemma-1-1-2b-*"
   ],
   "exclude_patterns": [
     "*embedding*",
@@ -43,6 +55,8 @@
   ],
   "min_parameters_b": 1.5,
   "max_parameters_b": 2.5,
+  "requires_model_type": true,
+  "requires_head_dimensions": true,
   "supported_key_head_dimensions": [
     256
   ],

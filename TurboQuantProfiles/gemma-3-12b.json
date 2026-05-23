@@ -60,9 +60,11 @@
   "requires_model_type": true,
   "requires_head_dimensions": true,
   "supported_key_head_dimensions": [
+    240,
     256
   ],
   "supported_value_head_dimensions": [
+    240,
     256
   ],
   "recommended_scheme": "turbo4v2",

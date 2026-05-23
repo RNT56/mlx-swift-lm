@@ -233,10 +233,15 @@ extension MLXRuntimeSwiftTests {
             let examples: [(String, String, String, Double, Int)] = [
                 ("mlx-community/gemma-3-270m-it-4bit", "gemma-3-270m", "gemma3_text", 0.27, 256),
                 ("mlx-community/gemma-3-1b-it-4bit", "gemma-3-1b", "gemma3_text", 1, 256),
+                ("mlx-community/swahili-gemma-1b-mlx-fp16", "gemma-3-1b", "gemma3_text", 1, 256),
+                ("mlx-community/gemma-3-4b-it-4bit", "gemma-3-4b", "gemma3", 4, 256),
                 ("mlx-community/gemma-3-4b-it-qat-4bit", "gemma-3-4b", "gemma3", 4, 256),
-                ("mlx-community/gemma-3-text-4b-it-4bit", "gemma-3-4b", "gemma3", 4, 320),
+                ("mlx-community/gemma-3-text-4b-it-4bit", "gemma-3-4b", "gemma3", 4, 256),
                 ("mlx-community/Gemma-SEA-LION-v4-4B-VL-mlx-3bit", "gemma-3-4b", "gemma3", 4, 256),
+                ("mlx-community/gemma-3-text-4b-320-head-test", "gemma-3-4b", "gemma3_text", 4, 320),
+                ("mlx-community/gemma-3-12b-it-4bit", "gemma-3-12b", "gemma3", 12, 256),
                 ("mlx-community/gemma-3-12b-it-qat-4bit", "gemma-3-12b", "gemma3", 12, 256),
+                ("mlx-community/gemma-3-12b-explicit-240-test", "gemma-3-12b", "gemma3_text", 12, 240),
                 ("mlx-community/gemma-3-27b-it-4bit", "gemma-3-27b", "gemma3", 27, 128),
                 ("mlx-community/Gemma-SEA-LION-v4-27B-IT-mlx-4bit", "gemma-3-27b", "gemma3", 27, 128),
             ]
@@ -249,6 +254,28 @@ extension MLXRuntimeSwiftTests {
                         parameterCountB: parameterCountB,
                         keyHeadDimension: headDimension,
                         valueHeadDimension: headDimension
+                    )
+                )
+                #expect(profile.id == expectedProfileID)
+            }
+        }
+
+        @Test func testLegacyGemmaProfilesMatchCurrentMLXCommunityConfigs() throws {
+            let registry = TurboQuantProfileRegistry.bundled
+            let examples: [(String, String, Double)] = [
+                ("mlx-community/gemma-1.1-2b-it-4bit", "gemma-2b", 2),
+                ("mlx-community/gemma-1.1-7b-it-4bit", "gemma-7b", 7),
+                ("mlx-community/zephyr-7b-gemma-v0.1-4bit", "gemma-7b", 7),
+            ]
+
+            for (modelID, expectedProfileID, parameterCountB) in examples {
+                let profile = try #require(
+                    registry.profile(
+                        for: modelID,
+                        modelType: "gemma",
+                        parameterCountB: parameterCountB,
+                        keyHeadDimension: 256,
+                        valueHeadDimension: 256
                     )
                 )
                 #expect(profile.id == expectedProfileID)
@@ -330,8 +357,8 @@ extension MLXRuntimeSwiftTests {
                     for: "mlx-community/gemma-3-12b-it-4bit",
                     modelType: "gemma3",
                     parameterCountB: 12,
-                    keyHeadDimension: 240,
-                    valueHeadDimension: 240
+                    keyHeadDimension: 128,
+                    valueHeadDimension: 128
                 ) == nil
             )
             #expect(
@@ -375,6 +402,21 @@ extension MLXRuntimeSwiftTests {
                     parameterCountB: 3,
                     keyHeadDimension: 256,
                     valueHeadDimension: 256
+                ) == nil
+            )
+            #expect(
+                registry.profile(
+                    for: "mlx-community/gemma-1.1-7b-it-4bit",
+                    parameterCountB: 7,
+                    keyHeadDimension: 256,
+                    valueHeadDimension: 256
+                ) == nil
+            )
+            #expect(
+                registry.profile(
+                    for: "mlx-community/gemma-1.1-7b-it-4bit",
+                    modelType: "gemma",
+                    parameterCountB: 7
                 ) == nil
             )
         }

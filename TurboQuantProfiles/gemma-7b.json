@@ -4,11 +4,27 @@
   "exact_model_ids": [],
   "model_patterns": [
     "*gemma-7b",
-    "*gemma-7b-*"
+    "*gemma-7b-*",
+    "*gemma-1.1-7b",
+    "*gemma-1.1-7b-*",
+    "*gemma1.1-7b",
+    "*gemma1.1-7b-*",
+    "*gemma-1-1-7b",
+    "*gemma-1-1-7b-*",
+    "*zephyr-7b-gemma",
+    "*zephyr-7b-gemma-*"
   ],
   "include_patterns": [
     "*gemma-7b",
-    "*gemma-7b-*"
+    "*gemma-7b-*",
+    "*gemma-1.1-7b",
+    "*gemma-1.1-7b-*",
+    "*gemma1.1-7b",
+    "*gemma1.1-7b-*",
+    "*gemma-1-1-7b",
+    "*gemma-1-1-7b-*",
+    "*zephyr-7b-gemma",
+    "*zephyr-7b-gemma-*"
   ],
   "exclude_patterns": [
     "*embedding*",
@@ -43,6 +59,8 @@
   ],
   "min_parameters_b": 6.5,
   "max_parameters_b": 7.5,
+  "requires_model_type": true,
+  "requires_head_dimensions": true,
   "supported_key_head_dimensions": [
     256
   ],

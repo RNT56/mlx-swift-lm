@@ -6,13 +6,17 @@
     "*gemma-3-1b",
     "*gemma-3-1b-*",
     "*gemma3-1b",
-    "*gemma3-1b-*"
+    "*gemma3-1b-*",
+    "*swahili-gemma-1b",
+    "*swahili-gemma-1b-*"
   ],
   "include_patterns": [
     "*gemma-3-1b",
     "*gemma-3-1b-*",
     "*gemma3-1b",
-    "*gemma3-1b-*"
+    "*gemma3-1b-*",
+    "*swahili-gemma-1b",
+    "*swahili-gemma-1b-*"
   ],
   "exclude_patterns": [
     "*embedding*",

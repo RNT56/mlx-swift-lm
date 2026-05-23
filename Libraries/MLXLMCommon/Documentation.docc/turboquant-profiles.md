@@ -40,15 +40,18 @@ families with config-backed 256-dimensional KV head checks: `qwen3.5-0.8b`,
 `qwen3.5-97b-a10b`, `qwen3.5-122b-a10b`, and `qwen3.5-397b-a17b`.
 Qwen3.7 is intentionally not profiled until open MLX weights exist.
 
-Bundled Gemma profiles cover config-backed MLX Community Gemma 2, Gemma 3,
-Gemma 3n, and Gemma 4 variants: `gemma-2-2b`, `gemma-2-9b`, `gemma-2-27b`,
-`gemma-3-270m`, `gemma-3-1b`, `gemma-3-4b`, `gemma-3-12b`, `gemma-3-27b`,
-`gemma-3n-e2b`, `gemma-3n-e4b`, `gemma-4-e2b`, `gemma-4-e4b`,
-`gemma-4-26b-a4b`, and `gemma-4-31b`. SEA-LION v3/v4 derivatives route
-through the matching Gemma 2 or Gemma 3 profiles when their config metadata
-matches. Gemma 4 profiles accept both the sliding 256-dimensional heads and
-global 512-dimensional heads. These profiles require both `model_type` and KV
-head dimensions; models whose configs omit non-inferable head dimensions
+Bundled Gemma profiles cover config-backed MLX Community legacy Gemma, Gemma 2,
+Gemma 3, Gemma 3n, and Gemma 4 variants: `gemma-2b`, `gemma-7b`,
+`gemma-2-2b`, `gemma-2-9b`, `gemma-2-27b`, `gemma-3-270m`, `gemma-3-1b`,
+`gemma-3-4b`, `gemma-3-12b`, `gemma-3-27b`, `gemma-3n-e2b`,
+`gemma-3n-e4b`, `gemma-4-e2b`, `gemma-4-e4b`, `gemma-4-26b-a4b`, and
+`gemma-4-31b`. SEA-LION v3/v4 and named Gemma derivatives route through the
+matching Gemma profile when their config metadata matches. Gemma 4 profiles
+accept both the sliding 256-dimensional heads and global 512-dimensional heads.
+Gemma 3 profiles accept the runtime-decoded head dimensions; callers should use
+explicit `head_dim` when present and the Gemma 3 runtime default of 256 when MLX
+configs omit it. These profiles require both `model_type` and KV head
+dimensions; models whose configs omit non-inferable head dimensions
 intentionally fall back to the caller's conservative defaults.
 
 ## Safety Contract

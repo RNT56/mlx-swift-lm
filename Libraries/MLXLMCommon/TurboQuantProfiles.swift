@@ -1026,7 +1026,12 @@ private let bundledProfiles: [TurboQuantProfile] = [
     ),
     bundledProfile(
         id: "gemma-2b",
-        patterns: ["*gemma-2b", "*gemma-2b-*"],
+        patterns: modelIDPatterns([
+            "gemma-2b",
+            "gemma-1.1-2b",
+            "gemma1.1-2b",
+            "gemma-1-1-2b",
+        ]),
         excludePatterns: gemmaTextExcludePatterns + [
             "*gemma-2-2b*", "*gemma2-2b*", "*embeddinggemma*",
         ],
@@ -1034,6 +1039,8 @@ private let bundledProfiles: [TurboQuantProfile] = [
         modelTypes: ["gemma"],
         minParametersB: 1.5,
         maxParametersB: 2.5,
+        requiresModelType: true,
+        requiresHeadDimensions: true,
         supportedKeyHeadDimensions: [256],
         supportedContextLengths: [4096, 8192],
         safeContextLength: 8192,
@@ -1063,6 +1070,7 @@ private let bundledProfiles: [TurboQuantProfile] = [
         patterns: modelIDPatterns([
             "gemma-3-1b",
             "gemma3-1b",
+            "swahili-gemma-1b",
         ]),
         excludePatterns: gemma3ExcludePatterns,
         architecture: "gemma3",
@@ -1115,7 +1123,7 @@ private let bundledProfiles: [TurboQuantProfile] = [
         maxParametersB: 13.5,
         requiresModelType: true,
         requiresHeadDimensions: true,
-        supportedKeyHeadDimensions: [256],
+        supportedKeyHeadDimensions: [240, 256],
         confidence: 0.8,
         extraNotes: gemmaProfileNotes
     ),
@@ -1265,7 +1273,13 @@ private let bundledProfiles: [TurboQuantProfile] = [
     ),
     bundledProfile(
         id: "gemma-7b",
-        patterns: ["*gemma-7b", "*gemma-7b-*"],
+        patterns: modelIDPatterns([
+            "gemma-7b",
+            "gemma-1.1-7b",
+            "gemma1.1-7b",
+            "gemma-1-1-7b",
+            "zephyr-7b-gemma",
+        ]),
         excludePatterns: gemmaTextExcludePatterns + [
             "*gemma-2-7b*", "*gemma2-7b*", "*embeddinggemma*",
         ],
@@ -1273,6 +1287,8 @@ private let bundledProfiles: [TurboQuantProfile] = [
         modelTypes: ["gemma"],
         minParametersB: 6.5,
         maxParametersB: 7.5,
+        requiresModelType: true,
+        requiresHeadDimensions: true,
         supportedKeyHeadDimensions: [256],
         supportedContextLengths: [4096, 8192],
         safeContextLength: 8192,
