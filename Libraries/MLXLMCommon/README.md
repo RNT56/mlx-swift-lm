@@ -68,6 +68,13 @@ sliding heads and 512-dimensional global heads. These profiles are experimental
 until benchmark and perplexity measurements are reproduced for specific
 revisions.
 
+Current Llama and Mistral profile coverage includes config-backed Llama 2/3/3.1/
+3.2/3.3 dense families, targeted Llama-compatible derivatives, dense Mistral/
+Ministral/Codestral/Devstral/Magistral/Pixtral families, and targeted
+mlx-community derivative profiles. Mixtral, Mamba-Codestral, Llama 4, and
+MLLama remain fail-closed unless the linked runtime exposes support and matching
+profile metadata is added.
+
 ## More Loading Scenarios
 
 Load from a local directory:

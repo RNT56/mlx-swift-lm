@@ -6,13 +6,21 @@
     "*llama-3b",
     "*llama-3b-*",
     "*llama3-3b",
-    "*llama3-3b-*"
+    "*llama3-3b-*",
+    "*llama_3b",
+    "*llama_3b-*",
+    "*impish_llama_3b",
+    "*impish_llama_3b-*"
   ],
   "include_patterns": [
     "*llama-3b",
     "*llama-3b-*",
     "*llama3-3b",
-    "*llama3-3b-*"
+    "*llama3-3b-*",
+    "*llama_3b",
+    "*llama_3b-*",
+    "*impish_llama_3b",
+    "*impish_llama_3b-*"
   ],
   "exclude_patterns": [
     "*embedding*",
@@ -43,7 +51,8 @@
     "*llama4-maverick*",
     "*mixtral*",
     "*mamba-codestral*",
-    "*mamba*codestral*"
+    "*mamba*codestral*",
+    "*outetts*"
   ],
   "architecture": "llama",
   "model_types": [

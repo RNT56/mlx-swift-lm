@@ -1,22 +1,22 @@
 {
   "schema_version": 2,
-  "id": "llama-3.1-405b",
+  "id": "llama-3-120b",
   "exact_model_ids": [],
   "model_patterns": [
-    "*llama-3.1-405b",
-    "*llama-3.1-405b-*",
-    "*llama-3-1-405b",
-    "*llama-3-1-405b-*",
-    "*llama3.1-405b",
-    "*llama3.1-405b-*"
+    "*llama-3-120b",
+    "*llama-3-120b-*",
+    "*llama3-120b",
+    "*llama3-120b-*",
+    "*meta-llama-3-120b",
+    "*meta-llama-3-120b-*"
   ],
   "include_patterns": [
-    "*llama-3.1-405b",
-    "*llama-3.1-405b-*",
-    "*llama-3-1-405b",
-    "*llama-3-1-405b-*",
-    "*llama3.1-405b",
-    "*llama3.1-405b-*"
+    "*llama-3-120b",
+    "*llama-3-120b-*",
+    "*llama3-120b",
+    "*llama3-120b-*",
+    "*meta-llama-3-120b",
+    "*meta-llama-3-120b-*"
   ],
   "exclude_patterns": [
     "*embedding*",
@@ -57,8 +57,8 @@
   "modalities": [
     "text"
   ],
-  "min_parameters_b": 390,
-  "max_parameters_b": 420,
+  "min_parameters_b": 110,
+  "max_parameters_b": 130,
   "requires_model_type": true,
   "requires_head_dimensions": true,
   "supported_key_head_dimensions": [
@@ -91,9 +91,10 @@
   "requires_fused_attention_self_test": false,
   "status": "experimental",
   "source": "profile-audit-2026-05-23",
-  "confidence": 0.65,
+  "confidence": 0.6,
   "measured": {},
   "notes": [
-    "Llama profiles are config-backed experimental profiles gated on model_type=llama and explicit KV head dimensions."
+    "Llama profiles are config-backed experimental profiles gated on model_type=llama and explicit KV head dimensions.",
+    "Covers config-compatible Llama 3 120B derivatives discovered in mlx-community."
   ]
 }

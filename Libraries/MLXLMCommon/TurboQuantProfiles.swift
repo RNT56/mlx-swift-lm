@@ -1047,6 +1047,7 @@ private let llamaExcludePatterns =
         "*mixtral*",
         "*mamba-codestral*",
         "*mamba*codestral*",
+        "*outetts*",
     ]
 
 private let mistralTextExcludePatterns =
@@ -1309,7 +1310,7 @@ private let bundledProfiles: [TurboQuantProfile] = [
         modelTypes: gemma3nModelTypes,
         modalities: [.text, .visionText],
         minParametersB: 1.5,
-        maxParametersB: 2.5,
+        maxParametersB: 4.5,
         requiresModelType: true,
         requiresHeadDimensions: true,
         supportedKeyHeadDimensions: [256],
@@ -1459,7 +1460,11 @@ private let bundledProfiles: [TurboQuantProfile] = [
     ),
     bundledProfile(
         id: "mistral-7b",
-        patterns: mistralFamilyPatterns(["mistral-7b", "mistral7b"]),
+        patterns: mistralFamilyPatterns([
+            "mistral-7b",
+            "mistral7b",
+            "mistral-ft-optimized-1227",
+        ]),
         excludePatterns: mistralTextExcludePatterns + ["*e5-*"],
         architecture: "mistral",
         modelTypes: ["mistral"],
@@ -1545,8 +1550,80 @@ private let bundledProfiles: [TurboQuantProfile] = [
         extraNotes: mistralProfileNotes
     ),
     bundledProfile(
+        id: "mistral-compatible-8b",
+        patterns: mistralFamilyPatterns([
+            "mistral-nemo-minitron-8b",
+            "mistralai-8b-diagnosis-qa",
+        ]),
+        excludePatterns: mistralTextExcludePatterns + ["*e5-*", "*pairrm*"],
+        architecture: "mistral",
+        modelTypes: ["mistral"],
+        minParametersB: 7.5,
+        maxParametersB: 8.5,
+        requiresModelType: true,
+        requiresHeadDimensions: true,
+        supportedKeyHeadDimensions: [128],
+        confidence: 0.65,
+        extraNotes: mistralProfileNotes + [
+            "Covers config-compatible Mistral 8B derivatives discovered in mlx-community."
+        ]
+    ),
+    bundledProfile(
+        id: "mistral-compatible-22b",
+        patterns: mistralFamilyPatterns(["mistral-22b"]),
+        excludePatterns: mistralTextExcludePatterns,
+        architecture: "mistral",
+        modelTypes: ["mistral"],
+        minParametersB: 21,
+        maxParametersB: 23,
+        requiresModelType: true,
+        requiresHeadDimensions: true,
+        supportedKeyHeadDimensions: [128],
+        confidence: 0.65,
+        extraNotes: mistralProfileNotes + [
+            "Covers config-compatible Mistral 22B derivatives discovered in mlx-community."
+        ]
+    ),
+    bundledProfile(
+        id: "mistral-compatible-24b",
+        patterns: mistralFamilyPatterns([
+            "deephermes-3-mistral-24b",
+            "dolphin-mistral-24b",
+            "dolphin3.0-r1-mistral-24b",
+            "dolphin3-0-r1-mistral-24b",
+        ]),
+        excludePatterns: mistralTextExcludePatterns,
+        architecture: "mistral",
+        modelTypes: ["mistral"],
+        minParametersB: 23,
+        maxParametersB: 25.5,
+        requiresModelType: true,
+        requiresHeadDimensions: true,
+        supportedKeyHeadDimensions: [128],
+        confidence: 0.65,
+        extraNotes: mistralProfileNotes + [
+            "Covers config-compatible Mistral 24B derivatives discovered in mlx-community."
+        ]
+    ),
+    bundledProfile(
+        id: "mistral-large-2407",
+        patterns: mistralFamilyPatterns(["mistral-large-instruct-2407"]),
+        excludePatterns: mistralTextExcludePatterns,
+        architecture: "mistral",
+        modelTypes: ["mistral"],
+        minParametersB: 120,
+        maxParametersB: 130,
+        requiresModelType: true,
+        requiresHeadDimensions: true,
+        supportedKeyHeadDimensions: [128],
+        confidence: 0.6,
+        extraNotes: mistralProfileNotes + [
+            "Covers config-compatible Mistral Large 2407 derivatives discovered in mlx-community."
+        ]
+    ),
+    bundledProfile(
         id: "devstral-small-24b",
-        patterns: mistralFamilyPatterns(["devstral-small", "devstral-small-24b"]),
+        patterns: mistralFamilyPatterns(["devstral-small", "devstral-small-24b", "devstral-samll"]),
         excludePatterns: mistralTextExcludePatterns + [
             "*devstral-small-2-24b*", "*devstral-small-2.0*",
         ],
@@ -1624,15 +1701,19 @@ private let bundledProfiles: [TurboQuantProfile] = [
     ),
     bundledProfile(
         id: "mistral-small-3.1-24b",
-        patterns: mistralFamilyPatterns(["mistral-small-3.1-24b", "mistral-small-3-1-24b"]),
+        patterns: mistralFamilyPatterns([
+            "mistral-small-3.1-24b",
+            "mistral-small-3-1-24b",
+            "mistral-small-3.1-text-24b",
+            "mistral-small-3-1-text-24b",
+        ]),
         excludePatterns: mistralTextExcludePatterns,
         architecture: "mistral3",
-        modelTypes: ["mistral3"],
+        modelTypes: ["mistral3", "mistral"],
         textConfigModelTypes: ["mistral"],
         minParametersB: 23,
         maxParametersB: 25.5,
         requiresModelType: true,
-        requiresTextConfigModelType: true,
         requiresHeadDimensions: true,
         supportedKeyHeadDimensions: [128],
         confidence: 0.75,
@@ -1660,7 +1741,7 @@ private let bundledProfiles: [TurboQuantProfile] = [
         excludePatterns: mistralTextExcludePatterns,
         architecture: "mistral3",
         modelTypes: ["mistral3"],
-        textConfigModelTypes: ["mistral"],
+        textConfigModelTypes: ["mistral", "ministral3"],
         minParametersB: 23,
         maxParametersB: 25.5,
         requiresModelType: true,
@@ -1676,7 +1757,7 @@ private let bundledProfiles: [TurboQuantProfile] = [
         excludePatterns: mistralTextExcludePatterns,
         architecture: "mistral3",
         modelTypes: ["mistral3"],
-        textConfigModelTypes: ["mistral"],
+        textConfigModelTypes: ["mistral", "ministral3"],
         minParametersB: 120,
         maxParametersB: 135,
         requiresModelType: true,
@@ -1685,6 +1766,22 @@ private let bundledProfiles: [TurboQuantProfile] = [
         supportedKeyHeadDimensions: [128],
         confidence: 0.65,
         extraNotes: mistralProfileNotes
+    ),
+    bundledProfile(
+        id: "devstral-2-123b",
+        patterns: mistralFamilyPatterns(["devstral-2-123b"]),
+        excludePatterns: mistralTextExcludePatterns,
+        architecture: "mistral3",
+        modelTypes: ["ministral3"],
+        minParametersB: 120,
+        maxParametersB: 130,
+        requiresModelType: true,
+        requiresHeadDimensions: true,
+        supportedKeyHeadDimensions: [128],
+        confidence: 0.6,
+        extraNotes: mistralProfileNotes + [
+            "Covers config-compatible Devstral 2 123B variants that expose top-level model_type=ministral3."
+        ]
     ),
     bundledProfile(
         id: "mistral-small-4-119b-a6b",
@@ -1794,7 +1891,7 @@ private let bundledProfiles: [TurboQuantProfile] = [
     ),
     bundledProfile(
         id: "llama-2-70b",
-        patterns: llamaFamilyPatterns(["llama-2-70b", "llama2-70b"]),
+        patterns: llamaFamilyPatterns(["llama-2-70b", "llama2-70b", "llama2-70"]),
         excludePatterns: llamaExcludePatterns,
         architecture: "llama",
         modelTypes: ["llama"],
@@ -1823,6 +1920,47 @@ private let bundledProfiles: [TurboQuantProfile] = [
         extraNotes: llamaProfileNotes
     ),
     bundledProfile(
+        id: "llama-compatible-8b",
+        patterns: llamaFamilyPatterns([
+            "llama-8b",
+            "llama3-*8b",
+            "llama-3-*8b",
+            "llama3.1-*8b",
+            "llama-3.1-*8b",
+            "llama-guard-2-8b",
+            "llama-pro-8b",
+            "deepseek-r1-distill-llama-8b",
+            "arrowcanaria-llama-8b",
+            "llama-3.1-tulu-3-8b",
+            "llama-3-elyza-jp-8b",
+            "llama-3-groq-8b",
+            "llama-3-smaug-8b",
+            "llama-3-karamaru",
+            "llama-3-refueled",
+            "llama-3-swallow-8b",
+            "llama-3.1-swallow-8b",
+            "llama-3.1-nemotron-8b",
+            "llama-3.1-supernova-lite",
+            "llama-sea-lion-v3-8b",
+            "llama-sea-lion-v3.5-8b",
+        ]),
+        excludePatterns: llamaExcludePatterns + [
+            "*llama-3.1-8b*",
+            "*llama3.1-8b*",
+        ],
+        architecture: "llama",
+        modelTypes: ["llama"],
+        minParametersB: 7.5,
+        maxParametersB: 8.5,
+        requiresModelType: true,
+        requiresHeadDimensions: true,
+        supportedKeyHeadDimensions: [128],
+        confidence: 0.65,
+        extraNotes: llamaProfileNotes + [
+            "Covers config-compatible Llama 8B derivatives discovered in mlx-community."
+        ]
+    ),
+    bundledProfile(
         id: "llama-3-3b",
         patterns: llamaFamilyPatterns(["llama-3-3b", "llama3-3b"]),
         excludePatterns: llamaExcludePatterns,
@@ -1834,6 +1972,20 @@ private let bundledProfiles: [TurboQuantProfile] = [
         requiresHeadDimensions: true,
         supportedKeyHeadDimensions: [128],
         confidence: 0.7,
+        extraNotes: llamaProfileNotes
+    ),
+    bundledProfile(
+        id: "llama-3-16b",
+        patterns: llamaFamilyPatterns(["llama-3-16b", "llama3-16b"]),
+        excludePatterns: llamaExcludePatterns,
+        architecture: "llama",
+        modelTypes: ["llama"],
+        minParametersB: 15,
+        maxParametersB: 17,
+        requiresModelType: true,
+        requiresHeadDimensions: true,
+        supportedKeyHeadDimensions: [128],
+        confidence: 0.65,
         extraNotes: llamaProfileNotes
     ),
     bundledProfile(
@@ -1849,6 +2001,44 @@ private let bundledProfiles: [TurboQuantProfile] = [
         supportedKeyHeadDimensions: [128],
         confidence: 0.7,
         extraNotes: llamaProfileNotes
+    ),
+    bundledProfile(
+        id: "llama-compatible-70b",
+        patterns: llamaFamilyPatterns([
+            "deepseek-r1-distill-llama-70b",
+            "llama-3-groq-70b",
+            "llama-3-swallow-70b",
+            "llama-3.1-swallow-70b",
+            "r1-1776-distill-llama-70b",
+            "wayfarer-large-70b-llama-3.3",
+            "deepcogito-cogito-v1-preview-llama-70b",
+            "cogito-v2-preview-llama-70b",
+            "llama3-*70b",
+            "llama-3-*70b",
+            "llama3.1-*70b",
+            "llama-3.1-*70b",
+            "llama3.3-*70b",
+            "llama-3.3-*70b",
+        ]),
+        excludePatterns: llamaExcludePatterns + [
+            "*llama-3.1-70b*",
+            "*llama3.1-70b*",
+            "*llama-3.1-nemotron-70b*",
+            "*llama3.1-nemotron-70b*",
+            "*llama-3.3-70b*",
+            "*llama3.3-70b*",
+        ],
+        architecture: "llama",
+        modelTypes: ["llama"],
+        minParametersB: 65,
+        maxParametersB: 75,
+        requiresModelType: true,
+        requiresHeadDimensions: true,
+        supportedKeyHeadDimensions: [128],
+        confidence: 0.6,
+        extraNotes: llamaProfileNotes + [
+            "Covers config-compatible Llama 70B derivatives discovered in mlx-community."
+        ]
     ),
     bundledProfile(
         id: "llama-3.1-8b",
@@ -1922,6 +2112,26 @@ private let bundledProfiles: [TurboQuantProfile] = [
         supportedKeyHeadDimensions: [128],
         confidence: 0.65,
         extraNotes: llamaProfileNotes
+    ),
+    bundledProfile(
+        id: "llama-3-120b",
+        patterns: llamaFamilyPatterns([
+            "llama-3-120b",
+            "llama3-120b",
+            "meta-llama-3-120b",
+        ]),
+        excludePatterns: llamaExcludePatterns,
+        architecture: "llama",
+        modelTypes: ["llama"],
+        minParametersB: 110,
+        maxParametersB: 130,
+        requiresModelType: true,
+        requiresHeadDimensions: true,
+        supportedKeyHeadDimensions: [128],
+        confidence: 0.6,
+        extraNotes: llamaProfileNotes + [
+            "Covers config-compatible Llama 3 120B derivatives discovered in mlx-community."
+        ]
     ),
     bundledProfile(
         id: "llama-3.1-405b",
@@ -2037,7 +2247,12 @@ private let bundledProfiles: [TurboQuantProfile] = [
     ),
     bundledProfile(
         id: "llama-compatible-2b",
-        patterns: llamaFamilyPatterns(["llama-2b", "llama3-2b"]),
+        patterns: llamaFamilyPatterns([
+            "llama-2b",
+            "llama3-2b",
+            "minicpm-2b-sft",
+            "minicpm-2b-sft-*llama-format",
+        ]),
         excludePatterns: llamaExcludePatterns + ["*llama-2-*", "*llama2-*"],
         architecture: "llama",
         modelTypes: ["llama"],
@@ -2051,7 +2266,7 @@ private let bundledProfiles: [TurboQuantProfile] = [
     ),
     bundledProfile(
         id: "llama-compatible-3b",
-        patterns: llamaFamilyPatterns(["llama-3b", "llama3-3b"]),
+        patterns: llamaFamilyPatterns(["llama-3b", "llama3-3b", "llama_3b", "impish_llama_3b"]),
         excludePatterns: llamaExcludePatterns,
         architecture: "llama",
         modelTypes: ["llama"],
@@ -2064,8 +2279,32 @@ private let bundledProfiles: [TurboQuantProfile] = [
         extraNotes: llamaProfileNotes
     ),
     bundledProfile(
+        id: "llama-compatible-30b",
+        patterns: llamaFamilyPatterns([
+            "llama-30b",
+            "llama2-30b",
+            "yayi2-30b",
+        ]),
+        excludePatterns: llamaExcludePatterns,
+        architecture: "llama",
+        modelTypes: ["llama"],
+        minParametersB: 28,
+        maxParametersB: 32,
+        requiresModelType: true,
+        requiresHeadDimensions: true,
+        supportedKeyHeadDimensions: [112, 128],
+        confidence: 0.55,
+        extraNotes: llamaProfileNotes + [
+            "Covers config-compatible Llama 30B derivatives with nonstandard 112/128 KV head dimensions."
+        ]
+    ),
+    bundledProfile(
         id: "llama-compatible-4b",
-        patterns: llamaFamilyPatterns(["llama-4b", "llama3-4b"]),
+        patterns: llamaFamilyPatterns([
+            "llama-4b",
+            "llama3-4b",
+            "llama-3.1-nemotron-nano-4b",
+        ]),
         excludePatterns: llamaExcludePatterns,
         architecture: "llama",
         modelTypes: ["llama"],

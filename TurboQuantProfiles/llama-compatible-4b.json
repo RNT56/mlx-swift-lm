@@ -6,13 +6,17 @@
     "*llama-4b",
     "*llama-4b-*",
     "*llama3-4b",
-    "*llama3-4b-*"
+    "*llama3-4b-*",
+    "*llama-3.1-nemotron-nano-4b",
+    "*llama-3.1-nemotron-nano-4b-*"
   ],
   "include_patterns": [
     "*llama-4b",
     "*llama-4b-*",
     "*llama3-4b",
-    "*llama3-4b-*"
+    "*llama3-4b-*",
+    "*llama-3.1-nemotron-nano-4b",
+    "*llama-3.1-nemotron-nano-4b-*"
   ],
   "exclude_patterns": [
     "*embedding*",
@@ -43,7 +47,8 @@
     "*llama4-maverick*",
     "*mixtral*",
     "*mamba-codestral*",
-    "*mamba*codestral*"
+    "*mamba*codestral*",
+    "*outetts*"
   ],
   "architecture": "llama",
   "model_types": [

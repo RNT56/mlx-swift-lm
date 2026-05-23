@@ -1,22 +1,18 @@
 {
   "schema_version": 2,
-  "id": "llama-3.1-405b",
+  "id": "llama-3-16b",
   "exact_model_ids": [],
   "model_patterns": [
-    "*llama-3.1-405b",
-    "*llama-3.1-405b-*",
-    "*llama-3-1-405b",
-    "*llama-3-1-405b-*",
-    "*llama3.1-405b",
-    "*llama3.1-405b-*"
+    "*llama-3-16b",
+    "*llama-3-16b-*",
+    "*llama3-16b",
+    "*llama3-16b-*"
   ],
   "include_patterns": [
-    "*llama-3.1-405b",
-    "*llama-3.1-405b-*",
-    "*llama-3-1-405b",
-    "*llama-3-1-405b-*",
-    "*llama3.1-405b",
-    "*llama3.1-405b-*"
+    "*llama-3-16b",
+    "*llama-3-16b-*",
+    "*llama3-16b",
+    "*llama3-16b-*"
   ],
   "exclude_patterns": [
     "*embedding*",
@@ -57,8 +53,8 @@
   "modalities": [
     "text"
   ],
-  "min_parameters_b": 390,
-  "max_parameters_b": 420,
+  "min_parameters_b": 15,
+  "max_parameters_b": 17,
   "requires_model_type": true,
   "requires_head_dimensions": true,
   "supported_key_head_dimensions": [

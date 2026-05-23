@@ -47,7 +47,8 @@
     "*llama4-maverick*",
     "*mixtral*",
     "*mamba-codestral*",
-    "*mamba*codestral*"
+    "*mamba*codestral*",
+    "*outetts*"
   ],
   "architecture": "llama",
   "model_types": [

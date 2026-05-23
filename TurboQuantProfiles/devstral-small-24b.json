@@ -6,13 +6,17 @@
     "*devstral-small",
     "*devstral-small-*",
     "*devstral-small-24b",
-    "*devstral-small-24b-*"
+    "*devstral-small-24b-*",
+    "*devstral-samll",
+    "*devstral-samll-*"
   ],
   "include_patterns": [
     "*devstral-small",
     "*devstral-small-*",
     "*devstral-small-24b",
-    "*devstral-small-24b-*"
+    "*devstral-small-24b-*",
+    "*devstral-samll",
+    "*devstral-samll-*"
   ],
   "exclude_patterns": [
     "*embedding*",

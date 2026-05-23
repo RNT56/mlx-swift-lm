@@ -1,22 +1,18 @@
 {
   "schema_version": 2,
-  "id": "llama-3.1-405b",
+  "id": "mistral-compatible-8b",
   "exact_model_ids": [],
   "model_patterns": [
-    "*llama-3.1-405b",
-    "*llama-3.1-405b-*",
-    "*llama-3-1-405b",
-    "*llama-3-1-405b-*",
-    "*llama3.1-405b",
-    "*llama3.1-405b-*"
+    "*mistral-nemo-minitron-8b",
+    "*mistral-nemo-minitron-8b-*",
+    "*mistralai-8b-diagnosis-qa",
+    "*mistralai-8b-diagnosis-qa-*"
   ],
   "include_patterns": [
-    "*llama-3.1-405b",
-    "*llama-3.1-405b-*",
-    "*llama-3-1-405b",
-    "*llama-3-1-405b-*",
-    "*llama3.1-405b",
-    "*llama3.1-405b-*"
+    "*mistral-nemo-minitron-8b",
+    "*mistral-nemo-minitron-8b-*",
+    "*mistralai-8b-diagnosis-qa",
+    "*mistralai-8b-diagnosis-qa-*"
   ],
   "exclude_patterns": [
     "*embedding*",
@@ -36,29 +32,24 @@
     "*molmo*",
     "*moondream*",
     "*idefics*",
-    "*mllama*",
-    "*llama-3.2-vision*",
-    "*llama3.2-vision*",
-    "*llama-4-*",
-    "*llama4-*",
-    "*llama-4-scout*",
-    "*llama4-scout*",
-    "*llama-4-maverick*",
-    "*llama4-maverick*",
     "*mixtral*",
+    "*pixtral*",
     "*mamba-codestral*",
     "*mamba*codestral*",
-    "*outetts*"
+    "*mllama*",
+    "*llama*",
+    "*e5-*",
+    "*pairrm*"
   ],
-  "architecture": "llama",
+  "architecture": "mistral",
   "model_types": [
-    "llama"
+    "mistral"
   ],
   "modalities": [
     "text"
   ],
-  "min_parameters_b": 390,
-  "max_parameters_b": 420,
+  "min_parameters_b": 7.5,
+  "max_parameters_b": 8.5,
   "requires_model_type": true,
   "requires_head_dimensions": true,
   "supported_key_head_dimensions": [
@@ -94,6 +85,7 @@
   "confidence": 0.65,
   "measured": {},
   "notes": [
-    "Llama profiles are config-backed experimental profiles gated on model_type=llama and explicit KV head dimensions."
+    "Mistral profiles are config-backed experimental profiles gated on model_type, nested text_config.model_type where required, and explicit KV head dimensions.",
+    "Covers config-compatible Mistral 8B derivatives discovered in mlx-community."
   ]
 }

@@ -6,13 +6,17 @@
     "*mistral-7b",
     "*mistral-7b-*",
     "*mistral7b",
-    "*mistral7b-*"
+    "*mistral7b-*",
+    "*mistral-ft-optimized-1227",
+    "*mistral-ft-optimized-1227-*"
   ],
   "include_patterns": [
     "*mistral-7b",
     "*mistral-7b-*",
     "*mistral7b",
-    "*mistral7b-*"
+    "*mistral7b-*",
+    "*mistral-ft-optimized-1227",
+    "*mistral-ft-optimized-1227-*"
   ],
   "exclude_patterns": [
     "*embedding*",

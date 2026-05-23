@@ -49,7 +49,8 @@
   "min_parameters_b": 120,
   "max_parameters_b": 135,
   "text_config_model_types": [
-    "mistral"
+    "mistral",
+    "ministral3"
   ],
   "requires_model_type": true,
   "requires_text_config_model_type": true,

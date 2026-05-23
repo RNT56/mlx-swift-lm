@@ -42,7 +42,7 @@
     "visionText"
   ],
   "min_parameters_b": 1.5,
-  "max_parameters_b": 2.5,
+  "max_parameters_b": 4.5,
   "requires_model_type": true,
   "requires_head_dimensions": true,
   "supported_key_head_dimensions": [

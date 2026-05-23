@@ -6,13 +6,17 @@
     "*llama-2-70b",
     "*llama-2-70b-*",
     "*llama2-70b",
-    "*llama2-70b-*"
+    "*llama2-70b-*",
+    "*llama2-70",
+    "*llama2-70-*"
   ],
   "include_patterns": [
     "*llama-2-70b",
     "*llama-2-70b-*",
     "*llama2-70b",
-    "*llama2-70b-*"
+    "*llama2-70b-*",
+    "*llama2-70",
+    "*llama2-70-*"
   ],
   "exclude_patterns": [
     "*embedding*",
@@ -43,7 +47,8 @@
     "*llama4-maverick*",
     "*mixtral*",
     "*mamba-codestral*",
-    "*mamba*codestral*"
+    "*mamba*codestral*",
+    "*outetts*"
   ],
   "architecture": "llama",
   "model_types": [

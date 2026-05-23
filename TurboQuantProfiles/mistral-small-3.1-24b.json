@@ -6,13 +6,21 @@
     "*mistral-small-3.1-24b",
     "*mistral-small-3.1-24b-*",
     "*mistral-small-3-1-24b",
-    "*mistral-small-3-1-24b-*"
+    "*mistral-small-3-1-24b-*",
+    "*mistral-small-3.1-text-24b",
+    "*mistral-small-3.1-text-24b-*",
+    "*mistral-small-3-1-text-24b",
+    "*mistral-small-3-1-text-24b-*"
   ],
   "include_patterns": [
     "*mistral-small-3.1-24b",
     "*mistral-small-3.1-24b-*",
     "*mistral-small-3-1-24b",
-    "*mistral-small-3-1-24b-*"
+    "*mistral-small-3-1-24b-*",
+    "*mistral-small-3.1-text-24b",
+    "*mistral-small-3.1-text-24b-*",
+    "*mistral-small-3-1-text-24b",
+    "*mistral-small-3-1-text-24b-*"
   ],
   "exclude_patterns": [
     "*embedding*",
@@ -41,7 +49,8 @@
   ],
   "architecture": "mistral3",
   "model_types": [
-    "mistral3"
+    "mistral3",
+    "mistral"
   ],
   "modalities": [
     "text"
@@ -52,7 +61,6 @@
     "mistral"
   ],
   "requires_model_type": true,
-  "requires_text_config_model_type": true,
   "requires_head_dimensions": true,
   "supported_key_head_dimensions": [
     128

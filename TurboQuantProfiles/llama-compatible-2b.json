@@ -6,13 +6,21 @@
     "*llama-2b",
     "*llama-2b-*",
     "*llama3-2b",
-    "*llama3-2b-*"
+    "*llama3-2b-*",
+    "*minicpm-2b-sft",
+    "*minicpm-2b-sft-*",
+    "*minicpm-2b-sft-*llama-format",
+    "*minicpm-2b-sft-*llama-format-*"
   ],
   "include_patterns": [
     "*llama-2b",
     "*llama-2b-*",
     "*llama3-2b",
-    "*llama3-2b-*"
+    "*llama3-2b-*",
+    "*minicpm-2b-sft",
+    "*minicpm-2b-sft-*",
+    "*minicpm-2b-sft-*llama-format",
+    "*minicpm-2b-sft-*llama-format-*"
   ],
   "exclude_patterns": [
     "*embedding*",
@@ -44,6 +52,7 @@
     "*mixtral*",
     "*mamba-codestral*",
     "*mamba*codestral*",
+    "*outetts*",
     "*llama-2-*",
     "*llama2-*"
   ],
