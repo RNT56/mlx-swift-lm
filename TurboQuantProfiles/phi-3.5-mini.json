@@ -1,16 +1,22 @@
 {
   "schema_version": 2,
-  "id": "glm4-moe-lite",
+  "id": "phi-3.5-mini",
   "exact_model_ids": [],
   "model_patterns": [
-    "*glm4*moe*lite*",
-    "*glm-4*moe*lite*",
-    "*glm-4.7*flash*"
+    "*phi-3.5-mini",
+    "*phi-3.5-mini-*",
+    "*phi-3-5-mini",
+    "*phi-3-5-mini-*",
+    "*phi3.5-mini",
+    "*phi3.5-mini-*"
   ],
   "include_patterns": [
-    "*glm4*moe*lite*",
-    "*glm-4*moe*lite*",
-    "*glm-4.7*flash*"
+    "*phi-3.5-mini",
+    "*phi-3.5-mini-*",
+    "*phi-3-5-mini",
+    "*phi-3-5-mini-*",
+    "*phi3.5-mini",
+    "*phi3.5-mini-*"
   ],
   "exclude_patterns": [
     "*embedding*",
@@ -31,22 +37,18 @@
     "*moondream*",
     "*idefics*"
   ],
-  "architecture": "glm4_moe_lite",
+  "architecture": "phi3",
   "model_types": [
-    "glm4_moe_lite"
+    "phi3"
   ],
   "modalities": [
     "text"
   ],
   "supported_key_head_dimensions": [
-    64,
-    96,
-    128,
-    192
+    96
   ],
   "supported_value_head_dimensions": [
-    64,
-    128
+    96
   ],
   "recommended_scheme": "turbo4v2",
   "fallback_scheme": "turbo3_5",
@@ -72,11 +74,11 @@
   "requires_fused_attention_self_test": false,
   "status": "experimental",
   "source": "profile-audit-2026-05-23",
-  "confidence": 0.65,
+  "confidence": 0.75,
   "measured": {},
   "notes": [
     "Uses ordinary MLX model weights; TurboQuant applies only to runtime KV-cache state.",
-    "Latent attention may have different key and value dimensions; use two-stage compressed attention when they differ.",
+    "Measured quality and throughput fields are intentionally empty until reproduced on target hardware.",
     "Runtime shape checks and Metal self-tests remain authoritative."
   ]
 }

@@ -1,16 +1,42 @@
 {
   "schema_version": 2,
-  "id": "glm4-moe-lite",
+  "id": "granite-small",
   "exact_model_ids": [],
   "model_patterns": [
-    "*glm4*moe*lite*",
-    "*glm-4*moe*lite*",
-    "*glm-4.7*flash*"
+    "*granite-3.0-2b",
+    "*granite-3.0-2b-*",
+    "*granite-3.1-2b",
+    "*granite-3.1-2b-*",
+    "*granite-3.2-2b",
+    "*granite-3.2-2b-*",
+    "*granite-3.3-2b",
+    "*granite-3.3-2b-*",
+    "*granite-3.0-8b",
+    "*granite-3.0-8b-*",
+    "*granite-3.1-8b",
+    "*granite-3.1-8b-*",
+    "*granite-3.2-8b",
+    "*granite-3.2-8b-*",
+    "*granite-3.3-8b",
+    "*granite-3.3-8b-*"
   ],
   "include_patterns": [
-    "*glm4*moe*lite*",
-    "*glm-4*moe*lite*",
-    "*glm-4.7*flash*"
+    "*granite-3.0-2b",
+    "*granite-3.0-2b-*",
+    "*granite-3.1-2b",
+    "*granite-3.1-2b-*",
+    "*granite-3.2-2b",
+    "*granite-3.2-2b-*",
+    "*granite-3.3-2b",
+    "*granite-3.3-2b-*",
+    "*granite-3.0-8b",
+    "*granite-3.0-8b-*",
+    "*granite-3.1-8b",
+    "*granite-3.1-8b-*",
+    "*granite-3.2-8b",
+    "*granite-3.2-8b-*",
+    "*granite-3.3-8b",
+    "*granite-3.3-8b-*"
   ],
   "exclude_patterns": [
     "*embedding*",
@@ -29,23 +55,26 @@
     "*pixtral*",
     "*molmo*",
     "*moondream*",
-    "*idefics*"
+    "*idefics*",
+    "*moe*"
   ],
-  "architecture": "glm4_moe_lite",
+  "architecture": "granite",
   "model_types": [
-    "glm4_moe_lite"
+    "granite"
   ],
   "modalities": [
     "text"
   ],
+  "min_parameters_b": 1.5,
+  "max_parameters_b": 8.5,
   "supported_key_head_dimensions": [
     64,
-    96,
-    128,
-    192
+    80,
+    128
   ],
   "supported_value_head_dimensions": [
     64,
+    80,
     128
   ],
   "recommended_scheme": "turbo4v2",
@@ -76,7 +105,8 @@
   "measured": {},
   "notes": [
     "Uses ordinary MLX model weights; TurboQuant applies only to runtime KV-cache state.",
-    "Latent attention may have different key and value dimensions; use two-stage compressed attention when they differ.",
+    "Covers Granite dense <=8B variants with runtime head-dimension checks.",
+    "Measured quality and throughput fields are intentionally empty until reproduced on target hardware.",
     "Runtime shape checks and Metal self-tests remain authoritative."
   ]
 }

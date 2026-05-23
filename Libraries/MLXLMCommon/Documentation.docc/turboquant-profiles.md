@@ -20,6 +20,14 @@ If a bundled profile matches, the initializer enables
 backend, and optimization policy. If no profile matches, the supplied base
 parameters are returned unchanged.
 
+Profile matching is intentionally conservative. Model ID patterns select
+candidates, but config metadata remains authoritative: a candidate with an
+`architecture` or `model_type` requirement should be rejected when the model's
+`config.json` declares a different family. Matching model sizes should use
+explicit `B` or `M` size tokens only; quantization labels such as `4bit` and
+`8bit` are not evidence that a model is 4B or 8B. Resolution APIs that expose diagnostics should
+include rejection reasons for metadata, size, shape, mask, and context failures.
+
 The root `TurboQuantProfiles/` directory contains JSON copies of the bundled
 profiles for downstream apps, release tooling, and manual inspection. The Swift
 registry lives in ``TurboQuantProfileRegistry`` so library consumers do not need

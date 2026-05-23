@@ -45,6 +45,15 @@ and as JSON files in the repository root `TurboQuantProfiles/` directory.
 Measured perplexity and throughput fields are left empty until reproduced for a
 specific model revision and target device.
 
+Profile selection should be gated by the model's `config.json` metadata when it
+is available. Name patterns identify candidate profiles, then `architecture` and
+`model_type` must agree with the candidate before TurboQuant parameters are
+applied. Size matching should use explicit `B` or `M` model-size tokens, so
+quantization suffixes such as `4bit` and `8bit` are not treated as `4B` or `8B`
+model sizes.
+Rejected candidates should preserve a diagnostic reason when the resolving API
+returns diagnostics.
+
 ## More Loading Scenarios
 
 Load from a local directory:

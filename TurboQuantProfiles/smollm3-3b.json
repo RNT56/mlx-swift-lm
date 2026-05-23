@@ -1,16 +1,18 @@
 {
   "schema_version": 2,
-  "id": "glm4-moe-lite",
+  "id": "smollm3-3b",
   "exact_model_ids": [],
   "model_patterns": [
-    "*glm4*moe*lite*",
-    "*glm-4*moe*lite*",
-    "*glm-4.7*flash*"
+    "*smollm3-3b",
+    "*smollm3-3b-*",
+    "*smollm-3-3b",
+    "*smollm-3-3b-*"
   ],
   "include_patterns": [
-    "*glm4*moe*lite*",
-    "*glm-4*moe*lite*",
-    "*glm-4.7*flash*"
+    "*smollm3-3b",
+    "*smollm3-3b-*",
+    "*smollm-3-3b",
+    "*smollm-3-3b-*"
   ],
   "exclude_patterns": [
     "*embedding*",
@@ -31,18 +33,19 @@
     "*moondream*",
     "*idefics*"
   ],
-  "architecture": "glm4_moe_lite",
+  "architecture": "llama",
   "model_types": [
-    "glm4_moe_lite"
+    "llama",
+    "smollm3"
   ],
   "modalities": [
     "text"
   ],
+  "min_parameters_b": 2.5,
+  "max_parameters_b": 3.5,
   "supported_key_head_dimensions": [
     64,
-    96,
-    128,
-    192
+    128
   ],
   "supported_value_head_dimensions": [
     64,
@@ -72,11 +75,11 @@
   "requires_fused_attention_self_test": false,
   "status": "experimental",
   "source": "profile-audit-2026-05-23",
-  "confidence": 0.65,
+  "confidence": 0.75,
   "measured": {},
   "notes": [
     "Uses ordinary MLX model weights; TurboQuant applies only to runtime KV-cache state.",
-    "Latent attention may have different key and value dimensions; use two-stage compressed attention when they differ.",
+    "Measured quality and throughput fields are intentionally empty until reproduced on target hardware.",
     "Runtime shape checks and Metal self-tests remain authoritative."
   ]
 }

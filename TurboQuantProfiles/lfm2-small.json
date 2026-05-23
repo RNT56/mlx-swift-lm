@@ -1,16 +1,34 @@
 {
   "schema_version": 2,
-  "id": "glm4-moe-lite",
+  "id": "lfm2-small",
   "exact_model_ids": [],
   "model_patterns": [
-    "*glm4*moe*lite*",
-    "*glm-4*moe*lite*",
-    "*glm-4.7*flash*"
+    "*lfm2-350m",
+    "*lfm2-350m-*",
+    "*lfm2-700m",
+    "*lfm2-700m-*",
+    "*lfm2-1.2b",
+    "*lfm2-1.2b-*",
+    "*lfm-2-350m",
+    "*lfm-2-350m-*",
+    "*lfm-2-700m",
+    "*lfm-2-700m-*",
+    "*lfm-2-1.2b",
+    "*lfm-2-1.2b-*"
   ],
   "include_patterns": [
-    "*glm4*moe*lite*",
-    "*glm-4*moe*lite*",
-    "*glm-4.7*flash*"
+    "*lfm2-350m",
+    "*lfm2-350m-*",
+    "*lfm2-700m",
+    "*lfm2-700m-*",
+    "*lfm2-1.2b",
+    "*lfm2-1.2b-*",
+    "*lfm-2-350m",
+    "*lfm-2-350m-*",
+    "*lfm-2-700m",
+    "*lfm-2-700m-*",
+    "*lfm-2-1.2b",
+    "*lfm-2-1.2b-*"
   ],
   "exclude_patterns": [
     "*embedding*",
@@ -29,20 +47,21 @@
     "*pixtral*",
     "*molmo*",
     "*moondream*",
-    "*idefics*"
+    "*idefics*",
+    "*moe*"
   ],
-  "architecture": "glm4_moe_lite",
+  "architecture": "lfm2",
   "model_types": [
-    "glm4_moe_lite"
+    "lfm2"
   ],
   "modalities": [
     "text"
   ],
+  "min_parameters_b": 0.2,
+  "max_parameters_b": 1.5,
   "supported_key_head_dimensions": [
     64,
-    96,
-    128,
-    192
+    128
   ],
   "supported_value_head_dimensions": [
     64,
@@ -76,7 +95,8 @@
   "measured": {},
   "notes": [
     "Uses ordinary MLX model weights; TurboQuant applies only to runtime KV-cache state.",
-    "Latent attention may have different key and value dimensions; use two-stage compressed attention when they differ.",
+    "Covers LFM2 small dense variants with runtime head-dimension checks.",
+    "Measured quality and throughput fields are intentionally empty until reproduced on target hardware.",
     "Runtime shape checks and Metal self-tests remain authoritative."
   ]
 }

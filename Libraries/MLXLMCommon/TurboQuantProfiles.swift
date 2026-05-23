@@ -104,6 +104,18 @@ public enum TurboQuantQualityProfile: String, Codable, Sendable, CaseIterable {
     case experimental
 }
 
+public enum TurboQuantProfileStatus: String, Codable, Sendable, CaseIterable {
+    case experimental
+    case validated
+    case deprecated
+}
+
+public enum TurboQuantModelModality: String, Codable, Sendable, CaseIterable {
+    case text
+    case visionText
+    case videoText
+}
+
 public struct TurboQuantProfileMeasurements: Codable, Equatable, Sendable {
     public var perplexityDelta: Double?
     public var promptTokensPerSecond: Double?
@@ -135,10 +147,77 @@ public struct TurboQuantProfileMeasurements: Codable, Equatable, Sendable {
     }
 }
 
+public struct TurboQuantModelDescriptor: Equatable, Sendable {
+    public var modelID: String
+    public var modelType: String?
+    public var modality: TurboQuantModelModality?
+    public var parameterCountB: Double?
+
+    public init(
+        modelID: String,
+        modelType: String? = nil,
+        modality: TurboQuantModelModality? = nil,
+        parameterCountB: Double? = nil
+    ) {
+        self.modelID = modelID
+        self.modelType = modelType
+        self.modality = modality
+        self.parameterCountB =
+            parameterCountB ?? Self.inferParameterCountB(from: modelID)
+    }
+
+    public static func inferParameterCountB(from modelID: String) -> Double? {
+        let normalized = modelID
+            .lowercased()
+            .replacingOccurrences(of: "_", with: "-")
+        let range = NSRange(normalized.startIndex ..< normalized.endIndex, in: normalized)
+        let billionValues = Self.inferModelSizeValues(
+            from: normalized,
+            pattern: #"(?<![a-z0-9])(?:[ea])?([0-9]+(?:\.[0-9]+)?)b(?!it|its|yte|[a-z0-9])"#,
+            range: range,
+            multiplier: 1
+        )
+        let millionValues = Self.inferModelSizeValues(
+            from: normalized,
+            pattern: #"(?<![a-z0-9])([0-9]+(?:\.[0-9]+)?)m(?![a-z0-9])"#,
+            range: range,
+            multiplier: 0.001
+        )
+        return (billionValues + millionValues).max()
+    }
+
+    private static func inferModelSizeValues(
+        from normalizedModelID: String,
+        pattern: String,
+        range: NSRange,
+        multiplier: Double
+    ) -> [Double] {
+        guard let regex = try? NSRegularExpression(pattern: pattern) else {
+            return []
+        }
+        return regex.matches(in: normalizedModelID, range: range).compactMap { match -> Double? in
+            guard let valueRange = Range(match.range(at: 1), in: normalizedModelID),
+                let value = Double(normalizedModelID[valueRange])
+            else {
+                return nil
+            }
+            return value * multiplier
+        }
+    }
+}
+
 public struct TurboQuantProfile: Codable, Equatable, Identifiable, Sendable {
+    public var schemaVersion: Int
     public var id: String
+    public var exactModelIDs: [String]
     public var modelPatterns: [String]
+    public var includePatterns: [String]
+    public var excludePatterns: [String]
     public var architecture: String?
+    public var modelTypes: [String]
+    public var modalities: [TurboQuantModelModality]
+    public var minParametersB: Double?
+    public var maxParametersB: Double?
     public var supportedKeyHeadDimensions: [Int]
     public var supportedValueHeadDimensions: [Int]
     public var recommendedScheme: TurboQuantScheme
@@ -154,13 +233,26 @@ public struct TurboQuantProfile: Codable, Equatable, Identifiable, Sendable {
     public var optimizationPolicy: TurboQuantOptimizationPolicy
     public var requiresMetalSelfTest: Bool
     public var requiresFusedAttentionSelfTest: Bool
+    public var status: TurboQuantProfileStatus
+    public var source: String?
+    public var validatedOn: String?
+    public var validatedBy: String?
+    public var confidence: Double?
     public var measured: TurboQuantProfileMeasurements
     public var notes: [String]
 
     public init(
+        schemaVersion: Int = 2,
         id: String,
+        exactModelIDs: [String] = [],
         modelPatterns: [String],
+        includePatterns: [String] = [],
+        excludePatterns: [String] = [],
         architecture: String? = nil,
+        modelTypes: [String] = [],
+        modalities: [TurboQuantModelModality] = [.text],
+        minParametersB: Double? = nil,
+        maxParametersB: Double? = nil,
         supportedKeyHeadDimensions: [Int],
         supportedValueHeadDimensions: [Int]? = nil,
         recommendedScheme: TurboQuantScheme = .turbo4v2,
@@ -176,12 +268,25 @@ public struct TurboQuantProfile: Codable, Equatable, Identifiable, Sendable {
         optimizationPolicy: TurboQuantOptimizationPolicy = .auto,
         requiresMetalSelfTest: Bool = true,
         requiresFusedAttentionSelfTest: Bool = false,
+        status: TurboQuantProfileStatus = .experimental,
+        source: String? = nil,
+        validatedOn: String? = nil,
+        validatedBy: String? = nil,
+        confidence: Double? = nil,
         measured: TurboQuantProfileMeasurements = TurboQuantProfileMeasurements(),
         notes: [String] = []
     ) {
+        self.schemaVersion = schemaVersion
         self.id = id
+        self.exactModelIDs = exactModelIDs
         self.modelPatterns = modelPatterns
+        self.includePatterns = includePatterns
+        self.excludePatterns = excludePatterns
         self.architecture = architecture
+        self.modelTypes = modelTypes.isEmpty ? [architecture].compactMap { $0 } : modelTypes
+        self.modalities = modalities
+        self.minParametersB = minParametersB
+        self.maxParametersB = maxParametersB
         self.supportedKeyHeadDimensions = supportedKeyHeadDimensions
         self.supportedValueHeadDimensions =
             supportedValueHeadDimensions ?? supportedKeyHeadDimensions
@@ -198,8 +303,113 @@ public struct TurboQuantProfile: Codable, Equatable, Identifiable, Sendable {
         self.optimizationPolicy = optimizationPolicy
         self.requiresMetalSelfTest = requiresMetalSelfTest
         self.requiresFusedAttentionSelfTest = requiresFusedAttentionSelfTest
+        self.status = status
+        self.source = source
+        self.validatedOn = validatedOn
+        self.validatedBy = validatedBy
+        self.confidence = confidence
         self.measured = measured
         self.notes = notes
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case schemaVersion
+        case id
+        case exactModelIDs
+        case modelPatterns
+        case includePatterns
+        case excludePatterns
+        case architecture
+        case modelTypes
+        case modalities
+        case minParametersB
+        case maxParametersB
+        case supportedKeyHeadDimensions
+        case supportedValueHeadDimensions
+        case recommendedScheme
+        case fallbackScheme
+        case keyBits
+        case valueBits
+        case groupSize
+        case safeMaskModes
+        case supportedContextLengths
+        case safeContextLength
+        case qualityProfile
+        case backend
+        case optimizationPolicy
+        case requiresMetalSelfTest
+        case requiresFusedAttentionSelfTest
+        case status
+        case source
+        case validatedOn
+        case validatedBy
+        case confidence
+        case measured
+        case notes
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        let id = try container.decode(String.self, forKey: .id)
+        let architecture = try container.decodeIfPresent(String.self, forKey: .architecture)
+        let supportedKeyHeadDimensions = try container.decode(
+            [Int].self, forKey: .supportedKeyHeadDimensions)
+        let supportedValueHeadDimensions =
+            try container.decodeIfPresent([Int].self, forKey: .supportedValueHeadDimensions)
+
+        self.init(
+            schemaVersion: try container.decodeIfPresent(Int.self, forKey: .schemaVersion) ?? 1,
+            id: id,
+            exactModelIDs: try container.decodeIfPresent(
+                [String].self, forKey: .exactModelIDs) ?? [],
+            modelPatterns: try container.decodeIfPresent(
+                [String].self, forKey: .modelPatterns) ?? [],
+            includePatterns: try container.decodeIfPresent(
+                [String].self, forKey: .includePatterns) ?? [],
+            excludePatterns: try container.decodeIfPresent(
+                [String].self, forKey: .excludePatterns) ?? [],
+            architecture: architecture,
+            modelTypes: try container.decodeIfPresent([String].self, forKey: .modelTypes) ?? [],
+            modalities: try container.decodeIfPresent(
+                [TurboQuantModelModality].self, forKey: .modalities) ?? [.text],
+            minParametersB: try container.decodeIfPresent(Double.self, forKey: .minParametersB),
+            maxParametersB: try container.decodeIfPresent(Double.self, forKey: .maxParametersB),
+            supportedKeyHeadDimensions: supportedKeyHeadDimensions,
+            supportedValueHeadDimensions: supportedValueHeadDimensions,
+            recommendedScheme: try container.decodeIfPresent(
+                TurboQuantScheme.self, forKey: .recommendedScheme) ?? .turbo4v2,
+            fallbackScheme: try container.decodeIfPresent(
+                TurboQuantScheme.self, forKey: .fallbackScheme),
+            keyBits: try container.decodeIfPresent(Double.self, forKey: .keyBits) ?? 3.5,
+            valueBits: try container.decodeIfPresent(Int.self, forKey: .valueBits) ?? 4,
+            groupSize: try container.decodeIfPresent(Int.self, forKey: .groupSize) ?? 64,
+            safeMaskModes: try container.decodeIfPresent(
+                [TurboQuantMaskMode].self, forKey: .safeMaskModes) ?? [.none, .causal],
+            supportedContextLengths: try container.decodeIfPresent(
+                [Int].self, forKey: .supportedContextLengths)
+                ?? [4096, 8192, 16384, 32768, 65536],
+            safeContextLength: try container.decodeIfPresent(Int.self, forKey: .safeContextLength),
+            qualityProfile: try container.decodeIfPresent(
+                TurboQuantQualityProfile.self, forKey: .qualityProfile) ?? .balanced,
+            backend: try container.decodeIfPresent(TurboQuantBackend.self, forKey: .backend)
+                ?? .metalPolarQJL,
+            optimizationPolicy: try container.decodeIfPresent(
+                TurboQuantOptimizationPolicy.self, forKey: .optimizationPolicy) ?? .auto,
+            requiresMetalSelfTest: try container.decodeIfPresent(
+                Bool.self, forKey: .requiresMetalSelfTest) ?? true,
+            requiresFusedAttentionSelfTest: try container.decodeIfPresent(
+                Bool.self, forKey: .requiresFusedAttentionSelfTest) ?? false,
+            status: try container.decodeIfPresent(TurboQuantProfileStatus.self, forKey: .status)
+                ?? .experimental,
+            source: try container.decodeIfPresent(String.self, forKey: .source),
+            validatedOn: try container.decodeIfPresent(String.self, forKey: .validatedOn),
+            validatedBy: try container.decodeIfPresent(String.self, forKey: .validatedBy),
+            confidence: try container.decodeIfPresent(Double.self, forKey: .confidence),
+            measured: try container.decodeIfPresent(
+                TurboQuantProfileMeasurements.self, forKey: .measured)
+                ?? TurboQuantProfileMeasurements(),
+            notes: try container.decodeIfPresent([String].self, forKey: .notes) ?? []
+        )
     }
 
     public func supports(
@@ -253,20 +463,59 @@ public struct TurboQuantProfileRegistry: Sendable {
 
     public func profile(
         for modelID: String,
+        modelType: String? = nil,
+        modality: TurboQuantModelModality? = nil,
+        parameterCountB: Double? = nil,
         keyHeadDimension: Int? = nil,
         valueHeadDimension: Int? = nil,
         maskMode: TurboQuantMaskMode = .causal,
         contextLength: Int? = nil
     ) -> TurboQuantProfile? {
-        profiles.first { profile in
-            profile.matches(modelID: modelID)
-                && profile.supports(
-                    keyHeadDimension: keyHeadDimension,
-                    valueHeadDimension: valueHeadDimension,
-                    maskMode: maskMode,
-                    contextLength: contextLength
-                )
+        let descriptor = TurboQuantModelDescriptor(
+            modelID: modelID,
+            modelType: modelType,
+            modality: modality,
+            parameterCountB: parameterCountB)
+        return selection(
+            for: descriptor,
+            keyHeadDimension: keyHeadDimension,
+            valueHeadDimension: valueHeadDimension,
+            maskMode: maskMode,
+            contextLength: contextLength
+        ).profile
+    }
+
+    public func selection(
+        for descriptor: TurboQuantModelDescriptor,
+        keyHeadDimension: Int? = nil,
+        valueHeadDimension: Int? = nil,
+        maskMode: TurboQuantMaskMode = .causal,
+        contextLength: Int? = nil
+    ) -> TurboQuantProfileSelection {
+        var diagnostics: [TurboQuantProfileDiagnostic] = []
+        for profile in profiles {
+            let reasons = profile.rejectionReasons(
+                descriptor: descriptor,
+                keyHeadDimension: keyHeadDimension,
+                valueHeadDimension: valueHeadDimension,
+                maskMode: maskMode,
+                contextLength: contextLength)
+            diagnostics.append(
+                TurboQuantProfileDiagnostic(
+                    profileID: profile.id,
+                    accepted: reasons.isEmpty,
+                    reasons: reasons))
+            if reasons.isEmpty {
+                return TurboQuantProfileSelection(
+                    descriptor: descriptor,
+                    profile: profile,
+                    diagnostics: diagnostics)
+            }
         }
+        return TurboQuantProfileSelection(
+            descriptor: descriptor,
+            profile: nil,
+            diagnostics: diagnostics)
     }
 
     public static func loadJSONProfiles(from directory: URL) throws -> [TurboQuantProfile] {
@@ -288,6 +537,24 @@ public struct TurboQuantProfileRegistry: Sendable {
     }
 }
 
+public struct TurboQuantProfileDiagnostic: Equatable, Sendable {
+    public var profileID: String
+    public var accepted: Bool
+    public var reasons: [String]
+}
+
+public struct TurboQuantProfileSelection: Equatable, Sendable {
+    public var descriptor: TurboQuantModelDescriptor
+    public var profile: TurboQuantProfile?
+    public var diagnostics: [TurboQuantProfileDiagnostic]
+
+    public var rejectionReasons: [String] {
+        diagnostics.flatMap { diagnostic in
+            diagnostic.reasons.map { "\(diagnostic.profileID): \($0)" }
+        }
+    }
+}
+
 extension GenerateParameters {
     public init(
         turboQuantProfile profile: TurboQuantProfile,
@@ -299,6 +566,9 @@ extension GenerateParameters {
     public init(
         turboQuantModelID modelID: String,
         registry: TurboQuantProfileRegistry = .bundled,
+        modelType: String? = nil,
+        modality: TurboQuantModelModality? = nil,
+        parameterCountB: Double? = nil,
         keyHeadDimension: Int? = nil,
         valueHeadDimension: Int? = nil,
         maskMode: TurboQuantMaskMode = .causal,
@@ -307,6 +577,9 @@ extension GenerateParameters {
     ) {
         if let profile = registry.profile(
             for: modelID,
+            modelType: modelType,
+            modality: modality,
+            parameterCountB: parameterCountB,
             keyHeadDimension: keyHeadDimension,
             valueHeadDimension: valueHeadDimension,
             maskMode: maskMode,
@@ -324,11 +597,90 @@ extension GenerateParameters {
 }
 
 extension TurboQuantProfile {
-    fileprivate func matches(modelID: String) -> Bool {
-        let normalizedID = Self.normalized(modelID)
-        return modelPatterns.contains { pattern in
-            Self.matches(pattern: Self.normalized(pattern), modelID: normalizedID)
+    fileprivate func rejectionReasons(
+        descriptor: TurboQuantModelDescriptor,
+        keyHeadDimension: Int? = nil,
+        valueHeadDimension: Int? = nil,
+        maskMode: TurboQuantMaskMode = .causal,
+        contextLength: Int? = nil
+    ) -> [String] {
+        var reasons = [String]()
+        if status == .deprecated {
+            reasons.append("profile is deprecated")
         }
+
+        let normalizedID = Self.normalized(descriptor.modelID)
+        let normalizedExactIDs = Set(exactModelIDs.map(Self.normalized))
+        let exactIDMatched = normalizedExactIDs.contains(normalizedID)
+        let includeSet = includePatterns.isEmpty ? modelPatterns : includePatterns
+        let includeMatched =
+            exactIDMatched
+            || includeSet.contains { pattern in
+                Self.matches(pattern: Self.normalized(pattern), modelID: normalizedID)
+            }
+        if !includeMatched {
+            reasons.append("model id does not match exact ids or include patterns")
+        }
+
+        if excludePatterns.contains(where: { pattern in
+            Self.matches(pattern: Self.normalized(pattern), modelID: normalizedID)
+        }) {
+            reasons.append("model id matches an exclude pattern")
+        }
+
+        if let modelType = descriptor.modelType {
+            let normalizedModelType = Self.normalizedModelType(modelType)
+            let allowedTypes = Set((modelTypes.isEmpty ? [architecture].compactMap { $0 } : modelTypes)
+                .map(Self.normalizedModelType))
+            if !allowedTypes.isEmpty, !allowedTypes.contains(normalizedModelType) {
+                reasons.append("model type '\(modelType)' is not supported")
+            }
+        }
+
+        if let modality = descriptor.modality, !modalities.contains(modality) {
+            reasons.append("modality '\(modality.rawValue)' is not supported")
+        }
+
+        let implicitProfileSizeB = TurboQuantModelDescriptor.inferParameterCountB(from: id)
+        let effectiveMinParametersB =
+            minParametersB ?? implicitProfileSizeB.map { max($0 - 0.05, 0) }
+        let effectiveMaxParametersB = maxParametersB ?? implicitProfileSizeB.map { $0 + 0.05 }
+        if (effectiveMinParametersB != nil || effectiveMaxParametersB != nil)
+            && descriptor.parameterCountB == nil
+        {
+            reasons.append("model size could not be inferred from id")
+        }
+        if let effectiveMinParametersB, let parameterCountB = descriptor.parameterCountB,
+            parameterCountB < effectiveMinParametersB
+        {
+            reasons.append(
+                "model size \(parameterCountB)B is below minimum \(effectiveMinParametersB)B")
+        }
+        if let effectiveMaxParametersB, let parameterCountB = descriptor.parameterCountB,
+            parameterCountB > effectiveMaxParametersB
+        {
+            reasons.append(
+                "model size \(parameterCountB)B exceeds maximum \(effectiveMaxParametersB)B")
+        }
+
+        if let keyHeadDimension,
+            !supportedKeyHeadDimensions.contains(keyHeadDimension)
+        {
+            reasons.append("key head dimension \(keyHeadDimension) is not supported")
+        }
+        if let valueHeadDimension,
+            !supportedValueHeadDimensions.contains(valueHeadDimension)
+        {
+            reasons.append("value head dimension \(valueHeadDimension) is not supported")
+        }
+        if !safeMaskModes.contains(maskMode) {
+            reasons.append("mask mode '\(maskMode.rawValue)' is not supported")
+        }
+        if let contextLength, let safeContextLength, contextLength > safeContextLength {
+            reasons.append("context length \(contextLength) exceeds safe length \(safeContextLength)")
+        }
+
+        return reasons
     }
 
     fileprivate static func normalized(_ value: String) -> String {
@@ -336,6 +688,13 @@ extension TurboQuantProfile {
             .lowercased()
             .replacingOccurrences(of: "_", with: "-")
             .replacingOccurrences(of: " ", with: "-")
+    }
+
+    fileprivate static func normalizedModelType(_ value: String) -> String {
+        value
+            .lowercased()
+            .replacingOccurrences(of: ".", with: "_")
+            .replacingOccurrences(of: "-", with: "_")
     }
 
     fileprivate static func matches(pattern: String, modelID: String) -> Bool {
@@ -367,84 +726,477 @@ private let turboQuantProfileNotes = [
 
 private let commonSafeMasks: [TurboQuantMaskMode] = [.none, .causal]
 
+private let bundledProfileDefaultContextLengths = [4096, 8192, 16384, 32768, 65536]
+
+private func bundledProfile(
+    id: String,
+    patterns: [String],
+    includePatterns: [String]? = nil,
+    excludePatterns: [String] = [],
+    architecture: String? = nil,
+    modelTypes: [String] = [],
+    modalities: [TurboQuantModelModality] = [.text],
+    minParametersB: Double? = nil,
+    maxParametersB: Double? = nil,
+    supportedKeyHeadDimensions: [Int],
+    supportedValueHeadDimensions: [Int]? = nil,
+    supportedContextLengths: [Int] = bundledProfileDefaultContextLengths,
+    safeContextLength: Int? = 65536,
+    source: String? = "profile-audit-2026-05-23",
+    confidence: Double? = nil,
+    extraNotes: [String] = []
+) -> TurboQuantProfile {
+    TurboQuantProfile(
+        schemaVersion: 2,
+        id: id,
+        modelPatterns: patterns,
+        includePatterns: includePatterns ?? patterns,
+        excludePatterns: excludePatterns,
+        architecture: architecture,
+        modelTypes: modelTypes,
+        modalities: modalities,
+        minParametersB: minParametersB,
+        maxParametersB: maxParametersB,
+        supportedKeyHeadDimensions: supportedKeyHeadDimensions,
+        supportedValueHeadDimensions: supportedValueHeadDimensions,
+        safeMaskModes: commonSafeMasks,
+        supportedContextLengths: supportedContextLengths,
+        safeContextLength: safeContextLength,
+        status: .experimental,
+        source: source,
+        confidence: confidence,
+        notes: turboQuantProfileNotes + extraNotes
+    )
+}
+
+private let commonNonTextExcludePatterns = [
+    "*embedding*",
+    "*embed*",
+    "*reranker*",
+    "*reward*",
+    "*classifier*",
+    "*vl*",
+    "*vision*",
+    "*video*",
+    "*audio*",
+    "*omni*",
+    "*llava*",
+    "*bunny*",
+    "*paligemma*",
+    "*pixtral*",
+    "*molmo*",
+    "*moondream*",
+    "*idefics*",
+]
+
+private let qwen3ExcludePatterns =
+    commonNonTextExcludePatterns + [
+        "*qwen3.5*",
+        "*qwen-3.5*",
+        "*qwen3-5*",
+        "*qwen-3-5*",
+        "*moe*",
+        "*a3b*",
+        "*a22b*",
+        "*coder*",
+        "*next*",
+        "*deepseek*",
+    ]
+
+private func modelIDPatterns(_ bases: [String]) -> [String] {
+    bases.flatMap { ["*\($0)", "*\($0)-*"] }
+}
+
+private let qwen25SmallPatterns = modelIDPatterns([
+    "qwen2.5-0.5b", "qwen2.5-1.5b", "qwen2.5-3b", "qwen2.5-7b",
+    "qwen2.5-coder-0.5b", "qwen2.5-coder-1.5b", "qwen2.5-coder-3b",
+    "qwen2.5-coder-7b", "qwen2.5.1-coder-7b",
+    "qwen2-5-0.5b", "qwen2-5-1.5b", "qwen2-5-3b", "qwen2-5-7b",
+    "qwen2-5-coder-0.5b", "qwen2-5-coder-1.5b", "qwen2-5-coder-3b",
+    "qwen2-5-coder-7b", "qwen2-5-1-coder-7b",
+    "qwen-2.5-0.5b", "qwen-2.5-1.5b", "qwen-2.5-3b", "qwen-2.5-7b",
+    "qwen-2.5-coder-0.5b", "qwen-2.5-coder-1.5b", "qwen-2.5-coder-3b",
+    "qwen-2.5-coder-7b", "qwen-2.5.1-coder-7b",
+    "qwen-2-5-0.5b", "qwen-2-5-1.5b", "qwen-2-5-3b", "qwen-2-5-7b",
+    "qwen-2-5-coder-0.5b", "qwen-2-5-coder-1.5b", "qwen-2-5-coder-3b",
+    "qwen-2-5-coder-7b", "qwen-2-5-1-coder-7b",
+])
+
 private let bundledProfiles: [TurboQuantProfile] = [
-    TurboQuantProfile(
-        id: "llama-3.2-3b",
-        modelPatterns: ["*llama-3.2*3b*", "*llama-3-2*3b*"],
-        architecture: "llama",
-        supportedKeyHeadDimensions: [128],
-        safeMaskModes: commonSafeMasks,
-        notes: turboQuantProfileNotes
+    bundledProfile(
+        id: "exaone-small",
+        patterns: [
+            "*exaone-3.0-2.4b", "*exaone-3.0-2.4b-*", "*exaone-3.5-2.4b",
+            "*exaone-3.5-2.4b-*", "*exaone-4.0-1.2b", "*exaone-4.0-1.2b-*",
+            "*exaone-4.0-4b", "*exaone-4.0-4b-*", "*exaone-3-0-2.4b",
+            "*exaone-3-0-2.4b-*", "*exaone-3-5-2.4b", "*exaone-3-5-2.4b-*",
+            "*exaone-4-0-1.2b", "*exaone-4-0-1.2b-*", "*exaone-4-0-4b",
+            "*exaone-4-0-4b-*",
+        ],
+        excludePatterns: commonNonTextExcludePatterns + ["*moe*"],
+        architecture: "exaone",
+        modelTypes: ["exaone", "exaone4"],
+        minParametersB: 1,
+        maxParametersB: 4.5,
+        supportedKeyHeadDimensions: [64, 80, 128],
+        confidence: 0.65,
+        extraNotes: ["Covers EXAONE dense <=8B variants with runtime head-dimension checks."]
     ),
-    TurboQuantProfile(
-        id: "llama-3.1-8b",
-        modelPatterns: ["*llama-3.1*8b*", "*llama-3-1*8b*"],
-        architecture: "llama",
-        supportedKeyHeadDimensions: [128],
-        safeMaskModes: commonSafeMasks,
-        notes: turboQuantProfileNotes
+    bundledProfile(
+        id: "gemma-2-2b",
+        patterns: ["*gemma-2-2b", "*gemma-2-2b-*", "*gemma2-2b", "*gemma2-2b-*"],
+        excludePatterns: commonNonTextExcludePatterns + ["*embeddinggemma*"],
+        architecture: "gemma2",
+        modelTypes: ["gemma2"],
+        minParametersB: 1.5,
+        maxParametersB: 2.5,
+        supportedKeyHeadDimensions: [256],
+        supportedContextLengths: [4096, 8192],
+        safeContextLength: 8192,
+        confidence: 0.75
     ),
-    TurboQuantProfile(
-        id: "mistral-7b",
-        modelPatterns: ["*mistral*7b*", "*mistral-7b*"],
-        architecture: "mistral",
-        supportedKeyHeadDimensions: [128],
-        safeMaskModes: commonSafeMasks,
-        notes: turboQuantProfileNotes
+    bundledProfile(
+        id: "gemma-2b",
+        patterns: ["*gemma-2b", "*gemma-2b-*"],
+        excludePatterns: commonNonTextExcludePatterns + [
+            "*gemma-2-2b*", "*gemma2-2b*", "*embeddinggemma*",
+        ],
+        architecture: "gemma",
+        modelTypes: ["gemma"],
+        minParametersB: 1.5,
+        maxParametersB: 2.5,
+        supportedKeyHeadDimensions: [256],
+        supportedContextLengths: [4096, 8192],
+        safeContextLength: 8192,
+        confidence: 0.75
     ),
-    TurboQuantProfile(
-        id: "gemma-3-4b",
-        modelPatterns: ["*gemma-3*4b*", "*gemma3*4b*"],
+    bundledProfile(
+        id: "gemma-3-1b",
+        patterns: ["*gemma-3-1b", "*gemma-3-1b-*", "*gemma3-1b", "*gemma3-1b-*"],
+        excludePatterns: commonNonTextExcludePatterns + [
+            "*gemma-3n*", "*gemma3n*", "*embeddinggemma*",
+        ],
         architecture: "gemma3",
+        modelTypes: ["gemma3"],
+        modalities: [.text, .visionText],
+        minParametersB: 0.8,
+        maxParametersB: 1.3,
+        supportedKeyHeadDimensions: [256],
+        confidence: 0.75
+    ),
+    bundledProfile(
+        id: "gemma-3-4b",
+        patterns: ["*gemma-3-4b", "*gemma-3-4b-*", "*gemma3-4b", "*gemma3-4b-*"],
+        excludePatterns: commonNonTextExcludePatterns + [
+            "*gemma-3n*", "*gemma3n*", "*embeddinggemma*",
+        ],
+        architecture: "gemma3",
+        modelTypes: ["gemma3"],
+        modalities: [.text, .visionText],
+        minParametersB: 3.5,
+        maxParametersB: 4.5,
         supportedKeyHeadDimensions: [128, 256],
-        safeMaskModes: commonSafeMasks,
-        notes: turboQuantProfileNotes
+        confidence: 0.85
     ),
-    TurboQuantProfile(
-        id: "gemma-4",
-        modelPatterns: ["*gemma-4*", "*gemma4*"],
-        architecture: "gemma4",
-        supportedKeyHeadDimensions: [64, 128, 256],
-        safeMaskModes: commonSafeMasks,
-        notes: turboQuantProfileNotes + [
-            "Shared-KV layers use AttentionKVState so compressed state can be reused without raw KV materialization."
-        ]
-    ),
-    TurboQuantProfile(
+    bundledProfile(
         id: "gemma-3n",
-        modelPatterns: ["*gemma-3n*", "*gemma3n*"],
+        patterns: ["*gemma-3n", "*gemma-3n-*", "*gemma3n", "*gemma3n-*"],
+        excludePatterns: commonNonTextExcludePatterns + ["*embeddinggemma*"],
         architecture: "gemma3n",
+        modelTypes: ["gemma3n"],
+        modalities: [.text, .visionText],
+        minParametersB: 0,
+        maxParametersB: 8.5,
         supportedKeyHeadDimensions: [64, 128, 256],
-        safeMaskModes: commonSafeMasks,
-        notes: turboQuantProfileNotes + [
+        confidence: 0.85,
+        extraNotes: [
             "Shared-KV layers use AttentionKVState so compressed state can be reused without raw KV materialization."
         ]
     ),
-    TurboQuantProfile(
-        id: "qwen3-4b",
-        modelPatterns: ["*qwen3*4b*", "*qwen-3*4b*"],
-        architecture: "qwen3",
-        supportedKeyHeadDimensions: [128],
-        safeMaskModes: commonSafeMasks,
-        notes: turboQuantProfileNotes
+    bundledProfile(
+        id: "gemma-4",
+        patterns: ["*gemma-4", "*gemma-4-*", "*gemma4", "*gemma4-*"],
+        excludePatterns: commonNonTextExcludePatterns + ["*embeddinggemma*"],
+        architecture: "gemma4",
+        modelTypes: ["gemma4", "gemma4_text", "gemma4_assistant"],
+        modalities: [.text, .visionText],
+        minParametersB: 0,
+        maxParametersB: 8.5,
+        supportedKeyHeadDimensions: [64, 128, 256],
+        confidence: 0.85,
+        extraNotes: [
+            "Shared-KV layers use AttentionKVState so compressed state can be reused without raw KV materialization."
+        ]
     ),
-    TurboQuantProfile(
-        id: "qwen3.5-2b",
-        modelPatterns: ["*qwen3.5*2b*", "*qwen3-5*2b*", "*qwen-3.5*2b*"],
-        architecture: "qwen3.5",
-        supportedKeyHeadDimensions: [128],
-        safeMaskModes: commonSafeMasks,
-        notes: turboQuantProfileNotes
+    bundledProfile(
+        id: "gemma-7b",
+        patterns: ["*gemma-7b", "*gemma-7b-*"],
+        excludePatterns: commonNonTextExcludePatterns + [
+            "*gemma-2-7b*", "*gemma2-7b*", "*embeddinggemma*",
+        ],
+        architecture: "gemma",
+        modelTypes: ["gemma"],
+        minParametersB: 6.5,
+        maxParametersB: 7.5,
+        supportedKeyHeadDimensions: [256],
+        supportedContextLengths: [4096, 8192],
+        safeContextLength: 8192,
+        confidence: 0.75
     ),
-    TurboQuantProfile(
+    bundledProfile(
         id: "glm4-moe-lite",
-        modelPatterns: ["*glm4*moe*lite*", "*glm-4*moe*lite*"],
+        patterns: ["*glm4*moe*lite*", "*glm-4*moe*lite*", "*glm-4.7*flash*"],
+        excludePatterns: commonNonTextExcludePatterns,
         architecture: "glm4_moe_lite",
+        modelTypes: ["glm4_moe_lite"],
         supportedKeyHeadDimensions: [64, 96, 128, 192],
         supportedValueHeadDimensions: [64, 128],
-        safeMaskModes: commonSafeMasks,
-        notes: turboQuantProfileNotes + [
+        confidence: 0.65,
+        extraNotes: [
             "Latent attention may have different key and value dimensions; use two-stage compressed attention when they differ."
         ]
+    ),
+    bundledProfile(
+        id: "mistral-7b",
+        patterns: ["*mistral-7b", "*mistral-7b-*", "*mistral*7b*"],
+        excludePatterns: commonNonTextExcludePatterns + ["*e5-*"],
+        architecture: "mistral",
+        modelTypes: ["mistral"],
+        minParametersB: 6.5,
+        maxParametersB: 7.5,
+        supportedKeyHeadDimensions: [128],
+        confidence: 0.75
+    ),
+    bundledProfile(
+        id: "granite-small",
+        patterns: [
+            "*granite-3.0-2b", "*granite-3.0-2b-*", "*granite-3.1-2b",
+            "*granite-3.1-2b-*", "*granite-3.2-2b", "*granite-3.2-2b-*",
+            "*granite-3.3-2b", "*granite-3.3-2b-*", "*granite-3.0-8b",
+            "*granite-3.0-8b-*", "*granite-3.1-8b", "*granite-3.1-8b-*",
+            "*granite-3.2-8b", "*granite-3.2-8b-*", "*granite-3.3-8b",
+            "*granite-3.3-8b-*",
+        ],
+        excludePatterns: commonNonTextExcludePatterns + ["*moe*"],
+        architecture: "granite",
+        modelTypes: ["granite"],
+        minParametersB: 1.5,
+        maxParametersB: 8.5,
+        supportedKeyHeadDimensions: [64, 80, 128],
+        confidence: 0.65,
+        extraNotes: ["Covers Granite dense <=8B variants with runtime head-dimension checks."]
+    ),
+    bundledProfile(
+        id: "lfm2-small",
+        patterns: [
+            "*lfm2-350m", "*lfm2-350m-*", "*lfm2-700m", "*lfm2-700m-*",
+            "*lfm2-1.2b", "*lfm2-1.2b-*", "*lfm-2-350m", "*lfm-2-350m-*",
+            "*lfm-2-700m", "*lfm-2-700m-*", "*lfm-2-1.2b", "*lfm-2-1.2b-*",
+        ],
+        excludePatterns: commonNonTextExcludePatterns + ["*moe*"],
+        architecture: "lfm2",
+        modelTypes: ["lfm2"],
+        minParametersB: 0.2,
+        maxParametersB: 1.5,
+        supportedKeyHeadDimensions: [64, 128],
+        confidence: 0.65,
+        extraNotes: ["Covers LFM2 small dense variants with runtime head-dimension checks."]
+    ),
+    bundledProfile(
+        id: "llama-3-8b",
+        patterns: ["*llama-3-8b", "*llama-3-8b-*", "*llama3-8b", "*llama3-8b-*"],
+        excludePatterns: commonNonTextExcludePatterns,
+        architecture: "llama",
+        modelTypes: ["llama"],
+        minParametersB: 7.5,
+        maxParametersB: 8.5,
+        supportedKeyHeadDimensions: [128],
+        confidence: 0.75
+    ),
+    bundledProfile(
+        id: "llama-3.1-8b",
+        patterns: [
+            "*llama-3.1-8b", "*llama-3.1-8b-*", "*llama-3-1-8b",
+            "*llama-3-1-8b-*",
+        ],
+        excludePatterns: commonNonTextExcludePatterns,
+        architecture: "llama",
+        modelTypes: ["llama"],
+        minParametersB: 7.5,
+        maxParametersB: 8.5,
+        supportedKeyHeadDimensions: [128],
+        confidence: 0.85
+    ),
+    bundledProfile(
+        id: "llama-3.2-1b",
+        patterns: [
+            "*llama-3.2-1b", "*llama-3.2-1b-*", "*llama-3-2-1b",
+            "*llama-3-2-1b-*",
+        ],
+        excludePatterns: commonNonTextExcludePatterns,
+        architecture: "llama",
+        modelTypes: ["llama"],
+        minParametersB: 0.9,
+        maxParametersB: 1.2,
+        supportedKeyHeadDimensions: [64],
+        confidence: 0.75
+    ),
+    bundledProfile(
+        id: "llama-3.2-3b",
+        patterns: [
+            "*llama-3.2-3b", "*llama-3.2-3b-*", "*llama-3-2-3b",
+            "*llama-3-2-3b-*",
+        ],
+        excludePatterns: commonNonTextExcludePatterns,
+        architecture: "llama",
+        modelTypes: ["llama"],
+        minParametersB: 2.5,
+        maxParametersB: 3.5,
+        supportedKeyHeadDimensions: [128],
+        confidence: 0.85
+    ),
+    bundledProfile(
+        id: "phi-2",
+        patterns: ["*phi-2", "*phi-2-*"],
+        excludePatterns: commonNonTextExcludePatterns,
+        architecture: "phi",
+        modelTypes: ["phi"],
+        supportedKeyHeadDimensions: [80],
+        supportedContextLengths: [2048, 4096],
+        safeContextLength: 4096,
+        confidence: 0.75
+    ),
+    bundledProfile(
+        id: "phi-3-mini",
+        patterns: ["*phi-3-mini", "*phi-3-mini-*", "*phi3-mini", "*phi3-mini-*"],
+        excludePatterns: commonNonTextExcludePatterns,
+        architecture: "phi3",
+        modelTypes: ["phi3"],
+        supportedKeyHeadDimensions: [96],
+        confidence: 0.75
+    ),
+    bundledProfile(
+        id: "phi-3.5-mini",
+        patterns: [
+            "*phi-3.5-mini", "*phi-3.5-mini-*", "*phi-3-5-mini",
+            "*phi-3-5-mini-*", "*phi3.5-mini", "*phi3.5-mini-*",
+        ],
+        excludePatterns: commonNonTextExcludePatterns,
+        architecture: "phi3",
+        modelTypes: ["phi3"],
+        supportedKeyHeadDimensions: [96],
+        confidence: 0.75
+    ),
+    bundledProfile(
+        id: "phi-4-mini",
+        patterns: ["*phi-4-mini", "*phi-4-mini-*", "*phi4-mini", "*phi4-mini-*"],
+        excludePatterns: commonNonTextExcludePatterns,
+        architecture: "phi3",
+        modelTypes: ["phi3"],
+        supportedKeyHeadDimensions: [128],
+        confidence: 0.75
+    ),
+    bundledProfile(
+        id: "qwen2.5-small",
+        patterns: qwen25SmallPatterns,
+        excludePatterns: commonNonTextExcludePatterns + [
+            "*qwen3*", "*qwen-3*", "*moe*", "*a3b*", "*a22b*", "*next*", "*deepseek*",
+        ],
+        architecture: "qwen2",
+        modelTypes: ["qwen2"],
+        minParametersB: 0.4,
+        maxParametersB: 7.5,
+        supportedKeyHeadDimensions: [64, 128],
+        confidence: 0.65,
+        extraNotes: ["Covers Qwen2.5 dense <=7B variants with runtime head-dimension checks."]
+    ),
+    bundledProfile(
+        id: "qwen3-0.6b",
+        patterns: ["*qwen3-0.6b", "*qwen3-0.6b-*", "*qwen-3-0.6b", "*qwen-3-0.6b-*"],
+        excludePatterns: qwen3ExcludePatterns,
+        architecture: "qwen3",
+        modelTypes: ["qwen3"],
+        minParametersB: 0.5,
+        maxParametersB: 0.7,
+        supportedKeyHeadDimensions: [128],
+        confidence: 0.75
+    ),
+    bundledProfile(
+        id: "qwen3-1.7b",
+        patterns: ["*qwen3-1.7b", "*qwen3-1.7b-*", "*qwen-3-1.7b", "*qwen-3-1.7b-*"],
+        excludePatterns: qwen3ExcludePatterns,
+        architecture: "qwen3",
+        modelTypes: ["qwen3"],
+        minParametersB: 1.5,
+        maxParametersB: 1.9,
+        supportedKeyHeadDimensions: [128],
+        confidence: 0.75
+    ),
+    bundledProfile(
+        id: "qwen3-4b",
+        patterns: ["*qwen3-4b", "*qwen3-4b-*", "*qwen-3-4b", "*qwen-3-4b-*"],
+        excludePatterns: qwen3ExcludePatterns,
+        architecture: "qwen3",
+        modelTypes: ["qwen3"],
+        minParametersB: 3.5,
+        maxParametersB: 4.5,
+        supportedKeyHeadDimensions: [128],
+        confidence: 0.85
+    ),
+    bundledProfile(
+        id: "qwen3-8b",
+        patterns: ["*qwen3-8b", "*qwen3-8b-*", "*qwen-3-8b", "*qwen-3-8b-*"],
+        excludePatterns: qwen3ExcludePatterns,
+        architecture: "qwen3",
+        modelTypes: ["qwen3"],
+        minParametersB: 7.5,
+        maxParametersB: 8.5,
+        supportedKeyHeadDimensions: [128],
+        confidence: 0.75
+    ),
+    bundledProfile(
+        id: "qwen3.5-2b",
+        patterns: [
+            "*qwen3.5-2b", "*qwen3.5-2b-*", "*qwen3-5-2b", "*qwen3-5-2b-*",
+            "*qwen-3.5-2b", "*qwen-3.5-2b-*",
+        ],
+        excludePatterns: commonNonTextExcludePatterns + [
+            "*qwen3-2b*", "*qwen-3-2b*", "*122b*", "*a10b*", "*moe*",
+        ],
+        architecture: "qwen3_5",
+        modelTypes: ["qwen3_5"],
+        modalities: [.text, .visionText],
+        minParametersB: 1.5,
+        maxParametersB: 2.5,
+        supportedKeyHeadDimensions: [256],
+        confidence: 0.85,
+        extraNotes: ["Qwen3.5 small profiles use verified 256-dimensional key and value heads."]
+    ),
+    bundledProfile(
+        id: "smollm-small",
+        patterns: [
+            "*smollm-135m", "*smollm-135m-*", "*smollm-360m", "*smollm-360m-*",
+            "*smollm-1.7b", "*smollm-1.7b-*", "*smollm2-135m", "*smollm2-135m-*",
+            "*smollm2-360m", "*smollm2-360m-*", "*smollm2-1.7b", "*smollm2-1.7b-*",
+        ],
+        excludePatterns: commonNonTextExcludePatterns,
+        architecture: "llama",
+        modelTypes: ["llama", "smollm", "smollm2"],
+        minParametersB: 0.1,
+        maxParametersB: 2,
+        supportedKeyHeadDimensions: [64, 128],
+        confidence: 0.65,
+        extraNotes: ["Covers SmolLM and SmolLM2 small dense variants with runtime head-dimension checks."]
+    ),
+    bundledProfile(
+        id: "smollm3-3b",
+        patterns: ["*smollm3-3b", "*smollm3-3b-*", "*smollm-3-3b", "*smollm-3-3b-*"],
+        excludePatterns: commonNonTextExcludePatterns,
+        architecture: "llama",
+        modelTypes: ["llama", "smollm3"],
+        minParametersB: 2.5,
+        maxParametersB: 3.5,
+        supportedKeyHeadDimensions: [64, 128],
+        confidence: 0.75
     ),
 ]
