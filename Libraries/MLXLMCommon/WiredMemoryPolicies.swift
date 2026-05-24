@@ -60,11 +60,12 @@ public struct WiredSumPolicy: WiredMemoryPolicy, Hashable, Sendable {
     }
 }
 
-/// Max policy: `max(baseline, max(activeSizes))`.
+/// Max policy: `baseline + max(activeSizes)`.
 ///
 /// This policy tracks the single largest active ticket. It is useful when you
-/// want the limit to scale with the largest in-flight request rather than the
-/// sum of concurrent work.
+/// want to add only the largest in-flight request to the baseline rather than
+/// summing concurrent work. This matches the base MLX `WiredMaxPolicy`
+/// semantics.
 ///
 /// ### Example
 /// ```swift
@@ -76,6 +77,22 @@ public struct WiredSumPolicy: WiredMemoryPolicy, Hashable, Sendable {
 /// ```
 public struct WiredMaxPolicy: WiredMemoryPolicy, Hashable, Sendable {
     /// Creates a max policy.
+    public init() {}
+
+    /// Computes the desired limit for the current active set.
+    public func limit(baseline: Int, activeSizes: [Int]) -> Int {
+        let maxSize = activeSizes.max() ?? 0
+        return baseline + maxSize
+    }
+}
+
+/// Absolute max policy: `max(baseline, max(activeSizes))`.
+///
+/// This preserves the previous `MLXLMCommon.WiredMaxPolicy` behavior for callers
+/// that passed absolute demand sizes rather than incremental demand over the
+/// baseline. Prefer ``WiredMaxPolicy`` for new inference tickets.
+public struct WiredAbsoluteMaxPolicy: WiredMemoryPolicy, Hashable, Sendable {
+    /// Creates an absolute max policy.
     public init() {}
 
     /// Computes the desired limit for the current active set.

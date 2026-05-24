@@ -158,11 +158,14 @@ private func turboQuantSupportsPackedFallback(
 
 private enum TurboQuantCacheError: Error, CustomStringConvertible {
     case compressedBackfillUnavailable(String)
+    case compressedStorageInvalid(String)
 
     var description: String {
         switch self {
         case .compressedBackfillUnavailable(let message):
             "TurboQuant compressed cache backfill unavailable: \(message)"
+        case .compressedStorageInvalid(let message):
+            "TurboQuant compressed cache storage invalid: \(message)"
         }
     }
 }
@@ -779,24 +782,7 @@ public final class TurboQuantKVCache: QuantizedKVCache, TurboQuantCompressedKVCa
             seed: code.seed,
             valueBits: code.valueBits
         )
-        if code.role == .value {
-            return TurboQuantAttentionCode(
-                layout: newLayout,
-                preset: code.preset,
-                role: code.role,
-                groupSize: code.groupSize,
-                seed: code.seed,
-                valueBits: code.valueBits,
-                scalesPerGroup: code.scalesPerGroup,
-                packedMagnitudes: concatenated(
-                    [code.packedMagnitudes, zeros.packedMagnitudes], axis: 2),
-                signs: code.signs,
-                highPrecisionMask: code.highPrecisionMask,
-                residualSigns: code.residualSigns,
-                scales: concatenated([code.scales, zeros.scales], axis: 2)
-            )
-        }
-        return TurboQuantAttentionCode(
+        let expanded = TurboQuantAttentionCode(
             layout: newLayout,
             preset: code.preset,
             role: code.role,
@@ -812,6 +798,22 @@ public final class TurboQuantKVCache: QuantizedKVCache, TurboQuantCompressedKVCa
             residualSigns: concatenated([code.residualSigns, zeros.residualSigns], axis: 2),
             scales: concatenated([code.scales, zeros.scales], axis: 2)
         )
+        try validateExpandedCompressedCode(expanded)
+        return expanded
+    }
+
+    private func validateExpandedCompressedCode(_ code: TurboQuantAttentionCode) throws {
+        let capacity = code.layout.capacity
+        guard code.packedMagnitudes.ndim == 5, code.packedMagnitudes.dim(2) == capacity,
+            code.signs.ndim == 5, code.signs.dim(2) == capacity,
+            code.highPrecisionMask.ndim == 5, code.highPrecisionMask.dim(2) == capacity,
+            code.residualSigns.ndim == 5, code.residualSigns.dim(2) == capacity,
+            code.scales.ndim == 5, code.scales.dim(2) == capacity
+        else {
+            throw TurboQuantCacheError.compressedStorageInvalid(
+                "expanded \(code.role.rawValue) compressed storage does not match capacity \(capacity)"
+            )
+        }
     }
 }
 

@@ -615,7 +615,7 @@ public struct TokenIterator: TokenIteratorProtocol {
     /// Initialize a `TokenIterator` with the given input.
     ///
     /// If more control is needed over the generation,
-    /// ``init(input:model:cache:processor:sampler:prefillStepSize:maxTokens:)``
+    /// ``init(input:model:cache:processor:sampler:prefillStepSize:maxTokens:cacheParameters:)``
     /// allows a caller to specify ``LogitProcessor`` and ``LogitSampler``
     /// directly.
     ///
@@ -648,6 +648,42 @@ public struct TokenIterator: TokenIteratorProtocol {
 
         self.promptPrefillTime = try measure {
             try prepare(input: input, windowSize: parameters.prefillStepSize)
+        }
+    }
+
+    /// Initialize a `TokenIterator` from a cache that already contains a prefix of
+    /// `input`.
+    ///
+    /// The full prompt is still passed to the logit processor, but model prefill
+    /// evaluates only the suffix that is not already represented by `cache`.
+    public init(
+        input: LMInput, model: any LanguageModel, cache: [KVCache],
+        cachedPrefixTokenCount: Int, parameters: GenerateParameters
+    ) throws {
+        self.model = model
+        self.y = input.text
+        self.cache = cache
+
+        self.processor = parameters.processor()
+        self.sampler = parameters.sampler()
+        self.maxTokens = parameters.maxTokens
+
+        self.kvBits = parameters.kvBits
+        self.kvGroupSize = parameters.kvGroupSize
+        self.quantizedKVStart = parameters.quantizedKVStart
+        self.kvCacheStrategy = parameters.kvCacheStrategy
+        self.turboQuantPreset = parameters.turboQuantPreset
+        self.turboQuantBackend = parameters.turboQuantBackend
+        self.turboQuantOptimizationPolicy = parameters.turboQuantOptimizationPolicy
+        self.turboQuantSeed = parameters.turboQuantSeed
+        self.turboQuantValueBits = parameters.turboQuantValueBits
+
+        self.promptPrefillTime = try measure {
+            try prepare(
+                input: input,
+                cachedPrefixTokenCount: cachedPrefixTokenCount,
+                windowSize: parameters.prefillStepSize
+            )
         }
     }
 
@@ -693,7 +729,72 @@ public struct TokenIterator: TokenIteratorProtocol {
 
     mutating func prepare(input: LMInput, windowSize: Int? = nil) throws {
         processor?.prompt(input.text.tokens)
+        try prepareEvaluatingFullInput(input: input, windowSize: windowSize)
+    }
 
+    mutating func prepare(
+        input: LMInput,
+        cachedPrefixTokenCount: Int,
+        windowSize: Int? = nil
+    ) throws {
+        processor?.prompt(input.text.tokens)
+
+        guard input.image == nil, input.video == nil, input.audio == nil else {
+            try prepareEvaluatingFullInput(input: input, windowSize: windowSize)
+            return
+        }
+        guard cachedPrefixTokenCount > 0, !cache.isEmpty else {
+            try prepareEvaluatingFullInput(input: input, windowSize: windowSize)
+            return
+        }
+
+        let promptTokenCount = input.text.tokens.size
+        let cachedTokens = cache.map(\.offset).min() ?? 0
+        var usablePrefixTokenCount = Swift.min(
+            cachedPrefixTokenCount,
+            cachedTokens,
+            promptTokenCount
+        )
+        if usablePrefixTokenCount <= 0 {
+            try prepareEvaluatingFullInput(input: input, windowSize: windowSize)
+            return
+        }
+
+        if usablePrefixTokenCount >= promptTokenCount {
+            guard promptTokenCount > 0, canTrimPromptCache(cache) else {
+                try prepareEvaluatingFullInput(input: input, windowSize: windowSize)
+                return
+            }
+            let trimmed = trimPromptCache(cache, numTokens: 1)
+            guard trimmed == 1 else {
+                try prepareEvaluatingFullInput(input: input, windowSize: windowSize)
+                return
+            }
+            usablePrefixTokenCount = promptTokenCount - 1
+        }
+
+        let suffix = input.text[text: .stride(from: usablePrefixTokenCount)]
+        guard suffix.tokens.size > 0 else {
+            try prepareEvaluatingFullInput(input: input, windowSize: windowSize)
+            return
+        }
+        try prepareEvaluatingSuffix(
+            input: LMInput(text: suffix),
+            windowSize: windowSize
+        )
+    }
+
+    private mutating func prepareEvaluatingFullInput(
+        input: LMInput,
+        windowSize: Int? = nil
+    ) throws {
+        try prepareEvaluatingSuffix(input: input, windowSize: windowSize)
+    }
+
+    private mutating func prepareEvaluatingSuffix(
+        input: LMInput,
+        windowSize: Int? = nil
+    ) throws {
         switch try model.prepare(input, cache: cache, windowSize: windowSize) {
         case .tokens(let tokens):
             y = tokens
@@ -1715,6 +1816,33 @@ public func generate(
 ) throws -> AsyncStream<Generation> {
     let iterator = try TokenIterator(
         input: input, model: context.model, cache: cache, parameters: parameters)
+    let (stream, _) = generateTask(
+        promptTokenCount: input.text.tokens.size,
+        modelConfiguration: context.configuration,
+        tokenizer: context.tokenizer,
+        iterator: iterator,
+        wiredMemoryTicket: wiredMemoryTicket,
+        tools: tools)
+    return stream
+}
+
+/// Generate with a cache that already contains a token prefix for `input`.
+public func generate(
+    input: LMInput,
+    cache: [KVCache],
+    cachedPrefixTokenCount: Int,
+    parameters: GenerateParameters,
+    context: ModelContext,
+    wiredMemoryTicket: WiredMemoryTicket? = nil,
+    tools: [[String: any Sendable]]? = nil
+) throws -> AsyncStream<Generation> {
+    let iterator = try TokenIterator(
+        input: input,
+        model: context.model,
+        cache: cache,
+        cachedPrefixTokenCount: cachedPrefixTokenCount,
+        parameters: parameters
+    )
     let (stream, _) = generateTask(
         promptTokenCount: input.text.tokens.size,
         modelConfiguration: context.configuration,

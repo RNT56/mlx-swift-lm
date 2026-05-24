@@ -18,11 +18,20 @@ final class WiredMemoryPolicyTests: XCTestCase {
         XCTAssertFalse(policy.canAdmit(baseline: 100, activeSizes: [50], newSize: 51))
     }
 
-    func testWiredMaxPolicyReturnsLargestDemandOrBaseline() {
+    func testWiredMaxPolicyAddsLargestDemandToBaseline() {
         let policy = WiredMaxPolicy()
+
+        XCTAssertEqual(policy.limit(baseline: 100, activeSizes: [20, 150, 60]), 250)
+        XCTAssertEqual(policy.limit(baseline: 200, activeSizes: [20, 150, 60]), 350)
+        XCTAssertEqual(policy.limit(baseline: 200, activeSizes: []), 200)
+    }
+
+    func testWiredAbsoluteMaxPolicyPreservesPreviousMaxBehavior() {
+        let policy = WiredAbsoluteMaxPolicy()
 
         XCTAssertEqual(policy.limit(baseline: 100, activeSizes: [20, 150, 60]), 150)
         XCTAssertEqual(policy.limit(baseline: 200, activeSizes: [20, 150, 60]), 200)
+        XCTAssertEqual(policy.limit(baseline: 200, activeSizes: []), 200)
     }
 
     func testWiredFixedPolicyIgnoresActiveSizes() {

@@ -2577,6 +2577,12 @@ public func quantizedScaledDotProductAttention(
 ///   - kvBits: Number of bits for quantization (nil = no quantization)
 ///   - kvGroupSize: Group size for quantization
 ///   - quantizedKVStart: Token count threshold to begin quantizing
+///   - kvCacheStrategy: Cache strategy used for dynamic quantization
+///   - turboQuantPreset: TurboQuant preset used when `kvCacheStrategy` is `.turboQuant`
+///   - turboQuantBackend: Requested TurboQuant backend
+///   - turboQuantOptimizationPolicy: TurboQuant optimization policy
+///   - turboQuantSeed: Optional deterministic seed for TurboQuant encoding
+///   - turboQuantValueBits: Optional value-bit override for TurboQuant caches
 public func maybeQuantizeKVCache(
     cache: inout [KVCache],
     kvBits: Int?,
