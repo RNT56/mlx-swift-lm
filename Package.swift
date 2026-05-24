@@ -41,7 +41,7 @@ let package = Package(
     dependencies: [
         .package(
             url: "https://github.com/RNT56/mlx-swift",
-            revision: "a90b1097df45e4e70b6e0bb367624f8f5857970b"),
+            revision: "2b0bd735a0cf18e0bdb87d1b066e2e9127299e08"),
         .package(url: "https://github.com/swiftlang/swift-syntax.git", "600.0.0" ..< "604.0.0"),
     ],
     targets: [
