@@ -220,15 +220,22 @@ private func recordTurboQuantFallback(
         case .typedFailure:
             .fatalOnFailure
         }
-    cache.recordFallback(
-        TurboQuantFallbackResult(
-            fromPath: cache.attentionDiagnostics.activeAttentionPath,
-            toPath: toPath,
-            policy: policy,
-            reason: reason,
-            isSemanticallyExact: path == .rawExactSDPA || path == .decodedCompressedSDPA
-        )
+    let result = TurboQuantFallbackResult(
+        fromPath: cache.attentionDiagnostics.activeAttentionPath,
+        toPath: toPath,
+        policy: policy,
+        reason: reason,
+        isSemanticallyExact: path == .rawExactSDPA || path == .decodedCompressedSDPA
     )
+    cache.recordFallback(result)
+    turboQuantTrace(
+        "fallback from \(result.fromPath.rawValue) to \(result.toPath?.rawValue ?? "none"): \(result.reason)"
+    )
+}
+
+private func turboQuantTrace(_ message: String) {
+    guard TurboQuantRuntimeControl.enabled("TURBOQUANT_TRACE") else { return }
+    FileHandle.standardError.write(Data("TurboQuant: \(message)\n".utf8))
 }
 
 private func exactScaledDotProductAttention(
@@ -565,6 +572,7 @@ public func attentionWithKVStateThrowing(
     }
 }
 
+@available(*, deprecated, message: "Use attentionWithKVStateThrowing so TurboQuant failures remain recoverable.")
 public func attentionWithKVState(
     queries: MLXArray,
     state: AttentionKVState,
@@ -584,7 +592,11 @@ public func attentionWithKVState(
         if case .turboQuant(_, _, let cache) = state {
             cache.recordCompressedAttentionFailure(String(describing: error))
         }
-        fatalError(String(describing: error))
+        let message = String(describing: error)
+        if TurboQuantRuntimeControl.enabled("TURBOQUANT_FATAL_FALLBACK") {
+            fatalError(message)
+        }
+        fatalError("No semantically correct non-throwing attention fallback: \(message)")
     }
 }
 
@@ -633,15 +645,19 @@ public func attentionWithCacheUpdate(
     mask: MLXFast.ScaledDotProductAttentionMaskMode = .none,
     sinks: MLXArray? = nil
 ) -> MLXArray {
-    attentionWithCacheUpdateReturningState(
-        queries: queries,
-        keys: keys,
-        values: values,
-        cache: cache,
-        scale: scale,
-        mask: mask,
-        sinks: sinks
-    ).output
+    do {
+        return try attentionWithCacheUpdateReturningStateThrowing(
+            queries: queries,
+            keys: keys,
+            values: values,
+            cache: cache,
+            scale: scale,
+            mask: mask,
+            sinks: sinks
+        ).output
+    } catch {
+        fatalError("No semantically correct non-throwing attention fallback: \(error)")
+    }
 }
 
 public func attentionWithCacheUpdateReturningStateThrowing(
@@ -756,6 +772,7 @@ public func attentionWithCacheUpdateReturningStateThrowing(
     }
 }
 
+@available(*, deprecated, message: "Use attentionWithCacheUpdateReturningStateThrowing so TurboQuant failures remain recoverable.")
 public func attentionWithCacheUpdateReturningState(
     queries: MLXArray,
     keys: MLXArray,
@@ -788,6 +805,10 @@ public func attentionWithCacheUpdateReturningState(
                 )
             )
         }
-        fatalError(String(describing: error))
+        let message = String(describing: error)
+        if TurboQuantRuntimeControl.enabled("TURBOQUANT_FATAL_FALLBACK") {
+            fatalError(message)
+        }
+        fatalError("No semantically correct non-throwing attention fallback: \(message)")
     }
 }

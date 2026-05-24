@@ -42,6 +42,7 @@
 ^Libraries/.*:.*Cannot generate per layer inputs
 ^Libraries/MLXVLM/Models/(Gemma4|Idefics3|Mistral3|Gemma3|LFM2VL)\.swift:.*fatalError
 ^Libraries/MLXLLM/Models/(Phi3|GraniteMoeHybrid|Gemma3nText)\.swift:.*fatalError
+^Libraries/MLXLLM/Models/Gemma4Text\.swift:.*fatalError
 ^Libraries/MLXLLM/Models/Gemma3nText\.swift:.*Layer type
 
 # Explicit programmer/internal misuse traps.

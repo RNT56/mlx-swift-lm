@@ -902,7 +902,24 @@ public struct TurboQuantProfile: Codable, Equatable, Identifiable, Sendable {
             ? recommendedScheme.defaultOptimizationPolicy
             : optimizationPolicy
         resolved.turboQuantValueBits = valueBits
+        warmTurboQuantAttentionKernelsIfAvailable()
         return resolved
+    }
+
+    public func warmTurboQuantAttentionKernelsIfAvailable() {
+        guard recommendedScheme.kvCacheStrategy == .turboQuant,
+            !TurboQuantRuntimeControl.enabled("TURBOQUANT_DISABLE")
+        else {
+            return
+        }
+        let headDimensions = Array(Set(supportedKeyHeadDimensions + supportedValueHeadDimensions))
+            .sorted()
+        guard !headDimensions.isEmpty else { return }
+        try? MLX.turboQuantWarmAttentionKernelVariants(
+            headDimensions: headDimensions,
+            preset: recommendedScheme.preset,
+            groupSize: groupSize
+        )
     }
 
     public func productManifestValidation(

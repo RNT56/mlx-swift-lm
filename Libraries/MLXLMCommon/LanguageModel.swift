@@ -212,6 +212,24 @@ public protocol LanguageModel: BaseLanguageModel {
     func newCache(parameters: GenerateParameters?) -> [KVCache]
 }
 
+/// Optional throwing generation entrypoint for models with recoverable runtime failures.
+public protocol ThrowingLanguageModel: LanguageModel {
+    func callAsFunctionThrowing(_ input: LMInput.Text, cache: [KVCache]?, state: LMOutput.State?)
+        throws -> LMOutput
+    func callAsFunctionThrowing(_ inputs: MLXArray, cache: [KVCache]?) throws -> MLXArray
+}
+
+extension ThrowingLanguageModel {
+    public func callAsFunctionThrowing(
+        _ input: LMInput.Text,
+        cache: [KVCache]?,
+        state: LMOutput.State?
+    ) throws -> LMOutput {
+        let logits = try callAsFunctionThrowing(input.tokens, cache: cache)
+        return .init(logits: logits)
+    }
+}
+
 extension LanguageModel {
     public func callAsFunction(_ input: LMInput.Text, cache: [KVCache]?, state: LMOutput.State?)
         -> LMOutput
@@ -233,6 +251,12 @@ public protocol KVCacheDimensionProvider {
 
 extension LanguageModel where Self: KVCacheDimensionProvider {
     public func newCache(parameters: GenerateParameters?) -> [KVCache] {
+        let parameters: GenerateParameters? =
+            if let original = parameters {
+                (try? original.resolvedForTurboQuantRuntime(layerCount: kvHeads.count)) ?? original
+            } else {
+                nil
+            }
         // Create one cache per layer (kvHeads.count = number of layers)
         // The number of heads per layer (kvHeads[i]) is not used for cache creation
         let numLayers = kvHeads.count
@@ -254,7 +278,8 @@ extension LanguageModel where Self: KVCacheDimensionProvider {
                         backend: backend,
                         optimizationPolicy: policy,
                         seed: seed,
-                        valueBits: valueBits
+                        valueBits: valueBits,
+                        residentBudgetBytes: parameters?.turboQuantPerCacheResidentBudgetBytes
                     )
                 }
             }
@@ -265,7 +290,8 @@ extension LanguageModel where Self: KVCacheDimensionProvider {
                     backend: backend,
                     optimizationPolicy: policy,
                     seed: seed,
-                    valueBits: valueBits
+                    valueBits: valueBits,
+                    residentBudgetBytes: parameters?.turboQuantPerCacheResidentBudgetBytes
                 )
             }
         }

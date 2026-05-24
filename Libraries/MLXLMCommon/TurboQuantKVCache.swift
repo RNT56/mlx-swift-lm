@@ -247,6 +247,7 @@ private func turboQuantSupportsPackedFallback(
 private enum TurboQuantCacheError: Error, CustomStringConvertible {
     case compressedBackfillUnavailable(String)
     case compressedStorageInvalid(String)
+    case residentBudgetExceeded(residentBytes: Int, budgetBytes: Int)
 
     var description: String {
         switch self {
@@ -254,6 +255,8 @@ private enum TurboQuantCacheError: Error, CustomStringConvertible {
             "TurboQuant compressed cache backfill unavailable: \(message)"
         case .compressedStorageInvalid(let message):
             "TurboQuant compressed cache storage invalid: \(message)"
+        case .residentBudgetExceeded(let residentBytes, let budgetBytes):
+            "TurboQuant compressed cache resident bytes \(residentBytes) exceed admitted budget \(budgetBytes)"
         }
     }
 }
@@ -417,6 +420,7 @@ public final class TurboQuantKVCache: QuantizedKVCache, TurboQuantCompressedKVCa
     private var lastUnsupportedShape: String?
     private var restoredLayoutMetadata: RestoredAttentionLayoutMetadata?
     private var lastDecodedTransientBytes: Int = 0
+    private let residentBudgetBytes: Int?
     public private(set) var cacheLifecycle: TurboQuantCacheLifecycle = .empty
     public private(set) var fallbackResults: [TurboQuantFallbackResult] = []
 
@@ -435,13 +439,15 @@ public final class TurboQuantKVCache: QuantizedKVCache, TurboQuantCompressedKVCa
         backend: TurboQuantBackend = .metalPolarQJL,
         optimizationPolicy: TurboQuantOptimizationPolicy = .auto,
         seed: UInt64 = 0x9E37_79B9_7F4A_7C15,
-        valueBits: Int? = nil
+        valueBits: Int? = nil,
+        residentBudgetBytes: Int? = nil
     ) {
         self.preset = preset
         self.requestedBackend = backend
         self.optimizationPolicy = optimizationPolicy
         self.seed = seed
         self.valueBits = valueBits ?? preset.defaultValueBits
+        self.residentBudgetBytes = residentBudgetBytes
         let availability = TurboQuantKernelAvailability.current
         self.activeBackend = availability.runtimeBackend(for: backend)
         self.backendFallbackReason = availability.fallbackReason(for: backend)
@@ -690,6 +696,18 @@ public final class TurboQuantKVCache: QuantizedKVCache, TurboQuantCompressedKVCa
             )
         }
         try validateTurboQuantPair(keys: compressedKeys, values: compressedValues, context: context)
+        try enforceResidentBudget(context: context)
+    }
+
+    private func enforceResidentBudget(context: String) throws {
+        guard let residentBudgetBytes else { return }
+        let residentBytes = cacheFootprint.residentBytes
+        guard residentBytes <= residentBudgetBytes else {
+            throw TurboQuantCacheError.residentBudgetExceeded(
+                residentBytes: residentBytes,
+                budgetBytes: residentBudgetBytes
+            )
+        }
     }
 
     public func decodedCompressedState(outputDType: DType) throws -> (MLXArray, MLXArray) {
@@ -967,7 +985,8 @@ public final class TurboQuantKVCache: QuantizedKVCache, TurboQuantCompressedKVCa
             backend: requestedBackend,
             optimizationPolicy: optimizationPolicy,
             seed: seed,
-            valueBits: valueBits
+            valueBits: valueBits,
+            residentBudgetBytes: residentBudgetBytes
         )
         let s = self.state
         if !s.isEmpty {
@@ -1193,6 +1212,7 @@ public final class RotatingTurboQuantKVCache: BaseKVCache, QuantizedKVCacheProto
     private var lastUnsupportedShape: String?
     private var restoredLayoutMetadata: RestoredAttentionLayoutMetadata?
     private var lastDecodedTransientBytes: Int = 0
+    private let residentBudgetBytes: Int?
     private let keep: Int
     private let step: Int
     private let maxCacheSize: Int
@@ -1228,7 +1248,8 @@ public final class RotatingTurboQuantKVCache: BaseKVCache, QuantizedKVCacheProto
         backend: TurboQuantBackend = .metalPolarQJL,
         optimizationPolicy: TurboQuantOptimizationPolicy = .auto,
         seed: UInt64 = 0x9E37_79B9_7F4A_7C15,
-        valueBits: Int? = nil
+        valueBits: Int? = nil,
+        residentBudgetBytes: Int? = nil
     ) {
         self.keep = max(0, min(keep, maxSize))
         self.step = step
@@ -1239,6 +1260,7 @@ public final class RotatingTurboQuantKVCache: BaseKVCache, QuantizedKVCacheProto
         self.optimizationPolicy = optimizationPolicy
         self.seed = seed
         self.valueBits = valueBits ?? preset.defaultValueBits
+        self.residentBudgetBytes = residentBudgetBytes
         let availability = TurboQuantKernelAvailability.current
         self.activeBackend = availability.runtimeBackend(for: backend)
         self.backendFallbackReason = availability.fallbackReason(for: backend)
@@ -1363,6 +1385,18 @@ public final class RotatingTurboQuantKVCache: BaseKVCache, QuantizedKVCacheProto
             )
         }
         try validateTurboQuantPair(keys: compressedKeys, values: compressedValues, context: context)
+        try enforceResidentBudget(context: context)
+    }
+
+    private func enforceResidentBudget(context: String) throws {
+        guard let residentBudgetBytes else { return }
+        let residentBytes = cacheFootprint.residentBytes
+        guard residentBytes <= residentBudgetBytes else {
+            throw TurboQuantCacheError.residentBudgetExceeded(
+                residentBytes: residentBytes,
+                budgetBytes: residentBudgetBytes
+            )
+        }
     }
 
     public func decodedCompressedState(outputDType: DType) throws -> (MLXArray, MLXArray) {
@@ -1894,7 +1928,8 @@ public final class RotatingTurboQuantKVCache: BaseKVCache, QuantizedKVCacheProto
             backend: requestedBackend,
             optimizationPolicy: optimizationPolicy,
             seed: seed,
-            valueBits: valueBits
+            valueBits: valueBits,
+            residentBudgetBytes: residentBudgetBytes
         )
         let s = state
         if !s.isEmpty {
@@ -2159,7 +2194,8 @@ extension RotatingKVCache {
         backend: TurboQuantBackend = .metalPolarQJL,
         optimizationPolicy: TurboQuantOptimizationPolicy = .auto,
         seed: UInt64 = 0x9E37_79B9_7F4A_7C15,
-        valueBits: Int? = nil
+        valueBits: Int? = nil,
+        residentBudgetBytes: Int? = nil
     ) -> RotatingTurboQuantKVCache {
         let resolvedValueBits = valueBits ?? preset.defaultValueBits
         let capacity = maxSize ?? rotatingStep
@@ -2173,7 +2209,8 @@ extension RotatingKVCache {
             backend: backend,
             optimizationPolicy: optimizationPolicy,
             seed: seed,
-            valueBits: resolvedValueBits
+            valueBits: resolvedValueBits,
+            residentBudgetBytes: residentBudgetBytes
         )
         cache.offset = offset
         cache.metaState = metaState
@@ -2292,7 +2329,8 @@ extension KVCacheSimple {
         backend: TurboQuantBackend = .metalPolarQJL,
         optimizationPolicy: TurboQuantOptimizationPolicy = .auto,
         seed: UInt64 = 0x9E37_79B9_7F4A_7C15,
-        valueBits: Int? = nil
+        valueBits: Int? = nil,
+        residentBudgetBytes: Int? = nil
     ) -> TurboQuantKVCache {
         let resolvedValueBits = valueBits ?? preset.defaultValueBits
         let cache = TurboQuantKVCache(
@@ -2302,7 +2340,8 @@ extension KVCacheSimple {
             backend: backend,
             optimizationPolicy: optimizationPolicy,
             seed: seed,
-            valueBits: resolvedValueBits
+            valueBits: resolvedValueBits,
+            residentBudgetBytes: residentBudgetBytes
         )
         cache.offset = self.offset
 

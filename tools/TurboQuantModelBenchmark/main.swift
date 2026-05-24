@@ -118,6 +118,32 @@ func environmentValue(_ key: String, default defaultValue: String = "unknown") -
     ProcessInfo.processInfo.environment[key].flatMap { $0.isEmpty ? nil : $0 } ?? defaultValue
 }
 
+func gitCommit(_ relativePath: String) -> String {
+    let process = Process()
+    process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
+    process.arguments = ["git", "-C", relativePath, "rev-parse", "HEAD"]
+    let pipe = Pipe()
+    process.standardOutput = pipe
+    process.standardError = Pipe()
+    do {
+        try process.run()
+        process.waitUntilExit()
+        guard process.terminationStatus == 0 else { return "unknown" }
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        return String(data: data, encoding: .utf8)?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .nilIfEmpty ?? "unknown"
+    } catch {
+        return "unknown"
+    }
+}
+
+extension String {
+    var nilIfEmpty: String? {
+        isEmpty ? nil : self
+    }
+}
+
 func values(count: Int, scale: Double, phase: Double = 0) -> [Float] {
     (0 ..< count).map { index in
         let position = Double(index)
@@ -381,9 +407,18 @@ let report = BenchmarkReport(
     generatedAt: ISO8601DateFormatter().string(from: Date()),
     iterations: iterations,
     repoCommits: [
-        "mlx-swift-lm": environmentValue("MLX_SWIFT_LM_COMMIT"),
-        "mlx-swift": environmentValue("MLX_SWIFT_COMMIT"),
-        "mlx": environmentValue("MLX_COMMIT"),
+        "mlx-swift-lm": environmentValue(
+            "MLX_SWIFT_LM_COMMIT",
+            default: gitCommit(".")
+        ),
+        "mlx-swift": environmentValue(
+            "MLX_SWIFT_COMMIT",
+            default: gitCommit(".build/checkouts/mlx-swift")
+        ),
+        "mlx": environmentValue(
+            "MLX_COMMIT",
+            default: gitCommit(".build/checkouts/mlx-swift/Source/Cmlx/mlx")
+        ),
     ],
     device: TurboQuantDeviceCapabilities.current,
     supportsMetalCodec: availability.supportsMetalPolarQJLCodec,

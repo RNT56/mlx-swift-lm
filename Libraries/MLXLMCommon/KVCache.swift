@@ -2219,7 +2219,8 @@ public func makePromptCacheWithLayerCount(
                     backend: backend,
                     optimizationPolicy: policy,
                     seed: seed,
-                    valueBits: valueBits
+                    valueBits: valueBits,
+                    residentBudgetBytes: parameters?.turboQuantPerCacheResidentBudgetBytes
                 )
             }
         }
@@ -2230,7 +2231,8 @@ public func makePromptCacheWithLayerCount(
                 backend: backend,
                 optimizationPolicy: policy,
                 seed: seed,
-                valueBits: valueBits
+                valueBits: valueBits,
+                residentBudgetBytes: parameters?.turboQuantPerCacheResidentBudgetBytes
             )
         }
     }
@@ -2266,7 +2268,8 @@ public func makeAttentionKVCache(
                 backend: backend,
                 optimizationPolicy: policy,
                 seed: seed,
-                valueBits: valueBits
+                valueBits: valueBits,
+                residentBudgetBytes: parameters?.turboQuantPerCacheResidentBudgetBytes
             )
         }
         return TurboQuantKVCache(
@@ -2275,7 +2278,8 @@ public func makeAttentionKVCache(
             backend: backend,
             optimizationPolicy: policy,
             seed: seed,
-            valueBits: valueBits
+            valueBits: valueBits,
+            residentBudgetBytes: parameters?.turboQuantPerCacheResidentBudgetBytes
         )
     }
 
@@ -2583,6 +2587,7 @@ public func quantizedScaledDotProductAttention(
 ///   - turboQuantOptimizationPolicy: TurboQuant optimization policy
 ///   - turboQuantSeed: Optional deterministic seed for TurboQuant encoding
 ///   - turboQuantValueBits: Optional value-bit override for TurboQuant caches
+///   - turboQuantResidentBudgetBytes: Optional resident-byte budget for converted TurboQuant caches
 public func maybeQuantizeKVCache(
     cache: inout [KVCache],
     kvBits: Int?,
@@ -2593,7 +2598,8 @@ public func maybeQuantizeKVCache(
     turboQuantBackend: TurboQuantBackend = .metalPolarQJL,
     turboQuantOptimizationPolicy: TurboQuantOptimizationPolicy = .auto,
     turboQuantSeed: UInt64? = nil,
-    turboQuantValueBits: Int? = nil
+    turboQuantValueBits: Int? = nil,
+    turboQuantResidentBudgetBytes: Int? = nil
 ) {
     guard !cache.isEmpty else { return }
     if kvCacheStrategy == .none { return }
@@ -2638,7 +2644,8 @@ public func maybeQuantizeKVCache(
                     backend: turboQuantBackend,
                     optimizationPolicy: turboQuantOptimizationPolicy,
                     seed: turboQuantSeed ?? defaultTurboQuantSeed,
-                    valueBits: turboQuantValueBits
+                    valueBits: turboQuantValueBits,
+                    residentBudgetBytes: turboQuantResidentBudgetBytes
                 )
             }
             return simpleCache.toQuantized(groupSize: kvGroupSize, bits: kvBits)
@@ -2650,7 +2657,8 @@ public func maybeQuantizeKVCache(
                 backend: turboQuantBackend,
                 optimizationPolicy: turboQuantOptimizationPolicy,
                 seed: turboQuantSeed ?? defaultTurboQuantSeed,
-                valueBits: turboQuantValueBits
+                valueBits: turboQuantValueBits,
+                residentBudgetBytes: turboQuantResidentBudgetBytes
             )
         }
         if let rotatingCache = item as? RotatingKVCache {

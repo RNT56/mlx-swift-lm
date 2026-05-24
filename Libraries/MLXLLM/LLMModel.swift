@@ -29,7 +29,15 @@ extension LLMModel {
         // chunk N.
         while y.tokens.size > prefillStepSize {
             let input = y[.newAxis, ..<prefillStepSize]
-            _ = self(input, cache: cache.isEmpty ? nil : cache, state: nil)
+            if let throwingModel = self as? any ThrowingLanguageModel {
+                _ = try throwingModel.callAsFunctionThrowing(
+                    input,
+                    cache: cache.isEmpty ? nil : cache,
+                    state: nil
+                )
+            } else {
+                _ = self(input, cache: cache.isEmpty ? nil : cache, state: nil)
+            }
             asyncEval(cache)
             y = y[prefillStepSize...]
         }

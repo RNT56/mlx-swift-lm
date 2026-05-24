@@ -7,7 +7,7 @@ permissions:
 
 jobs:
   lint:
-    if: github.repository == 'ml-explore/mlx-swift-lm'
+    if: github.repository == 'ml-explore/mlx-swift-lm' || github.repository == 'RNT56/mlx-swift-lm'
     runs-on: ubuntu-22.04
     container:
       image: swift:6.2-rhel-ubi9
@@ -71,7 +71,7 @@ jobs:
 
   docs:
     needs: lint
-    if: github.repository == 'ml-explore/mlx-swift-lm'
+    if: github.repository == 'ml-explore/mlx-swift-lm' || github.repository == 'RNT56/mlx-swift-lm'
     runs-on: [self-hosted, macos]
     steps:
       - uses: actions/checkout@v6
@@ -83,7 +83,7 @@ jobs:
 
   mac_build_and_test:
     needs: lint
-    if: github.repository == 'ml-explore/mlx-swift-lm'
+    if: github.repository == 'ml-explore/mlx-swift-lm' || github.repository == 'RNT56/mlx-swift-lm'
     runs-on: [self-hosted, macos]
     steps:
       - uses: actions/checkout@v6
@@ -118,3 +118,30 @@ jobs:
             /Users/runner/Library/Developer/Xcode/DerivedData/**/Logs/Test/*.xcresult
             ~/Library/Logs/DiagnosticReports/*
           retention-days: 7
+
+  turboquant_benchmark_smoke:
+    needs: lint
+    if: github.repository == 'ml-explore/mlx-swift-lm' || github.repository == 'RNT56/mlx-swift-lm'
+    runs-on: [self-hosted, macos]
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          submodules: recursive
+
+      - name: Build TurboQuant model benchmark
+        shell: sh
+        run: swift build --product TurboQuantModelBenchmark
+
+      - name: Emit benchmark JSON smoke artifact
+        shell: sh
+        run: |
+          mkdir -p benchmark-artifacts
+          swift run TurboQuantModelBenchmark --iterations 1 --head-dims 64 --contexts 16 --query-lengths 1 > benchmark-artifacts/turboquant-model-smoke.json
+          python3 -m json.tool benchmark-artifacts/turboquant-model-smoke.json >/dev/null
+
+      - name: Upload benchmark artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: turboquant-model-benchmark-smoke
+          path: benchmark-artifacts/turboquant-model-smoke.json
+          retention-days: 14

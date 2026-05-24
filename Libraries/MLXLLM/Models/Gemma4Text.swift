@@ -261,6 +261,26 @@ private class Gemma4Attention: Module {
         sharedKV: AttentionKVState? = nil,
         positionOffset: RoPEOffset? = nil
     ) -> (MLXArray, AttentionKVState?, RoPEOffset?) {
+        do {
+            return try callThrowing(
+                x,
+                mask: mask,
+                cache: cache,
+                sharedKV: sharedKV,
+                positionOffset: positionOffset
+            )
+        } catch {
+            fatalError(String(describing: error))
+        }
+    }
+
+    func callThrowing(
+        _ x: MLXArray,
+        mask: MLXFast.ScaledDotProductAttentionMaskMode? = nil,
+        cache: KVCache? = nil,
+        sharedKV: AttentionKVState? = nil,
+        positionOffset: RoPEOffset? = nil
+    ) throws -> (MLXArray, AttentionKVState?, RoPEOffset?) {
         let (B, L, _) = (x.dim(0), x.dim(1), x.dim(2))
 
         var queries = qProj(x).reshaped(B, L, nHeads, effectiveHeadDim)
@@ -276,7 +296,7 @@ private class Gemma4Attention: Module {
         if let sharedKV {
             attentionState = sharedKV
             let adjustedMask = adjustedAttentionMask(mask, keyLength: sharedKV.keyLength)
-            attentionOutput = attentionWithKVState(
+            attentionOutput = try attentionWithKVStateThrowing(
                 queries: queries,
                 state: sharedKV,
                 scale: scale,
@@ -309,7 +329,7 @@ private class Gemma4Attention: Module {
                 mask,
                 keyLength: attentionKeyLengthAfterUpdate(cache: cache, keys: k)
             )
-            let result = attentionWithCacheUpdateReturningState(
+            let result = try attentionWithCacheUpdateReturningStateThrowing(
                 queries: queries,
                 keys: k,
                 values: v,
@@ -415,10 +435,32 @@ private class Gemma4DecoderLayer: Module {
         sharedKV: AttentionKVState? = nil,
         positionOffset: RoPEOffset? = nil
     ) -> (MLXArray, AttentionKVState?, RoPEOffset?) {
+        do {
+            return try callThrowing(
+                x,
+                mask: mask,
+                cache: cache,
+                perLayerInput: perLayerInput,
+                sharedKV: sharedKV,
+                positionOffset: positionOffset
+            )
+        } catch {
+            fatalError(String(describing: error))
+        }
+    }
+
+    func callThrowing(
+        _ x: MLXArray,
+        mask: MLXFast.ScaledDotProductAttentionMaskMode? = nil,
+        cache: KVCache? = nil,
+        perLayerInput: MLXArray? = nil,
+        sharedKV: AttentionKVState? = nil,
+        positionOffset: RoPEOffset? = nil
+    ) throws -> (MLXArray, AttentionKVState?, RoPEOffset?) {
         let residual = x
 
         let h = inputLayernorm(x)
-        let (attnOut, kvPair, attnPositionOffset) = selfAttn(
+        let (attnOut, kvPair, attnPositionOffset) = try selfAttn.callThrowing(
             h, mask: mask, cache: cache, sharedKV: sharedKV, positionOffset: positionOffset)
         let postAttn = postAttentionLayernorm(attnOut)
         var out = residual + postAttn
@@ -521,6 +563,17 @@ private class Gemma4TextModelInner: Module {
         _ inputs: MLXArray,
         cache: [KVCache]? = nil
     ) -> MLXArray {
+        do {
+            return try callThrowing(inputs, cache: cache)
+        } catch {
+            fatalError(String(describing: error))
+        }
+    }
+
+    func callThrowing(
+        _ inputs: MLXArray,
+        cache: [KVCache]? = nil
+    ) throws -> MLXArray {
         let inputEmbeddings = embedTokens(inputs)
         var h = inputEmbeddings * embedScale
 
@@ -593,7 +646,7 @@ private class Gemma4TextModelInner: Module {
             let sharedPositionOffset = intermediates[prevIdx].positionOffset
 
             let mask = maskByType[layer.layerType]
-            let (out, kvPair, positionOffset) = layer(
+            let (out, kvPair, positionOffset) = try layer.callThrowing(
                 h,
                 mask: mask,
                 cache: fullCache[idx],
@@ -613,7 +666,7 @@ private class Gemma4TextModelInner: Module {
 
 // MARK: - Public Model
 
-public class Gemma4TextModel: Module, LLMModel, KVCacheDimensionProvider {
+public class Gemma4TextModel: Module, LLMModel, KVCacheDimensionProvider, ThrowingLanguageModel {
     public let vocabularySize: Int
     public let kvHeads: [Int]
     public var lastHiddenState: MLXArray? { model.lastHiddenState }
@@ -635,7 +688,15 @@ public class Gemma4TextModel: Module, LLMModel, KVCacheDimensionProvider {
     }
 
     public func callAsFunction(_ inputs: MLXArray, cache: [KVCache]?) -> MLXArray {
-        var out = model(inputs, cache: cache)
+        do {
+            return try callAsFunctionThrowing(inputs, cache: cache)
+        } catch {
+            fatalError(String(describing: error))
+        }
+    }
+
+    public func callAsFunctionThrowing(_ inputs: MLXArray, cache: [KVCache]?) throws -> MLXArray {
+        var out = try model.callThrowing(inputs, cache: cache)
         if let lmHead {
             out = lmHead(out)
         } else {
@@ -811,7 +872,7 @@ public class Gemma4AssistantModel: Module, LLMModel, DualModelMTP, KVCacheDimens
         }
 
         let posOffset = cache?.first?.ropeOffset ?? .scalar(0)
-        let mainLogits = mainModel(inputs, cache: cache)
+        let mainLogits = try mainModel.callAsFunctionThrowing(inputs, cache: cache)
         guard let hBackbone = mainModel.lastHiddenState else {
             throw Gemma4AssistantError.missingMainHiddenState
         }
