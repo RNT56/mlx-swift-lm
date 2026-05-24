@@ -41,6 +41,10 @@ public func loadWeights(
         ExpertStreamerManager.shared = ExpertStreamerManager(modelDirectory: modelDirectory)
     }
 
+    if TurboQuantCheckpointMetadataValidator.isTurboQuantCheckpoint(metadata) {
+        try TurboQuantCheckpointMetadataValidator.validate(metadata)
+    }
+
     // quantize if needed
     if let turboQuantOptions = turboQuantLinearLoadOptions(
         metadata: metadata,

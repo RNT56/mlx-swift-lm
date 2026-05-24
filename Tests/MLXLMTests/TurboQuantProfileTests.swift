@@ -118,11 +118,11 @@ extension MLXRuntimeSwiftTests {
                     expertsPerToken: 4,
                     keyHeadDimension: 128,
                     valueHeadDimension: 128,
-                    contextLength: 1048576
+                    contextLength: 1_048_576
                 )
             )
             #expect(mistral4.id == "mistral-small-4-119b-a6b")
-            #expect(mistral4.safeContextLength == 1048576)
+            #expect(mistral4.safeContextLength == 1_048_576)
             #expect(mistral4.optimizationPolicy == TurboQuantOptimizationPolicy.preferMemory)
         }
 
@@ -137,7 +137,8 @@ extension MLXRuntimeSwiftTests {
                 .deletingLastPathComponent()
                 .deletingLastPathComponent()
                 .appendingPathComponent("TurboQuantProfiles")
-            let jsonProfiles = try TurboQuantProfileRegistry.loadJSONProfiles(from: profileDirectory)
+            let jsonProfiles = try TurboQuantProfileRegistry.loadJSONProfiles(
+                from: profileDirectory)
             #expect(jsonProfiles.allSatisfy { $0.requiresModelType })
             #expect(jsonProfiles.allSatisfy { $0.requiresHeadDimensions })
         }
@@ -145,22 +146,24 @@ extension MLXRuntimeSwiftTests {
         @Test func testLegacySmallProfilesFailClosedForMissingMetadata() throws {
             let registry = TurboQuantProfileRegistry.bundled
 
-            let strictCases: [
-                (
+            let strictCases:
+                [(
                     modelID: String,
                     modelType: String,
                     keyHeadDimension: Int,
                     valueHeadDimension: Int,
                     expectedProfileID: String
-                )
-            ] = [
-                ("mlx-community/Qwen3-4B-4bit", "qwen3", 128, 128, "qwen3-4b"),
-                ("mlx-community/Phi-4-mini-instruct-4bit", "phi3", 128, 128, "phi-4-mini"),
-                ("mlx-community/SmolLM3-3B-4bit", "llama", 128, 128, "smollm3-3b"),
-                ("mlx-community/Granite-3.3-8B-Instruct-4bit", "granite", 128, 128, "granite-small"),
-                ("mlx-community/LFM2-1.2B-4bit", "lfm2", 128, 128, "lfm2-small"),
-                ("mlx-community/GLM-4.7-Flash-4bit", "glm4_moe_lite", 96, 64, "glm4-moe-lite"),
-            ]
+                )] = [
+                    ("mlx-community/Qwen3-4B-4bit", "qwen3", 128, 128, "qwen3-4b"),
+                    ("mlx-community/Phi-4-mini-instruct-4bit", "phi3", 128, 128, "phi-4-mini"),
+                    ("mlx-community/SmolLM3-3B-4bit", "llama", 128, 128, "smollm3-3b"),
+                    (
+                        "mlx-community/Granite-3.3-8B-Instruct-4bit", "granite", 128, 128,
+                        "granite-small"
+                    ),
+                    ("mlx-community/LFM2-1.2B-4bit", "lfm2", 128, 128, "lfm2-small"),
+                    ("mlx-community/GLM-4.7-Flash-4bit", "glm4_moe_lite", 96, 64, "glm4-moe-lite"),
+                ]
 
             for profileCase in strictCases {
                 #expect(
@@ -186,10 +189,11 @@ extension MLXRuntimeSwiftTests {
                     )
                 )
                 #expect(matched.id == profileCase.expectedProfileID)
-                #expect(matched.supports(
-                    keyHeadDimension: profileCase.keyHeadDimension,
-                    valueHeadDimension: profileCase.valueHeadDimension
-                ))
+                #expect(
+                    matched.supports(
+                        keyHeadDimension: profileCase.keyHeadDimension,
+                        valueHeadDimension: profileCase.valueHeadDimension
+                    ))
                 #expect(!matched.supports())
             }
         }
@@ -385,15 +389,25 @@ extension MLXRuntimeSwiftTests {
                 ("mlx-community/gemma-3-4b-it-qat-4bit", "gemma-3-4b", "gemma3", 4, 256),
                 ("mlx-community/gemma-3-text-4b-it-4bit", "gemma-3-4b", "gemma3", 4, 256),
                 ("mlx-community/Gemma-SEA-LION-v4-4B-VL-mlx-3bit", "gemma-3-4b", "gemma3", 4, 256),
-                ("mlx-community/gemma-3-text-4b-320-head-test", "gemma-3-4b", "gemma3_text", 4, 320),
+                (
+                    "mlx-community/gemma-3-text-4b-320-head-test", "gemma-3-4b", "gemma3_text", 4,
+                    320
+                ),
                 ("mlx-community/gemma-3-12b-it-4bit", "gemma-3-12b", "gemma3", 12, 256),
                 ("mlx-community/gemma-3-12b-it-qat-4bit", "gemma-3-12b", "gemma3", 12, 256),
-                ("mlx-community/gemma-3-12b-explicit-240-test", "gemma-3-12b", "gemma3_text", 12, 240),
+                (
+                    "mlx-community/gemma-3-12b-explicit-240-test", "gemma-3-12b", "gemma3_text", 12,
+                    240
+                ),
                 ("mlx-community/gemma-3-27b-it-4bit", "gemma-3-27b", "gemma3", 27, 128),
-                ("mlx-community/Gemma-SEA-LION-v4-27B-IT-mlx-4bit", "gemma-3-27b", "gemma3", 27, 128),
+                (
+                    "mlx-community/Gemma-SEA-LION-v4-27B-IT-mlx-4bit", "gemma-3-27b", "gemma3", 27,
+                    128
+                ),
             ]
 
-            for (modelID, expectedProfileID, modelType, parameterCountB, headDimension) in examples {
+            for (modelID, expectedProfileID, modelType, parameterCountB, headDimension) in examples
+            {
                 let profile = try #require(
                     registry.profile(
                         for: modelID,
@@ -447,7 +461,10 @@ extension MLXRuntimeSwiftTests {
                 ("mlx-community/gemma-4-26b-a4b-it-4bit", "gemma-4-26b-a4b", "gemma4", 26),
                 ("mlx-community/gemma-4-26b-it-OptiQ-4bit", "gemma-4-26b-a4b", "gemma4", 26),
                 ("mlx-community/gemma-4-31b-it-4bit", "gemma-4-31b", "gemma4", 31),
-                ("mlx-community/gemma-4-31B-it-assistant-bf16", "gemma-4-31b", "gemma4_assistant", 31),
+                (
+                    "mlx-community/gemma-4-31B-it-assistant-bf16", "gemma-4-31b",
+                    "gemma4_assistant", 31
+                ),
             ]
 
             for (modelID, expectedProfileID, modelType, parameterCountB) in examples {
@@ -577,7 +594,10 @@ extension MLXRuntimeSwiftTests {
                 ("mlx-community/Llama-2-70B-Chat-4bit", "llama-2-70b", 70, 128),
                 ("mlx-community/Meta-Llama-3-3B-Instruct-4bit", "llama-3-3b", 3, 128),
                 ("mlx-community/Meta-Llama-3-8B-Instruct-4bit", "llama-3-8b", 8, 128),
-                ("mlx-community/ArrowCanaria-Llama-8B-RL-v0.1-MLX-4bit", "llama-compatible-8b", 8, 128),
+                (
+                    "mlx-community/ArrowCanaria-Llama-8B-RL-v0.1-MLX-4bit", "llama-compatible-8b",
+                    8, 128
+                ),
                 ("mlx-community/DeepSeek-R1-Distill-Llama-8B-4bit", "llama-compatible-8b", 8, 128),
                 ("mlx-community/LLaMA-Pro-8B-mlx", "llama-compatible-8b", 8, 128),
                 ("mlx-community/LLama-3.1-Tulu-3-8B-4b", "llama-compatible-8b", 8, 128),
@@ -587,26 +607,53 @@ extension MLXRuntimeSwiftTests {
                 ("mlx-community/Llama3-ChatQA-1.5-8B-4bit", "llama-compatible-8b", 8, 128),
                 ("mlx-community/defog-llama-3-sqlcoder-8b", "llama-compatible-8b", 8, 128),
                 ("mlx-community/llama-3-youko-8b-instruct-4bit-mlx", "llama-compatible-8b", 8, 128),
-                ("mlx-community/Llama-3-Swallow-8B-Instruct-v0.1-4bit", "llama-compatible-8b", 8, 128),
-                ("mlx-community/Llama-3.1-Swallow-8B-Instruct-v0.5-4bit", "llama-compatible-8b", 8, 128),
-                ("mlx-community/Llama-3.1-Nemotron-8B-UltraLong-4M-Instruct-4bit", "llama-compatible-8b", 8, 128),
+                (
+                    "mlx-community/Llama-3-Swallow-8B-Instruct-v0.1-4bit", "llama-compatible-8b", 8,
+                    128
+                ),
+                (
+                    "mlx-community/Llama-3.1-Swallow-8B-Instruct-v0.5-4bit", "llama-compatible-8b",
+                    8, 128
+                ),
+                (
+                    "mlx-community/Llama-3.1-Nemotron-8B-UltraLong-4M-Instruct-4bit",
+                    "llama-compatible-8b", 8, 128
+                ),
                 ("mlx-community/Llama-3.1-SuperNova-Lite-4bit", "llama-compatible-8b", 8, 128),
                 ("mlx-community/Llama-SEA-LION-v3-8B-IT-mlx-4bit", "llama-compatible-8b", 8, 128),
                 ("mlx-community/Llama-3-16B-Instruct-v0.1-4bit", "llama-3-16b", 16, 128),
                 ("mlx-community/Meta-Llama-3-70B-Instruct-4bit", "llama-3-70b", 70, 128),
-                ("mlx-community/DeepSeek-R1-Distill-Llama-70B-4bit", "llama-compatible-70b", 70, 128),
+                (
+                    "mlx-community/DeepSeek-R1-Distill-Llama-70B-4bit", "llama-compatible-70b", 70,
+                    128
+                ),
                 ("mlx-community/Llama-3-Groq-70B-Tool-Use-4bit", "llama-compatible-70b", 70, 128),
-                ("mlx-community/Llama-3-Swallow-70B-Instruct-v0.1-4bit", "llama-compatible-70b", 70, 128),
+                (
+                    "mlx-community/Llama-3-Swallow-70B-Instruct-v0.1-4bit", "llama-compatible-70b",
+                    70, 128
+                ),
                 ("mlx-community/Llama-3.1-Tulu-3-70B-4bit", "llama-compatible-70b", 70, 128),
                 ("mlx-community/r1-1776-distill-llama-70b-4bit", "llama-compatible-70b", 70, 128),
-                ("mlx-community/Wayfarer-Large-70B-Llama-3.3-4bit", "llama-compatible-70b", 70, 128),
-                ("mlx-community/deepcogito-cogito-v1-preview-llama-70B-4bit", "llama-compatible-70b", 70, 128),
+                (
+                    "mlx-community/Wayfarer-Large-70B-Llama-3.3-4bit", "llama-compatible-70b", 70,
+                    128
+                ),
+                (
+                    "mlx-community/deepcogito-cogito-v1-preview-llama-70B-4bit",
+                    "llama-compatible-70b", 70, 128
+                ),
                 ("mlx-community/Meta-Llama-3.1-4B-Instruct-4bit", "llama-3.1-4b", 4, 128),
-                ("mlx-community/Llama-3.1-Nemotron-Nano-4B-v1.1-4bit", "llama-compatible-4b", 4, 128),
+                (
+                    "mlx-community/Llama-3.1-Nemotron-Nano-4B-v1.1-4bit", "llama-compatible-4b", 4,
+                    128
+                ),
                 ("mlx-community/Meta-Llama-3.1-8B-Instruct-4bit", "llama-3.1-8b", 8, 128),
                 ("mlx-community/Meta-Llama-3.1-16B-Instruct-4bit", "llama-3.1-16b", 16, 128),
                 ("mlx-community/Meta-Llama-3.1-70B-Instruct-4bit", "llama-3.1-70b", 70, 128),
-                ("mlx-community/Llama-3.1-Swallow-70B-Instruct-v0.5-4bit", "llama-compatible-70b", 70, 128),
+                (
+                    "mlx-community/Llama-3.1-Swallow-70B-Instruct-v0.5-4bit",
+                    "llama-compatible-70b", 70, 128
+                ),
                 ("mlx-community/Llama-3.1-Nemotron-70B-Instruct-HF-4bit", "llama-3.1-70b", 70, 128),
                 ("mlx-community/Llama-3.1-120B-4bit", "llama-3.1-120b", 120, 128),
                 ("mlx-community/Meta-Llama-3-120B-Instruct-4bit", "llama-3-120b", 120, 128),
@@ -618,7 +665,10 @@ extension MLXRuntimeSwiftTests {
                 ("mlx-community/AMD-Llama-135M-4bit", "llama-compatible-135m", 0.135, 64),
                 ("mlx-community/Llama-160M-4bit", "llama-compatible-160m", 0.16, 64),
                 ("mlx-community/tiny-llama-1b-4bit", "llama-compatible-1b", 1, 128),
-                ("mlx-community/MiniCPM-2B-sft-4bit-llama-format-mlx", "llama-compatible-2b", 2, 64),
+                (
+                    "mlx-community/MiniCPM-2B-sft-4bit-llama-format-mlx", "llama-compatible-2b", 2,
+                    64
+                ),
                 ("mlx-community/Custom-Llama-2B-4bit", "llama-compatible-2b", 2, 128),
                 ("mlx-community/Impish_LLAMA_3B-6bit", "llama-compatible-3b", 3, 128),
                 ("mlx-community/Custom-Llama-3B-4bit", "llama-compatible-3b", 3, 128),
@@ -645,36 +695,116 @@ extension MLXRuntimeSwiftTests {
             let registry = TurboQuantProfileRegistry.bundled
             let textExamples: [(String, String, String, String?, Double)] = [
                 ("mlx-community/Mistral-7B-Instruct-v0.3-4bit", "mistral-7b", "mistral", nil, 7),
-                ("mlx-community/mistral-ft-optimized-1227-4bit-mlx", "mistral-7b", "mistral", nil, 7),
-                ("mlx-community/Mistral-Nemo-Instruct-2407-4bit", "mistral-nemo-12b", "mistral", nil, 12),
-                ("mlx-community/Mistral-NeMo-Minitron-8B-Instruct-4bit", "mistral-compatible-8b", "mistral", nil, 8),
-                ("mlx-community/Mistralai-8B-Diagnosis-QA", "mistral-compatible-8b", "mistral", nil, 8),
-                ("mlx-community/Ministral-8B-Instruct-2410-4bit", "ministral-8b-2410", "mistral", nil, 8),
+                (
+                    "mlx-community/mistral-ft-optimized-1227-4bit-mlx", "mistral-7b", "mistral",
+                    nil, 7
+                ),
+                (
+                    "mlx-community/Mistral-Nemo-Instruct-2407-4bit", "mistral-nemo-12b", "mistral",
+                    nil, 12
+                ),
+                (
+                    "mlx-community/Mistral-NeMo-Minitron-8B-Instruct-4bit", "mistral-compatible-8b",
+                    "mistral", nil, 8
+                ),
+                (
+                    "mlx-community/Mistralai-8B-Diagnosis-QA", "mistral-compatible-8b", "mistral",
+                    nil, 8
+                ),
+                (
+                    "mlx-community/Ministral-8B-Instruct-2410-4bit", "ministral-8b-2410", "mistral",
+                    nil, 8
+                ),
                 ("mlx-community/Codestral-22B-v0.1-4bit", "codestral-22b", "mistral", nil, 22),
-                ("mlx-community/Mistral-22B-v0.1-4bit-MLX", "mistral-compatible-22b", "mistral", nil, 22),
-                ("mlx-community/Mistral-Small-Instruct-2409-4bit", "mistral-small-22b", "mistral", nil, 22),
-                ("mlx-community/Mistral-Small-Instruct-2501-4bit", "mistral-small-24b", "mistral", nil, 24),
-                ("mlx-community/Devstral-Small-2505-4bit", "devstral-small-24b", "mistral", nil, 24),
-                ("mlx-community/Devstral-Samll-2507-bf16", "devstral-small-24b", "mistral", nil, 24),
-                ("mlx-community/Magistral-Small-2506-4bit", "magistral-small-24b", "mistral", nil, 24),
-                ("mlx-community/DeepHermes-3-Mistral-24B-Preview-4bit", "mistral-compatible-24b", "mistral", nil, 24),
-                ("mlx-community/Dolphin-Mistral-24B-Venice-Edition-4bit", "mistral-compatible-24b", "mistral", nil, 24),
-                ("mlx-community/Dolphin3.0-R1-Mistral-24B-4bit", "mistral-compatible-24b", "mistral", nil, 24),
-                ("mlx-community/Mistral-Large-Instruct-2407-4bit", "mistral-large-2407", "mistral", nil, 123),
-                ("mlx-community/Ministral-3-3B-Instruct-2512-4bit", "ministral3-3b", "mistral3", "ministral3", 3),
-                ("mlx-community/Ministral-3-8B-Instruct-2512-4bit", "ministral3-8b", "mistral3", "ministral3", 8),
-                ("mlx-community/Ministral-3-14B-Instruct-2512-4bit", "ministral3-14b", "mistral3", "ministral3", 14),
-                ("mlx-community/Mistral-Small-3.1-24B-Instruct-2503-4bit", "mistral-small-3.1-24b", "mistral3", "mistral", 24),
-                ("mlx-community/Mistral-Small-3.1-Text-24B-Instruct-2503-4bit", "mistral-small-3.1-24b", "mistral", nil, 24),
-                ("mlx-community/Mistral-Small-3.2-24B-Instruct-2506-4bit", "mistral-small-3.2-24b", "mistral3", "mistral", 24),
-                ("mlx-community/Devstral-Small-2-24B-4bit", "devstral-small-2-24b", "mistral3", "mistral", 24),
-                ("mlx-community/Devstral-Small-2-24B-Instruct-2512-4bit", "devstral-small-2-24b", "mistral3", "ministral3", 24),
-                ("mlx-community/Devstral-2-123B-Instruct-2512-4bit", "devstral-2-123b", "ministral3", nil, 123),
-                ("mlx-community/Mistral-Medium-3.5-128B-Instruct-4bit", "mistral-medium-3.5-128b", "mistral3", "mistral", 128),
-                ("mlx-community/Mistral-Medium-3.5-128B-4bit", "mistral-medium-3.5-128b", "mistral3", "ministral3", 128),
+                (
+                    "mlx-community/Mistral-22B-v0.1-4bit-MLX", "mistral-compatible-22b", "mistral",
+                    nil, 22
+                ),
+                (
+                    "mlx-community/Mistral-Small-Instruct-2409-4bit", "mistral-small-22b",
+                    "mistral", nil, 22
+                ),
+                (
+                    "mlx-community/Mistral-Small-Instruct-2501-4bit", "mistral-small-24b",
+                    "mistral", nil, 24
+                ),
+                (
+                    "mlx-community/Devstral-Small-2505-4bit", "devstral-small-24b", "mistral", nil,
+                    24
+                ),
+                (
+                    "mlx-community/Devstral-Samll-2507-bf16", "devstral-small-24b", "mistral", nil,
+                    24
+                ),
+                (
+                    "mlx-community/Magistral-Small-2506-4bit", "magistral-small-24b", "mistral",
+                    nil, 24
+                ),
+                (
+                    "mlx-community/DeepHermes-3-Mistral-24B-Preview-4bit", "mistral-compatible-24b",
+                    "mistral", nil, 24
+                ),
+                (
+                    "mlx-community/Dolphin-Mistral-24B-Venice-Edition-4bit",
+                    "mistral-compatible-24b", "mistral", nil, 24
+                ),
+                (
+                    "mlx-community/Dolphin3.0-R1-Mistral-24B-4bit", "mistral-compatible-24b",
+                    "mistral", nil, 24
+                ),
+                (
+                    "mlx-community/Mistral-Large-Instruct-2407-4bit", "mistral-large-2407",
+                    "mistral", nil, 123
+                ),
+                (
+                    "mlx-community/Ministral-3-3B-Instruct-2512-4bit", "ministral3-3b", "mistral3",
+                    "ministral3", 3
+                ),
+                (
+                    "mlx-community/Ministral-3-8B-Instruct-2512-4bit", "ministral3-8b", "mistral3",
+                    "ministral3", 8
+                ),
+                (
+                    "mlx-community/Ministral-3-14B-Instruct-2512-4bit", "ministral3-14b",
+                    "mistral3", "ministral3", 14
+                ),
+                (
+                    "mlx-community/Mistral-Small-3.1-24B-Instruct-2503-4bit",
+                    "mistral-small-3.1-24b", "mistral3", "mistral", 24
+                ),
+                (
+                    "mlx-community/Mistral-Small-3.1-Text-24B-Instruct-2503-4bit",
+                    "mistral-small-3.1-24b", "mistral", nil, 24
+                ),
+                (
+                    "mlx-community/Mistral-Small-3.2-24B-Instruct-2506-4bit",
+                    "mistral-small-3.2-24b", "mistral3", "mistral", 24
+                ),
+                (
+                    "mlx-community/Devstral-Small-2-24B-4bit", "devstral-small-2-24b", "mistral3",
+                    "mistral", 24
+                ),
+                (
+                    "mlx-community/Devstral-Small-2-24B-Instruct-2512-4bit", "devstral-small-2-24b",
+                    "mistral3", "ministral3", 24
+                ),
+                (
+                    "mlx-community/Devstral-2-123B-Instruct-2512-4bit", "devstral-2-123b",
+                    "ministral3", nil, 123
+                ),
+                (
+                    "mlx-community/Mistral-Medium-3.5-128B-Instruct-4bit",
+                    "mistral-medium-3.5-128b", "mistral3", "mistral", 128
+                ),
+                (
+                    "mlx-community/Mistral-Medium-3.5-128B-4bit", "mistral-medium-3.5-128b",
+                    "mistral3", "ministral3", 128
+                ),
             ]
 
-            for (modelID, expectedProfileID, modelType, textConfigModelType, parameterCountB) in textExamples {
+            for (modelID, expectedProfileID, modelType, textConfigModelType, parameterCountB)
+                in textExamples
+            {
                 let profile = try #require(
                     registry.profile(
                         for: modelID,
@@ -1109,6 +1239,101 @@ extension MLXRuntimeSwiftTests {
             #expect(parameters.turboQuantValueBits == 2)
         }
 
+        @Test func testProductManifestValidationReportsExactBundledGaps() {
+            let validations = TurboQuantProfileRegistry.bundled.profiles.map {
+                $0.productManifestValidation()
+            }
+
+            #expect(!validations.isEmpty)
+            #expect(
+                validations.allSatisfy { validation in
+                    validation.isValid
+                        || validation.issues.allSatisfy {
+                            !$0.profileID.isEmpty && !$0.field.isEmpty && !$0.reason.isEmpty
+                        }
+                }
+            )
+            #expect(
+                validations.contains {
+                    $0.issues.contains { $0.field == "model_fingerprint" }
+                }
+            )
+        }
+
+        @Test func testFingerprintMismatchFailsClosedWithExactField() throws {
+            let expectedFingerprint = TurboQuantModelFingerprint(
+                family: "qwen3",
+                hiddenSize: 4096,
+                layerCount: 36,
+                attentionHeads: 32,
+                kvHeads: 8,
+                headDim: 128,
+                rope: TurboQuantRoPEFingerprint(type: "llama", theta: 1_000_000),
+                slidingWindow: TurboQuantSlidingWindowFingerprint(enabled: false),
+                cacheType: "standard"
+            )
+            let measured = TurboQuantMeasuredOutcome(
+                deviceClass: "A18",
+                osVersion: "iOS 18.0",
+                maxContextByMode: [
+                    TurboQuantUserMode.fastest.rawValue: 8192,
+                    TurboQuantUserMode.balanced.rawValue: 32768,
+                    TurboQuantUserMode.maxContext.rawValue: 65536,
+                    TurboQuantUserMode.batterySaver.rawValue: 4096,
+                ],
+                actualBytesPerToken: 1024,
+                decodeP50Seconds: 0.010,
+                decodeP95Seconds: 0.016,
+                prefillP50Seconds: 0.120,
+                logitKL: 0.001,
+                top1MatchRate: 0.99,
+                longContextRetrievalScore: 1.0
+            )
+            let profile = TurboQuantProfile(
+                id: "strict-qwen3",
+                modelPatterns: ["*qwen3*"],
+                architecture: "qwen3",
+                modelTypes: ["qwen3"],
+                requiresModelType: true,
+                requiresHeadDimensions: true,
+                supportedKeyHeadDimensions: [128],
+                modelFingerprint: expectedFingerprint,
+                measuredOutcomes: [measured]
+            )
+            #expect(
+                profile.productManifestValidation(actualFingerprint: expectedFingerprint).isValid)
+
+            let mismatchedFingerprint = TurboQuantModelFingerprint(
+                family: "qwen3",
+                hiddenSize: 5120,
+                layerCount: 36,
+                attentionHeads: 32,
+                kvHeads: 8,
+                headDim: 128,
+                rope: TurboQuantRoPEFingerprint(type: "llama", theta: 1_000_000),
+                slidingWindow: TurboQuantSlidingWindowFingerprint(enabled: false),
+                cacheType: "standard"
+            )
+            let registry = TurboQuantProfileRegistry(profiles: [profile])
+            let selection = registry.selection(
+                for: TurboQuantModelDescriptor(
+                    modelID: "mlx-community/Qwen3-4B-4bit",
+                    modelType: "qwen3",
+                    fingerprint: mismatchedFingerprint
+                ),
+                keyHeadDimension: 128,
+                valueHeadDimension: 128,
+                requireFingerprint: true
+            )
+
+            #expect(selection.profile == nil)
+            #expect(
+                selection.rejectionReasons.contains {
+                    $0.contains("model_fingerprint.hidden_size expected 4096, got 5120")
+                }
+            )
+        }
+
         @Test func testRootJSONProfilesDecodeAndMatchBundledIDs() throws {
             let profileDirectory = URL(fileURLWithPath: #filePath)
                 .deletingLastPathComponent()
@@ -1151,7 +1376,8 @@ extension MLXRuntimeSwiftTests {
                 )
                 #expect(bundledProfile.minRoutedExperts == jsonProfile.minRoutedExperts)
                 #expect(bundledProfile.maxRoutedExperts == jsonProfile.maxRoutedExperts)
-                #expect(bundledProfile.supportedExpertsPerToken == jsonProfile.supportedExpertsPerToken)
+                #expect(
+                    bundledProfile.supportedExpertsPerToken == jsonProfile.supportedExpertsPerToken)
                 #expect(
                     bundledProfile.supportedKeyHeadDimensions
                         == jsonProfile.supportedKeyHeadDimensions
@@ -1166,7 +1392,8 @@ extension MLXRuntimeSwiftTests {
                 #expect(bundledProfile.valueBits == jsonProfile.valueBits)
                 #expect(bundledProfile.groupSize == jsonProfile.groupSize)
                 #expect(bundledProfile.safeMaskModes == jsonProfile.safeMaskModes)
-                #expect(bundledProfile.supportedContextLengths == jsonProfile.supportedContextLengths)
+                #expect(
+                    bundledProfile.supportedContextLengths == jsonProfile.supportedContextLengths)
                 #expect(bundledProfile.safeContextLength == jsonProfile.safeContextLength)
                 #expect(bundledProfile.qualityProfile == jsonProfile.qualityProfile)
                 #expect(bundledProfile.backend == jsonProfile.backend)

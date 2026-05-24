@@ -293,6 +293,15 @@ public protocol MTPLanguageModel: LanguageModel {
     /// create them in ``makeMTPCaches(parameters:)`` and update them here.
     func callMTP(_ inputs: MLXArray, cache: [KVCache]?, mtpCaches: [[KVCache]]?) -> [MLXArray]
 
+    /// Throwing variant used by models whose MTP path has runtime preconditions.
+    ///
+    /// The non-throwing ``callMTP(_:cache:mtpCaches:)`` remains for source
+    /// compatibility. Implementations with recoverable unsupported states should
+    /// put the typed failure here and let the compatibility method return no
+    /// logits.
+    func callMTPChecked(_ inputs: MLXArray, cache: [KVCache]?, mtpCaches: [[KVCache]]?) throws
+        -> [MLXArray]
+
     /// Initialize persistent per-depth caches for MTP heads.
     func makeMTPCaches(parameters: GenerateParameters?) -> [[KVCache]]
 }
@@ -300,9 +309,18 @@ public protocol MTPLanguageModel: LanguageModel {
 /// MTP draft models that need a reference to the verifier model.
 public protocol DualModelMTP: MTPLanguageModel {
     var mainModelRef: (any BaseLanguageModel)? { get set }
+
+    /// Validate that the draft model is wired to a compatible verifier model.
+    func validateMTPOrchestration(mainModel: any BaseLanguageModel) throws
 }
 
 extension MTPLanguageModel {
+    public func callMTPChecked(_ inputs: MLXArray, cache: [KVCache]?, mtpCaches: [[KVCache]]?)
+        throws -> [MLXArray]
+    {
+        callMTP(inputs, cache: cache, mtpCaches: mtpCaches)
+    }
+
     public func callMTP(_ inputs: MLXArray, cache: [KVCache]?, mtpCaches: [[KVCache]]?)
         -> [MLXArray]
     {
@@ -316,4 +334,8 @@ extension MTPLanguageModel {
     public func makeMTPCaches(parameters: GenerateParameters?) -> [[KVCache]] {
         []
     }
+}
+
+extension DualModelMTP {
+    public func validateMTPOrchestration(mainModel: any BaseLanguageModel) throws {}
 }
