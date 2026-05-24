@@ -127,7 +127,8 @@ public struct DeepseekV4Configuration: Codable, Sendable {
         moeIntermediateSize =
             try container.decodeIfPresent(Int.self, forKey: .moeIntermediateSize) ?? 2_048
         numHiddenLayers = try container.decodeIfPresent(Int.self, forKey: .numHiddenLayers) ?? 43
-        numAttentionHeads = try container.decodeIfPresent(Int.self, forKey: .numAttentionHeads) ?? 64
+        numAttentionHeads =
+            try container.decodeIfPresent(Int.self, forKey: .numAttentionHeads) ?? 64
         headDim = try container.decodeIfPresent(Int.self, forKey: .headDim) ?? 512
         qLoraRank = try container.decodeIfPresent(Int.self, forKey: .qLoraRank) ?? 1_024
         qkRopeHeadDim = try container.decodeIfPresent(Int.self, forKey: .qkRopeHeadDim) ?? 64
@@ -183,7 +184,8 @@ public struct DeepseekV4Configuration: Codable, Sendable {
             layerTypes = Array(explicitLayerTypes.prefix(numHiddenLayers))
         } else {
             let csaRate = compressRateCSA
-            let ratios = compressRatios.isEmpty
+            let ratios =
+                compressRatios.isEmpty
                 ? Self.defaultCompressRatios(
                     count: numHiddenLayers,
                     compressedSparseRate: csaRate,
@@ -540,7 +542,9 @@ final class DeepseekV4KVCache: KVCache, CustomDebugStringConvertible {
         let firstWindowPosition = (compressionEntries[name] ?? 0) * compressRate
         var kv = kv
         var gate = gate
-        if let priorKV = compressionKV[name], let priorGate = compressionGate[name], priorKV.dim(1) > 0 {
+        if let priorKV = compressionKV[name], let priorGate = compressionGate[name],
+            priorKV.dim(1) > 0
+        {
             kv = concatenated([priorKV, kv], axis: 1)
             gate = concatenated([priorGate, gate], axis: 1)
         }
@@ -618,7 +622,8 @@ final class DeepseekV4IndexerCompressor: Module {
         let windows = kv.dim(1) / rate
         kv = kv.reshaped(batch, windows, rate, -1)
         gate = gate.reshaped(batch, windows, rate, -1) + ape.asType(gate.dtype)
-        var compressed = (kv * softmax(gate.asType(.float32), axis: 2, precise: true).asType(kv.dtype))
+        var compressed =
+            (kv * softmax(gate.asType(.float32), axis: 2, precise: true).asType(kv.dtype))
             .sum(axis: 2)
         if compressed.dim(-1) > config.indexHeadDim {
             compressed = compressed[.ellipsis, ..<config.indexHeadDim]
@@ -682,7 +687,8 @@ final class DeepseekV4Indexer: Module {
         indexScores = MLX.where(futureMask, MLXArray(-1.0e9).asType(indexScores.dtype), indexScores)
 
         let topK = min(config.indexTopK, compressedLength)
-        let selected = argPartition(-indexScores, kth: max(topK - 1, 0), axis: -1)[0..., 0..., ..<topK]
+        let selected = argPartition(-indexScores, kth: max(topK - 1, 0), axis: -1)[
+            0..., 0..., ..<topK]
         let invalid = selected .>= causalThreshold[0..., 0..., .newAxis]
         return MLX.where(invalid, MLXArray(Int32(-1)), selected)
     }
@@ -739,7 +745,8 @@ final class DeepseekV4AttentionCompressor: Module {
             let windows = kv.dim(1) / compressRate
             kv = kv.reshaped(batch, windows, compressRate, -1)
             gate = gate.reshaped(batch, windows, compressRate, -1) + ape.asType(gate.dtype)
-            compressed = (kv * softmax(gate.asType(.float32), axis: 2, precise: true).asType(kv.dtype))
+            compressed =
+                (kv * softmax(gate.asType(.float32), axis: 2, precise: true).asType(kv.dtype))
                 .sum(axis: 2)
             if compressed.dim(-1) > config.headDim {
                 compressed = compressed[.ellipsis, ..<config.headDim]
@@ -772,7 +779,8 @@ final class DeepseekV4AttentionCompressor: Module {
                 .reshaped(1, sequenceLength)
             let causalThreshold = (positions + 1).floorDivide(compressRate)
             let future =
-                entryIndices.reshaped(1, 1, 1, -1) .>= causalThreshold[0..., .newAxis, 0..., .newAxis]
+                entryIndices.reshaped(1, 1, 1, -1)
+                .>= causalThreshold[0..., .newAxis, 0..., .newAxis]
             let bias = MLX.where(
                 future,
                 MLXArray(-1.0e9).asType(hiddenStates.dtype),
@@ -993,7 +1001,8 @@ class DeepseekV4Attention: Module {
                 cache?.update(keys: kFull, values: kFull) ?? (kFull, kFull)
             let compressed = compressor(x, qResidual: qResidual, cache: deepseekCache)
             let keys = concatenated([cachedKeys, compressed.kv.asType(cachedKeys.dtype)], axis: 2)
-            let values = concatenated([cachedValues, compressed.kv.asType(cachedValues.dtype)], axis: 2)
+            let values = concatenated(
+                [cachedValues, compressed.kv.asType(cachedValues.dtype)], axis: 2)
             let compressedMask: MLXFast.ScaledDotProductAttentionMaskMode
             if let bias = compressed.bias {
                 let localKeyLength = cachedKeys.dim(2)
@@ -1035,7 +1044,8 @@ class DeepseekV4Attention: Module {
                 sinks: sinksToUse
             )
         }
-        output = output
+        output =
+            output
             .transposed(0, 2, 1, 3)
             .reshaped(B, L, numHeads, headDim)  // [B, L, n_heads, head_dim]
 
@@ -1095,7 +1105,8 @@ class DeepseekV4Gate: Module {
         self.isHash = isHash
         self._weight.wrappedValue = zeros([config.nRoutedExperts, config.hiddenSize])
         self._e_score_correction_bias.wrappedValue = zeros([config.nRoutedExperts])
-        self._tid2eid.wrappedValue = zeros([config.vocabSize, config.numExpertsPerTok], dtype: .int32)
+        self._tid2eid.wrappedValue = zeros(
+            [config.vocabSize, config.numExpertsPerTok], dtype: .int32)
     }
 
     /// Hash-routing layers can load with only `tid2eid`; dense router weights are not required.

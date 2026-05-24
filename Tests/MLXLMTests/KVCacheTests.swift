@@ -333,7 +333,9 @@ extension MLXRuntimeSwiftTests {
             }
             #expect(cache.cacheFootprint.compressedBytes > 0)
             #expect(cache.cacheFootprint.rawShadowBytes == 0)
-            #expect(cache.diagnostics.footprint?.compressedBytes == cache.cacheFootprint.compressedBytes)
+            #expect(
+                cache.diagnostics.footprint?.compressedBytes == cache.cacheFootprint.compressedBytes
+            )
             #expect(turboQuantAggregateCacheFootprint([cache]).compressedBytes > 0)
         }
 
@@ -348,7 +350,8 @@ extension MLXRuntimeSwiftTests {
             _ = try cache.updateCompressed(keys: keys, values: values)
 
             let decoded = try cache.decodedCompressedState(outputDType: .float32)
-            #expect(cache.cacheFootprint.decodedTransientBytes == decoded.0.nbytes + decoded.1.nbytes)
+            #expect(
+                cache.cacheFootprint.decodedTransientBytes == decoded.0.nbytes + decoded.1.nbytes)
             if case .decodeCompressed = cache.cacheLifecycle {
             } else {
                 Issue.record("Expected decode-compressed lifecycle")

@@ -160,6 +160,40 @@ extension MLXRuntimeSwiftTests {
             )
         }
 
+        @Test func testRequiredAdmissionRejectsMissingPlanBeforeGeneration() {
+            let parameters = GenerateParameters(
+                kvCacheStrategy: .turboQuant,
+                turboQuantAdmissionPolicy: .required
+            )
+
+            #expect(throws: TurboQuantGenerationError.admissionRequired) {
+                _ = try parameters.resolvedForTurboQuantRuntime(layerCount: 32)
+            }
+        }
+
+        @Test func testAdmissionPlanResolvesGenerationCacheBudget() throws {
+            let planner = Self.planner()
+            let admission = planner.admit(
+                profile: Self.profile(weightGiB: 2, layers: 32),
+                requestedContextLength: 8192,
+                userMode: .balanced,
+                fallbackPolicy: .compressedDecodeAllowed,
+                preset: .turbo3_5,
+                memorySample: Self.sample(availableGiB: 12, modelGiB: 2)
+            )
+            let parameters = GenerateParameters(
+                kvCacheStrategy: .turboQuant,
+                turboQuantAdmission: admission
+            )
+
+            let resolved = try parameters.resolvedForTurboQuantRuntime(layerCount: 32)
+
+            #expect(resolved.maxKVSize == admission.admittedContextLength)
+            #expect(resolved.turboQuantPreset == admission.memoryPlan.preset)
+            #expect(resolved.turboQuantValueBits == admission.memoryPlan.valueBits)
+            #expect((resolved.turboQuantPerCacheResidentBudgetBytes ?? 0) > 0)
+        }
+
         private static func planner() -> TurboQuantAdmissionPlanner {
             TurboQuantAdmissionPlanner(
                 options: TurboQuantAdmissionPlanner.Options(

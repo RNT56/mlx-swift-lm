@@ -90,6 +90,30 @@ public struct GenerateParameters: Sendable {
     /// Bit width for TurboQuant values. Defaults to the preset recommendation.
     public var turboQuantValueBits: Int?
 
+    /// Admission behavior for TurboQuant caches during generation.
+    public var turboQuantAdmissionPolicy: TurboQuantAdmissionPolicy
+
+    /// Optional precomputed TurboQuant admission result.
+    public var turboQuantAdmission: TurboQuantAdmission?
+
+    /// Internal per-cache resident budget derived from an admitted memory plan.
+    public var turboQuantPerCacheResidentBudgetBytes: Int?
+
+    /// Optional model memory profile used when ``turboQuantAdmissionPolicy`` is ``TurboQuantAdmissionPolicy/automatic``.
+    public var turboQuantAdmissionProfile: ModelMemoryProfile?
+
+    /// Requested context length for automatic TurboQuant admission. Defaults to ``maxKVSize`` or a conservative 4k plan.
+    public var turboQuantRequestedContextLength: Int?
+
+    /// Prompt token count included in automatic admission estimates.
+    public var turboQuantPromptTokenCount: Int
+
+    /// User-visible TurboQuant mode used for automatic admission.
+    public var turboQuantUserMode: TurboQuantUserMode
+
+    /// Fallback policy used for automatic admission.
+    public var turboQuantFallbackPolicy: TurboQuantFallbackPolicy
+
     /// Sampling temperature
     public var temperature: Float
 
@@ -132,6 +156,14 @@ public struct GenerateParameters: Sendable {
         turboQuantOptimizationPolicy: TurboQuantOptimizationPolicy = .auto,
         turboQuantSeed: UInt64? = nil,
         turboQuantValueBits: Int? = nil,
+        turboQuantAdmissionPolicy: TurboQuantAdmissionPolicy = .automatic,
+        turboQuantAdmission: TurboQuantAdmission? = nil,
+        turboQuantPerCacheResidentBudgetBytes: Int? = nil,
+        turboQuantAdmissionProfile: ModelMemoryProfile? = nil,
+        turboQuantRequestedContextLength: Int? = nil,
+        turboQuantPromptTokenCount: Int = 0,
+        turboQuantUserMode: TurboQuantUserMode = .balanced,
+        turboQuantFallbackPolicy: TurboQuantFallbackPolicy = .compressedDecodeAllowed,
         temperature: Float = 0.6,
         topP: Float = 1.0,
         topK: Int = 0,
@@ -155,6 +187,14 @@ public struct GenerateParameters: Sendable {
         self.turboQuantOptimizationPolicy = turboQuantOptimizationPolicy
         self.turboQuantSeed = turboQuantSeed
         self.turboQuantValueBits = turboQuantValueBits
+        self.turboQuantAdmissionPolicy = turboQuantAdmissionPolicy
+        self.turboQuantAdmission = turboQuantAdmission
+        self.turboQuantPerCacheResidentBudgetBytes = turboQuantPerCacheResidentBudgetBytes
+        self.turboQuantAdmissionProfile = turboQuantAdmissionProfile
+        self.turboQuantRequestedContextLength = turboQuantRequestedContextLength
+        self.turboQuantPromptTokenCount = turboQuantPromptTokenCount
+        self.turboQuantUserMode = turboQuantUserMode
+        self.turboQuantFallbackPolicy = turboQuantFallbackPolicy
         self.temperature = temperature
         self.topP = topP
         self.topK = topK
@@ -223,6 +263,150 @@ public struct GenerateParameters: Sendable {
             frequencyContext: frequencyContext
         )
     }
+}
+
+public enum TurboQuantAdmissionPolicy: String, Codable, Sendable, CaseIterable {
+    case automatic
+    case required
+    case disabled
+}
+
+public enum TurboQuantRuntimeControl {
+    public static func enabled(_ name: String) -> Bool {
+        ProcessInfo.processInfo.environment[name] == "1"
+    }
+}
+
+public enum TurboQuantGenerationError: Error, CustomStringConvertible, Equatable {
+    case admissionRequired
+    case admissionRejected(String)
+    case cacheBudgetExceeded(residentBytes: Int, budgetBytes: Int)
+    case modelRequiresThrowingAttention(String)
+
+    public var description: String {
+        switch self {
+        case .admissionRequired:
+            "TurboQuant generation requires an admitted memory plan"
+        case .admissionRejected(let message):
+            "TurboQuant admission rejected generation: \(message)"
+        case .cacheBudgetExceeded(let residentBytes, let budgetBytes):
+            "TurboQuant cache resident bytes \(residentBytes) exceed admitted budget \(budgetBytes)"
+        case .modelRequiresThrowingAttention(let modelName):
+            "TurboQuant generation requires typed throwing attention for \(modelName)"
+        }
+    }
+}
+
+extension GenerateParameters {
+    private func automaticTurboQuantAdmission(layerCount: Int?) -> TurboQuantAdmission {
+        let requestedContext =
+            turboQuantRequestedContextLength
+            ?? maxKVSize
+            ?? maxTokens
+            ?? 4096
+        let profile =
+            turboQuantAdmissionProfile
+            ?? ModelMemoryProfile(
+                modelID: "automatic-turboquant-admission",
+                modelType: "runtime-estimate",
+                layerCount: max(1, layerCount ?? 1),
+                hiddenSize: 4096,
+                attentionHeadCount: 32,
+                kvHeadCount: 32,
+                headDimension: 128,
+                quantizationBits: 4,
+                weightBytes: 0
+            )
+        return TurboQuantAdmissionPlanner().admit(
+            profile: profile,
+            requestedContextLength: requestedContext,
+            promptTokenCount: turboQuantPromptTokenCount,
+            userMode: turboQuantUserMode,
+            fallbackPolicy: turboQuantFallbackPolicy,
+            preset: turboQuantPreset,
+            valueBits: turboQuantValueBits,
+            groupSize: kvGroupSize
+        )
+    }
+
+    public func resolvedForTurboQuantRuntime(
+        layerCount: Int? = nil
+    ) throws -> GenerateParameters {
+        var resolved = self
+        if turboQuantAdmissionPolicy == .disabled
+            || TurboQuantRuntimeControl.enabled("TURBOQUANT_DISABLE")
+            || TurboQuantRuntimeControl.enabled("TURBOQUANT_FORCE_BASELINE")
+        {
+            resolved.kvCacheStrategy = .none
+            resolved.turboQuantPerCacheResidentBudgetBytes = nil
+            return resolved
+        }
+        if TurboQuantRuntimeControl.enabled("TURBOQUANT_FORCE_PACKED") {
+            resolved.kvCacheStrategy = .mlxAffine
+            resolved.kvBits = resolved.turboQuantPreset.effectiveBits
+            resolved.turboQuantPerCacheResidentBudgetBytes = nil
+            return resolved
+        }
+        if TurboQuantRuntimeControl.enabled("TURBOQUANT_FORCE_TWO_STAGE") {
+            resolved.turboQuantOptimizationPolicy = .conservative
+        }
+        if TurboQuantRuntimeControl.enabled("TURBOQUANT_FORCE_FUSED") {
+            resolved.turboQuantOptimizationPolicy = .preferThroughput
+        }
+        guard resolved.kvCacheStrategy == .turboQuant else {
+            return resolved
+        }
+        if resolved.turboQuantAdmission == nil,
+            resolved.turboQuantAdmissionPolicy == .automatic
+        {
+            resolved.turboQuantAdmission = resolved.automaticTurboQuantAdmission(
+                layerCount: layerCount)
+        }
+        if let admission = resolved.turboQuantAdmission {
+            guard admission.admitted else {
+                throw TurboQuantGenerationError.admissionRejected(admission.userMessage)
+            }
+            resolved.maxKVSize = min(
+                resolved.maxKVSize ?? admission.admittedContextLength,
+                admission.admittedContextLength
+            )
+            resolved.turboQuantPreset = admission.memoryPlan.preset
+            resolved.turboQuantValueBits = admission.memoryPlan.valueBits
+            switch admission.selectedMode {
+            case .fastest:
+                resolved.turboQuantOptimizationPolicy = .preferThroughput
+            case .balanced:
+                break
+            case .maxContext, .batterySaver:
+                resolved.turboQuantOptimizationPolicy = .preferMemory
+            }
+            if let layerCount, layerCount > 0 {
+                let residentBudget =
+                    admission.memoryPlan.runtimeZones.compressedKVBytes
+                    + admission.memoryPlan.runtimeZones.rawShadowBytes
+                    + admission.memoryPlan.runtimeZones.fallbackReserveBytes
+                resolved.turboQuantPerCacheResidentBudgetBytes = max(1, residentBudget / layerCount)
+            }
+            return resolved
+        }
+        if resolved.turboQuantAdmissionPolicy == .required {
+            throw TurboQuantGenerationError.admissionRequired
+        }
+        return resolved
+    }
+}
+
+private func resolvedGenerationParameters(
+    for model: any LanguageModel,
+    parameters: GenerateParameters
+) throws -> GenerateParameters {
+    let layerCount = (model as? any KVCacheDimensionProvider)?.kvHeads.count
+    let resolved = try parameters.resolvedForTurboQuantRuntime(layerCount: layerCount)
+    if resolved.kvCacheStrategy == .turboQuant, !(model is any ThrowingLanguageModel) {
+        throw TurboQuantGenerationError.modelRequiresThrowingAttention(
+            String(describing: type(of: model)))
+    }
+    return resolved
 }
 
 /// Sampler that uses `argMax` (most likely) to sample the logits.
@@ -572,6 +756,9 @@ public struct TokenIterator: TokenIteratorProtocol {
     let turboQuantOptimizationPolicy: TurboQuantOptimizationPolicy
     let turboQuantSeed: UInt64?
     let turboQuantValueBits: Int?
+    let turboQuantResidentBudgetBytes: Int?
+    private var runtimeError: Error?
+    public var lastRuntimeError: Error? { runtimeError }
 
     // Internal metrics
     public var promptPrefillTime: TimeInterval = 0.0
@@ -591,24 +778,26 @@ public struct TokenIterator: TokenIteratorProtocol {
     ) throws {
         self.model = model
         self.y = .init(tokens: prompt)
-        self.cache = cache ?? model.newCache(parameters: parameters)
+        let runtimeParameters = try resolvedGenerationParameters(for: model, parameters: parameters)
+        self.cache = cache ?? model.newCache(parameters: runtimeParameters)
 
-        self.processor = parameters.processor()
-        self.sampler = parameters.sampler()
-        self.maxTokens = parameters.maxTokens
+        self.processor = runtimeParameters.processor()
+        self.sampler = runtimeParameters.sampler()
+        self.maxTokens = runtimeParameters.maxTokens
 
-        self.kvBits = parameters.kvBits
-        self.kvGroupSize = parameters.kvGroupSize
-        self.quantizedKVStart = parameters.quantizedKVStart
-        self.kvCacheStrategy = parameters.kvCacheStrategy
-        self.turboQuantPreset = parameters.turboQuantPreset
-        self.turboQuantBackend = parameters.turboQuantBackend
-        self.turboQuantOptimizationPolicy = parameters.turboQuantOptimizationPolicy
-        self.turboQuantSeed = parameters.turboQuantSeed
-        self.turboQuantValueBits = parameters.turboQuantValueBits
+        self.kvBits = runtimeParameters.kvBits
+        self.kvGroupSize = runtimeParameters.kvGroupSize
+        self.quantizedKVStart = runtimeParameters.quantizedKVStart
+        self.kvCacheStrategy = runtimeParameters.kvCacheStrategy
+        self.turboQuantPreset = runtimeParameters.turboQuantPreset
+        self.turboQuantBackend = runtimeParameters.turboQuantBackend
+        self.turboQuantOptimizationPolicy = runtimeParameters.turboQuantOptimizationPolicy
+        self.turboQuantSeed = runtimeParameters.turboQuantSeed
+        self.turboQuantValueBits = runtimeParameters.turboQuantValueBits
+        self.turboQuantResidentBudgetBytes = runtimeParameters.turboQuantPerCacheResidentBudgetBytes
 
         self.promptPrefillTime = try measure {
-            try prepare(input: .init(text: y), windowSize: parameters.prefillStepSize)
+            try prepare(input: .init(text: y), windowSize: runtimeParameters.prefillStepSize)
         }
     }
 
@@ -630,24 +819,26 @@ public struct TokenIterator: TokenIteratorProtocol {
     ) throws {
         self.model = model
         self.y = input.text
-        self.cache = cache ?? model.newCache(parameters: parameters)
+        let runtimeParameters = try resolvedGenerationParameters(for: model, parameters: parameters)
+        self.cache = cache ?? model.newCache(parameters: runtimeParameters)
 
-        self.processor = parameters.processor()
-        self.sampler = parameters.sampler()
-        self.maxTokens = parameters.maxTokens
+        self.processor = runtimeParameters.processor()
+        self.sampler = runtimeParameters.sampler()
+        self.maxTokens = runtimeParameters.maxTokens
 
-        self.kvBits = parameters.kvBits
-        self.kvGroupSize = parameters.kvGroupSize
-        self.quantizedKVStart = parameters.quantizedKVStart
-        self.kvCacheStrategy = parameters.kvCacheStrategy
-        self.turboQuantPreset = parameters.turboQuantPreset
-        self.turboQuantBackend = parameters.turboQuantBackend
-        self.turboQuantOptimizationPolicy = parameters.turboQuantOptimizationPolicy
-        self.turboQuantSeed = parameters.turboQuantSeed
-        self.turboQuantValueBits = parameters.turboQuantValueBits
+        self.kvBits = runtimeParameters.kvBits
+        self.kvGroupSize = runtimeParameters.kvGroupSize
+        self.quantizedKVStart = runtimeParameters.quantizedKVStart
+        self.kvCacheStrategy = runtimeParameters.kvCacheStrategy
+        self.turboQuantPreset = runtimeParameters.turboQuantPreset
+        self.turboQuantBackend = runtimeParameters.turboQuantBackend
+        self.turboQuantOptimizationPolicy = runtimeParameters.turboQuantOptimizationPolicy
+        self.turboQuantSeed = runtimeParameters.turboQuantSeed
+        self.turboQuantValueBits = runtimeParameters.turboQuantValueBits
+        self.turboQuantResidentBudgetBytes = runtimeParameters.turboQuantPerCacheResidentBudgetBytes
 
         self.promptPrefillTime = try measure {
-            try prepare(input: input, windowSize: parameters.prefillStepSize)
+            try prepare(input: input, windowSize: runtimeParameters.prefillStepSize)
         }
     }
 
@@ -670,21 +861,26 @@ public struct TokenIterator: TokenIteratorProtocol {
     ) throws {
         self.model = model
         self.y = input.text
-        self.cache = cache ?? model.newCache(parameters: cacheParameters)
+        let runtimeCacheParameters =
+            try cacheParameters.map { try resolvedGenerationParameters(for: model, parameters: $0) }
+        self.cache = cache ?? model.newCache(parameters: runtimeCacheParameters)
 
         self.processor = processor
         self.sampler = sampler
         self.maxTokens = maxTokens
 
-        self.kvBits = cacheParameters?.kvBits
-        self.kvGroupSize = cacheParameters?.kvGroupSize ?? 64
-        self.quantizedKVStart = cacheParameters?.quantizedKVStart ?? 0
-        self.kvCacheStrategy = cacheParameters?.kvCacheStrategy ?? .none
-        self.turboQuantPreset = cacheParameters?.turboQuantPreset ?? .turbo3_5
-        self.turboQuantBackend = cacheParameters?.turboQuantBackend ?? .metalPolarQJL
-        self.turboQuantOptimizationPolicy = cacheParameters?.turboQuantOptimizationPolicy ?? .auto
-        self.turboQuantSeed = cacheParameters?.turboQuantSeed
-        self.turboQuantValueBits = cacheParameters?.turboQuantValueBits
+        self.kvBits = runtimeCacheParameters?.kvBits
+        self.kvGroupSize = runtimeCacheParameters?.kvGroupSize ?? 64
+        self.quantizedKVStart = runtimeCacheParameters?.quantizedKVStart ?? 0
+        self.kvCacheStrategy = runtimeCacheParameters?.kvCacheStrategy ?? .none
+        self.turboQuantPreset = runtimeCacheParameters?.turboQuantPreset ?? .turbo3_5
+        self.turboQuantBackend = runtimeCacheParameters?.turboQuantBackend ?? .metalPolarQJL
+        self.turboQuantOptimizationPolicy =
+            runtimeCacheParameters?.turboQuantOptimizationPolicy ?? .auto
+        self.turboQuantSeed = runtimeCacheParameters?.turboQuantSeed
+        self.turboQuantValueBits = runtimeCacheParameters?.turboQuantValueBits
+        self.turboQuantResidentBudgetBytes =
+            runtimeCacheParameters?.turboQuantPerCacheResidentBudgetBytes
 
         self.promptPrefillTime = try measure {
             try prepare(input: input, windowSize: prefillStepSize)
@@ -699,7 +895,7 @@ public struct TokenIterator: TokenIteratorProtocol {
             y = tokens
 
             // evaluate the remainder of the prompt -- this primes the pump
-            let token = step(previous: y)
+            let token = try step(previous: y)
             y = .init(tokens: token)
             asyncEval(y.tokens)
 
@@ -725,9 +921,15 @@ public struct TokenIterator: TokenIteratorProtocol {
     }
 
     /// Evaluate the next token and return the new token (y), updating cache state
-    mutating func step(previous: LMInput.Text) -> MLXArray {
-        let result = model(
-            previous[text: .newAxis], cache: cache.isEmpty ? nil : cache, state: state)
+    mutating func step(previous: LMInput.Text) throws -> MLXArray {
+        let result: LMOutput
+        if let throwingModel = model as? any ThrowingLanguageModel {
+            result = try throwingModel.callAsFunctionThrowing(
+                previous[text: .newAxis], cache: cache.isEmpty ? nil : cache, state: state)
+        } else {
+            result = model(
+                previous[text: .newAxis], cache: cache.isEmpty ? nil : cache, state: state)
+        }
         self.state = result.state
 
         // Apply dynamic cache quantization after each step
@@ -741,13 +943,15 @@ public struct TokenIterator: TokenIteratorProtocol {
             turboQuantBackend: turboQuantBackend,
             turboQuantOptimizationPolicy: turboQuantOptimizationPolicy,
             turboQuantSeed: turboQuantSeed,
-            turboQuantValueBits: turboQuantValueBits
+            turboQuantValueBits: turboQuantValueBits,
+            turboQuantResidentBudgetBytes: turboQuantResidentBudgetBytes
         )
 
         return convertToToken(logits: result.logits)
     }
 
     mutating public func next() -> Int? {
+        guard runtimeError == nil else { return nil }
         if let maxTokens, tokenCount >= maxTokens {
             return nil
         }
@@ -756,7 +960,13 @@ public struct TokenIterator: TokenIteratorProtocol {
         let previousY = y
 
         // compute the next state and async eval the next token
-        let token = step(previous: previousY)
+        let token: MLXArray
+        do {
+            token = try step(previous: previousY)
+        } catch {
+            runtimeError = error
+            return nil
+        }
         y = .init(tokens: token)
         asyncEval(token)
 
@@ -814,6 +1024,8 @@ public struct SpeculativeTokenIterator: TokenIteratorProtocol {
     // Buffer of accepted tokens from the current speculation round
     private var pendingTokens = [Int]()
     private var pendingIndex = 0
+    private var runtimeError: Error?
+    public var lastRuntimeError: Error? { runtimeError }
 
     // Internal metrics
     public var promptPrefillTime: TimeInterval = 0.0
@@ -842,35 +1054,41 @@ public struct SpeculativeTokenIterator: TokenIteratorProtocol {
         self.mainModel = mainModel
         self.draftModel = draftModel
 
-        self.mainCache = mainCache ?? mainModel.newCache(parameters: parameters)
-        self.draftCache = draftCache ?? draftModel.newCache(parameters: parameters)
+        let mainRuntimeParameters = try resolvedGenerationParameters(
+            for: mainModel, parameters: parameters)
+        let draftRuntimeParameters = try resolvedGenerationParameters(
+            for: draftModel, parameters: parameters)
+        self.mainCache = mainCache ?? mainModel.newCache(parameters: mainRuntimeParameters)
+        self.draftCache = draftCache ?? draftModel.newCache(parameters: draftRuntimeParameters)
         guard canTrimPromptCache(self.mainCache), canTrimPromptCache(self.draftCache) else {
             throw KVCacheError(message: "Speculative decoding requires trimmable KV caches.")
         }
 
-        self.sampler = parameters.sampler()
-        self.processor = parameters.processor()
+        self.sampler = mainRuntimeParameters.sampler()
+        self.processor = mainRuntimeParameters.processor()
 
-        self.maxTokens = parameters.maxTokens
+        self.maxTokens = mainRuntimeParameters.maxTokens
         self.numDraftTokens = numDraftTokens
 
         self.quantizeKVCache = { cache in
             maybeQuantizeKVCache(
                 cache: &cache,
-                kvBits: parameters.kvBits,
-                kvGroupSize: parameters.kvGroupSize,
-                quantizedKVStart: parameters.quantizedKVStart,
-                kvCacheStrategy: parameters.kvCacheStrategy,
-                turboQuantPreset: parameters.turboQuantPreset,
-                turboQuantBackend: parameters.turboQuantBackend,
-                turboQuantOptimizationPolicy: parameters.turboQuantOptimizationPolicy,
-                turboQuantSeed: parameters.turboQuantSeed,
-                turboQuantValueBits: parameters.turboQuantValueBits
+                kvBits: mainRuntimeParameters.kvBits,
+                kvGroupSize: mainRuntimeParameters.kvGroupSize,
+                quantizedKVStart: mainRuntimeParameters.quantizedKVStart,
+                kvCacheStrategy: mainRuntimeParameters.kvCacheStrategy,
+                turboQuantPreset: mainRuntimeParameters.turboQuantPreset,
+                turboQuantBackend: mainRuntimeParameters.turboQuantBackend,
+                turboQuantOptimizationPolicy: mainRuntimeParameters.turboQuantOptimizationPolicy,
+                turboQuantSeed: mainRuntimeParameters.turboQuantSeed,
+                turboQuantValueBits: mainRuntimeParameters.turboQuantValueBits,
+                turboQuantResidentBudgetBytes: mainRuntimeParameters
+                    .turboQuantPerCacheResidentBudgetBytes
             )
         }
 
         self.promptPrefillTime = try measure {
-            try prepare(input: input, windowSize: parameters.prefillStepSize)
+            try prepare(input: input, windowSize: mainRuntimeParameters.prefillStepSize)
         }
     }
 
@@ -905,7 +1123,7 @@ public struct SpeculativeTokenIterator: TokenIteratorProtocol {
     }
 
     /// Run one round of speculative decoding: draft, verify, accept/reject
-    mutating func speculateRound() {
+    mutating func speculateRound() throws {
         let remaining = maxTokens.map { $0 - tokenCount } ?? numDraftTokens
         let numDraft = Swift.min(remaining, numDraftTokens)
         guard numDraft > 0 else {
@@ -916,7 +1134,16 @@ public struct SpeculativeTokenIterator: TokenIteratorProtocol {
         var draftProcessor = processor  // Copy to discard later
         var draftTokens = [MLXArray]()
         for _ in 0 ..< numDraft {
-            let draftResult = draftModel(draftY[text: .newAxis], cache: draftCache, state: nil)
+            let draftResult: LMOutput
+            if let throwingDraftModel = draftModel as? any ThrowingLanguageModel {
+                draftResult = try throwingDraftModel.callAsFunctionThrowing(
+                    draftY[text: .newAxis],
+                    cache: draftCache,
+                    state: nil
+                )
+            } else {
+                draftResult = draftModel(draftY[text: .newAxis], cache: draftCache, state: nil)
+            }
             var draftLogits = draftResult.logits[0..., -1, 0...]
             draftLogits = draftProcessor?.process(logits: draftLogits) ?? draftLogits
             let draftToken = sampler.sample(logits: draftLogits)
@@ -930,7 +1157,16 @@ public struct SpeculativeTokenIterator: TokenIteratorProtocol {
         let verifyTokens = [y.tokens] + draftTokens
         let verifyInput = LMInput.Text(tokens: concatenated(verifyTokens))
         let verifyStart = verifyInput.tokens.dim(0) - (numDraft + 1)
-        let mainResult = mainModel(verifyInput[text: .newAxis], cache: mainCache, state: mainState)
+        let mainResult: LMOutput
+        if let throwingMainModel = mainModel as? any ThrowingLanguageModel {
+            mainResult = try throwingMainModel.callAsFunctionThrowing(
+                verifyInput[text: .newAxis],
+                cache: mainCache,
+                state: mainState
+            )
+        } else {
+            mainResult = mainModel(verifyInput[text: .newAxis], cache: mainCache, state: mainState)
+        }
         let mainLogits = mainResult.logits
         mainState = mainResult.state
 
@@ -998,6 +1234,7 @@ public struct SpeculativeTokenIterator: TokenIteratorProtocol {
     }
 
     mutating public func next() -> Int? {
+        guard runtimeError == nil else { return nil }
         if let maxTokens, tokenCount >= maxTokens {
             return nil
         }
@@ -1013,7 +1250,12 @@ public struct SpeculativeTokenIterator: TokenIteratorProtocol {
         // Run a new speculation round
         pendingTokens.removeAll(keepingCapacity: true)
         pendingIndex = 0
-        speculateRound()
+        do {
+            try speculateRound()
+        } catch {
+            runtimeError = error
+            return nil
+        }
 
         if pendingTokens.isEmpty {
             return nil
@@ -1068,8 +1310,9 @@ public struct MTPTokenIterator: TokenIteratorProtocol {
     ) throws {
         self.y = input.text
         self.model = model
-        self.cache = cache ?? model.newCache(parameters: parameters)
-        self.mtpCaches = model.makeMTPCaches(parameters: parameters)
+        let runtimeParameters = try resolvedGenerationParameters(for: model, parameters: parameters)
+        self.cache = cache ?? model.newCache(parameters: runtimeParameters)
+        self.mtpCaches = model.makeMTPCaches(parameters: runtimeParameters)
 
         if let dualModel = model as? any DualModelMTP, let mainModel = dualModel.mainModelRef {
             try dualModel.validateMTPOrchestration(mainModel: mainModel)
@@ -1079,29 +1322,31 @@ public struct MTPTokenIterator: TokenIteratorProtocol {
             throw KVCacheError(message: "MTP speculative decoding requires trimmable KV caches.")
         }
 
-        self.sampler = parameters.sampler()
-        self.processor = parameters.processor()
-        self.parameters = parameters
-        self.maxTokens = parameters.maxTokens
+        self.sampler = runtimeParameters.sampler()
+        self.processor = runtimeParameters.processor()
+        self.parameters = runtimeParameters
+        self.maxTokens = runtimeParameters.maxTokens
         self.numMTPTokens = numMTPTokens
 
         self.quantizeKVCache = { cache in
             maybeQuantizeKVCache(
                 cache: &cache,
-                kvBits: parameters.kvBits,
-                kvGroupSize: parameters.kvGroupSize,
-                quantizedKVStart: parameters.quantizedKVStart,
-                kvCacheStrategy: parameters.kvCacheStrategy,
-                turboQuantPreset: parameters.turboQuantPreset,
-                turboQuantBackend: parameters.turboQuantBackend,
-                turboQuantOptimizationPolicy: parameters.turboQuantOptimizationPolicy,
-                turboQuantSeed: parameters.turboQuantSeed,
-                turboQuantValueBits: parameters.turboQuantValueBits
+                kvBits: runtimeParameters.kvBits,
+                kvGroupSize: runtimeParameters.kvGroupSize,
+                quantizedKVStart: runtimeParameters.quantizedKVStart,
+                kvCacheStrategy: runtimeParameters.kvCacheStrategy,
+                turboQuantPreset: runtimeParameters.turboQuantPreset,
+                turboQuantBackend: runtimeParameters.turboQuantBackend,
+                turboQuantOptimizationPolicy: runtimeParameters.turboQuantOptimizationPolicy,
+                turboQuantSeed: runtimeParameters.turboQuantSeed,
+                turboQuantValueBits: runtimeParameters.turboQuantValueBits,
+                turboQuantResidentBudgetBytes: runtimeParameters
+                    .turboQuantPerCacheResidentBudgetBytes
             )
         }
 
         self.promptPrefillTime = try measure {
-            try prepare(input: input, windowSize: parameters.prefillStepSize)
+            try prepare(input: input, windowSize: runtimeParameters.prefillStepSize)
         }
     }
 

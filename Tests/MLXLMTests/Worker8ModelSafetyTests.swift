@@ -17,7 +17,8 @@ struct Worker8ModelSafetyTests {
         #expect(direct.shape == [1, 2, 0])
 
         do {
-            _ = try assistant.prepare(input, cache: assistant.newCache(parameters: nil), windowSize: nil)
+            _ = try assistant.prepare(
+                input, cache: assistant.newCache(parameters: nil), windowSize: nil)
             Issue.record("Gemma4 assistant prepare should require dual-model MTP orchestration")
         } catch let error as Gemma4AssistantError {
             #expect(error == .requiresDualModelMTP)
@@ -118,16 +119,18 @@ struct Worker8ModelSafetyTests {
     @Test func deepseekV4HashRoutingUsesTid2Eid() throws {
         let config = try makeDeepseekV4Config(numHiddenLayers: 1, numNextnPredictLayers: 0)
         let gate = DeepseekV4Gate(config: config, isHash: true)
-        let tokenToExpert = MLXArray([
-            0, 1,
-            2, 3,
-            1, 2,
-            3, 0,
-            0, 2,
-            1, 3,
-            2, 0,
-            3, 1,
-        ] as [Int32]).reshaped([8, 2])
+        let tokenToExpert = MLXArray(
+            [
+                0, 1,
+                2, 3,
+                1, 2,
+                3, 0,
+                0, 2,
+                1, 3,
+                2, 0,
+                3, 1,
+            ] as [Int32]
+        ).reshaped([8, 2])
         try gate.update(
             parameters: ModuleParameters.unflattened([
                 "tid2eid": tokenToExpert

@@ -258,6 +258,24 @@ class Gemma3nAttention: Module {
         cache: KVCache? = nil,
         sharedKV: AttentionKVState? = nil
     ) -> (output: MLXArray, state: AttentionKVState?) {
+        do {
+            return try callWithKVStateThrowing(
+                x,
+                mask: mask,
+                cache: cache,
+                sharedKV: sharedKV
+            )
+        } catch {
+            fatalError(String(describing: error))
+        }
+    }
+
+    func callWithKVStateThrowing(
+        _ x: MLXArray,
+        mask: MLXFast.ScaledDotProductAttentionMaskMode? = nil,
+        cache: KVCache? = nil,
+        sharedKV: AttentionKVState? = nil
+    ) throws -> (output: MLXArray, state: AttentionKVState?) {
         let (B, L, _) = (x.dim(0), x.dim(1), x.dim(2))
 
         var queries = qProj(x)
@@ -275,7 +293,7 @@ class Gemma3nAttention: Module {
             attentionState = sharedKV
             let adjustedMask = adjustedAttentionMask(
                 mask, keyLength: sharedKV.keyLength, dtype: queries.dtype)
-            attentionOutput = attentionWithKVState(
+            attentionOutput = try attentionWithKVStateThrowing(
                 queries: queries,
                 state: sharedKV,
                 scale: scale,
@@ -291,7 +309,7 @@ class Gemma3nAttention: Module {
                     keyLength: state[0].dim(2),
                     dtype: queries.dtype
                 )
-                attentionOutput = attentionWithKVState(
+                attentionOutput = try attentionWithKVStateThrowing(
                     queries: queries,
                     state: rawState,
                     scale: scale,
@@ -312,7 +330,7 @@ class Gemma3nAttention: Module {
                     keyLength: attentionKeyLengthAfterUpdate(cache: cache, keys: keys),
                     dtype: queries.dtype
                 )
-                let result = attentionWithCacheUpdateReturningState(
+                let result = try attentionWithCacheUpdateReturningStateThrowing(
                     queries: queries,
                     keys: keys,
                     values: values,
@@ -338,7 +356,7 @@ class Gemma3nAttention: Module {
                 keyLength: attentionKeyLengthAfterUpdate(cache: cache, keys: keys),
                 dtype: queries.dtype
             )
-            let result = attentionWithCacheUpdateReturningState(
+            let result = try attentionWithCacheUpdateReturningStateThrowing(
                 queries: queries,
                 keys: keys,
                 values: values,
@@ -611,6 +629,30 @@ class Gemma3nDecoderLayer: Module {
         caches: [KVCache?]? = nil,
         cachePosition: MLXArray? = nil
     ) -> (MLXArray, AttentionKVState?) {
+        do {
+            return try callThrowing(
+                x,
+                mask: mask,
+                cache: cache,
+                perLayerInput: perLayerInput,
+                sharedKV: sharedKV,
+                caches: caches,
+                cachePosition: cachePosition
+            )
+        } catch {
+            fatalError(String(describing: error))
+        }
+    }
+
+    func callThrowing(
+        _ x: MLXArray,
+        mask: MLXFast.ScaledDotProductAttentionMaskMode? = nil,
+        cache: KVCache? = nil,
+        perLayerInput: MLXArray? = nil,
+        sharedKV: AttentionKVState? = nil,
+        caches: [KVCache?]? = nil,
+        cachePosition: MLXArray? = nil
+    ) throws -> (MLXArray, AttentionKVState?) {
         var x = x
         if x.ndim == 1 {
             x = expandedDimensions(x, axis: 0)
@@ -639,7 +681,7 @@ class Gemma3nDecoderLayer: Module {
         let activePredictionNormed = inputLayernorm(activePrediction)
         let laurelOutput = laurel(activePredictionNormed)
 
-        let attnResult = selfAttn.callWithKVState(
+        let attnResult = try selfAttn.callWithKVStateThrowing(
             activePredictionNormed,
             mask: finalMask,
             cache: cache,
@@ -829,6 +871,26 @@ public class Gemma3nLanguageModel: Module {
         cache: [KVCache?]? = nil,
         perLayerInputs: MLXArray? = nil
     ) -> MLXArray {
+        do {
+            return try callThrowing(
+                inputs: inputs,
+                inputsEmbeds: inputsEmbeds,
+                mask: mask,
+                cache: cache,
+                perLayerInputs: perLayerInputs
+            )
+        } catch {
+            fatalError(String(describing: error))
+        }
+    }
+
+    func callThrowing(
+        inputs: MLXArray? = nil,
+        inputsEmbeds: MLXArray? = nil,
+        mask: MLXFast.ScaledDotProductAttentionMaskMode? = nil,
+        cache: [KVCache?]? = nil,
+        perLayerInputs: MLXArray? = nil
+    ) throws -> MLXArray {
         var h: MLXArray
         if let inputsEmbeds {
             h = inputsEmbeds
@@ -916,7 +978,7 @@ public class Gemma3nLanguageModel: Module {
                 ? attentionStates[cacheIdx]
                 : nil
 
-            let layerResult = layer(
+            let layerResult = try layer.callThrowing(
                 h,
                 mask: localMask,
                 cache: layerCache,
@@ -998,14 +1060,14 @@ public class Gemma3nLanguageModel: Module {
     }
 }
 
-public class Gemma3nTextModel: Module, LLMModel {
+public class Gemma3nTextModel: Module, LLMModel, KVCacheDimensionProvider, ThrowingLanguageModel {
     @ModuleInfo(key: "language_model") public var languageModel: Gemma3nLanguageModel
 
     let config: Gemma3nTextConfiguration
     let modelType: String
     let textVocabSize: Int
 
-    var kvHeads: [Int]
+    public var kvHeads: [Int]
 
     public init(config: Gemma3nTextConfiguration) {
         self.config = config
@@ -1033,8 +1095,30 @@ public class Gemma3nTextModel: Module, LLMModel {
         mask: MLXFast.ScaledDotProductAttentionMaskMode? = nil,
         cache: [KVCache]? = nil
     ) -> MLXArray {
+        do {
+            return try callThrowing(
+                inputs,
+                inputsEmbeds: inputsEmbeds,
+                mask: mask,
+                cache: cache
+            )
+        } catch {
+            fatalError(String(describing: error))
+        }
+    }
+
+    public func callAsFunctionThrowing(_ inputs: MLXArray, cache: [KVCache]?) throws -> MLXArray {
+        try callThrowing(inputs, inputsEmbeds: nil, mask: nil, cache: cache)
+    }
+
+    public func callThrowing(
+        _ inputs: MLXArray? = nil,
+        inputsEmbeds: MLXArray? = nil,
+        mask: MLXFast.ScaledDotProductAttentionMaskMode? = nil,
+        cache: [KVCache]? = nil
+    ) throws -> MLXArray {
         let cacheArray: [KVCache?]? = cache?.map { $0 as KVCache? }
-        return languageModel(
+        return try languageModel.callThrowing(
             inputs: inputs, inputsEmbeds: inputsEmbeds, mask: mask, cache: cacheArray)
     }
 
