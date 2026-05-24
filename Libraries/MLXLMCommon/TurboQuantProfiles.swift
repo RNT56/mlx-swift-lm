@@ -116,6 +116,377 @@ public enum TurboQuantModelModality: String, Codable, Sendable, CaseIterable {
     case videoText
 }
 
+public struct TurboQuantRoPEFingerprint: Codable, Equatable, Sendable {
+    public var type: String?
+    public var theta: Double?
+    public var scalingType: String?
+    public var scalingFactor: Double?
+    public var originalMaxPositionEmbeddings: Int?
+
+    public init(
+        type: String? = nil,
+        theta: Double? = nil,
+        scalingType: String? = nil,
+        scalingFactor: Double? = nil,
+        originalMaxPositionEmbeddings: Int? = nil
+    ) {
+        self.type = type
+        self.theta = theta
+        self.scalingType = scalingType
+        self.scalingFactor = scalingFactor
+        self.originalMaxPositionEmbeddings = originalMaxPositionEmbeddings
+    }
+
+    public var missingRequiredFields: [String] {
+        var fields = [String]()
+        if type == nil { fields.append("model_fingerprint.rope.type") }
+        if theta == nil { fields.append("model_fingerprint.rope.theta") }
+        return fields
+    }
+}
+
+public struct TurboQuantSlidingWindowFingerprint: Codable, Equatable, Sendable {
+    public var enabled: Bool
+    public var size: Int?
+
+    public init(enabled: Bool, size: Int? = nil) {
+        self.enabled = enabled
+        self.size = size
+    }
+
+    public var missingRequiredFields: [String] {
+        enabled && size == nil ? ["model_fingerprint.sliding_window.size"] : []
+    }
+}
+
+public struct TurboQuantModelFingerprint: Codable, Equatable, Sendable {
+    public var family: String?
+    public var hiddenSize: Int?
+    public var layerCount: Int?
+    public var attentionHeads: Int?
+    public var kvHeads: Int?
+    public var headDim: Int?
+    public var rope: TurboQuantRoPEFingerprint?
+    public var slidingWindow: TurboQuantSlidingWindowFingerprint?
+    public var cacheType: String?
+
+    public init(
+        family: String? = nil,
+        hiddenSize: Int? = nil,
+        layerCount: Int? = nil,
+        attentionHeads: Int? = nil,
+        kvHeads: Int? = nil,
+        headDim: Int? = nil,
+        rope: TurboQuantRoPEFingerprint? = nil,
+        slidingWindow: TurboQuantSlidingWindowFingerprint? = nil,
+        cacheType: String? = nil
+    ) {
+        self.family = family
+        self.hiddenSize = hiddenSize
+        self.layerCount = layerCount
+        self.attentionHeads = attentionHeads
+        self.kvHeads = kvHeads
+        self.headDim = headDim
+        self.rope = rope
+        self.slidingWindow = slidingWindow
+        self.cacheType = cacheType
+    }
+
+    public var missingRequiredFields: [String] {
+        var fields = [String]()
+        if family == nil { fields.append("model_fingerprint.family") }
+        if hiddenSize == nil { fields.append("model_fingerprint.hidden_size") }
+        if layerCount == nil { fields.append("model_fingerprint.layer_count") }
+        if attentionHeads == nil { fields.append("model_fingerprint.attention_heads") }
+        if kvHeads == nil { fields.append("model_fingerprint.kv_heads") }
+        if headDim == nil { fields.append("model_fingerprint.head_dim") }
+        if let rope {
+            fields.append(contentsOf: rope.missingRequiredFields)
+        } else {
+            fields.append("model_fingerprint.rope")
+        }
+        if slidingWindow == nil { fields.append("model_fingerprint.sliding_window") }
+        if cacheType == nil { fields.append("model_fingerprint.cache_type") }
+        return fields
+    }
+
+    public func mismatchIssues(
+        comparedTo actual: TurboQuantModelFingerprint,
+        profileID: String
+    ) -> [TurboQuantProfileManifestIssue] {
+        var issues = [TurboQuantProfileManifestIssue]()
+        Self.appendMismatch(
+            &issues,
+            profileID: profileID,
+            field: "model_fingerprint.family",
+            expected: family.map(Self.normalizedIdentifier),
+            actual: actual.family.map(Self.normalizedIdentifier)
+        )
+        Self.appendMismatch(
+            &issues,
+            profileID: profileID,
+            field: "model_fingerprint.hidden_size",
+            expected: hiddenSize.map(String.init),
+            actual: actual.hiddenSize.map(String.init)
+        )
+        Self.appendMismatch(
+            &issues,
+            profileID: profileID,
+            field: "model_fingerprint.layer_count",
+            expected: layerCount.map(String.init),
+            actual: actual.layerCount.map(String.init)
+        )
+        Self.appendMismatch(
+            &issues,
+            profileID: profileID,
+            field: "model_fingerprint.attention_heads",
+            expected: attentionHeads.map(String.init),
+            actual: actual.attentionHeads.map(String.init)
+        )
+        Self.appendMismatch(
+            &issues,
+            profileID: profileID,
+            field: "model_fingerprint.kv_heads",
+            expected: kvHeads.map(String.init),
+            actual: actual.kvHeads.map(String.init)
+        )
+        Self.appendMismatch(
+            &issues,
+            profileID: profileID,
+            field: "model_fingerprint.head_dim",
+            expected: headDim.map(String.init),
+            actual: actual.headDim.map(String.init)
+        )
+        Self.appendMismatch(
+            &issues,
+            profileID: profileID,
+            field: "model_fingerprint.rope.type",
+            expected: rope?.type.map(Self.normalizedIdentifier),
+            actual: actual.rope?.type.map(Self.normalizedIdentifier)
+        )
+        Self.appendMismatch(
+            &issues,
+            profileID: profileID,
+            field: "model_fingerprint.rope.theta",
+            expected: rope?.theta.map(Self.stableString),
+            actual: actual.rope?.theta.map(Self.stableString)
+        )
+        Self.appendMismatch(
+            &issues,
+            profileID: profileID,
+            field: "model_fingerprint.rope.scaling_type",
+            expected: rope?.scalingType.map(Self.normalizedIdentifier),
+            actual: actual.rope?.scalingType.map(Self.normalizedIdentifier)
+        )
+        Self.appendMismatch(
+            &issues,
+            profileID: profileID,
+            field: "model_fingerprint.rope.scaling_factor",
+            expected: rope?.scalingFactor.map(Self.stableString),
+            actual: actual.rope?.scalingFactor.map(Self.stableString)
+        )
+        Self.appendMismatch(
+            &issues,
+            profileID: profileID,
+            field: "model_fingerprint.sliding_window.enabled",
+            expected: slidingWindow.map { String($0.enabled) },
+            actual: actual.slidingWindow.map { String($0.enabled) }
+        )
+        Self.appendMismatch(
+            &issues,
+            profileID: profileID,
+            field: "model_fingerprint.sliding_window.size",
+            expected: slidingWindow?.size.map(String.init),
+            actual: actual.slidingWindow?.size.map(String.init)
+        )
+        Self.appendMismatch(
+            &issues,
+            profileID: profileID,
+            field: "model_fingerprint.cache_type",
+            expected: cacheType.map(Self.normalizedIdentifier),
+            actual: actual.cacheType.map(Self.normalizedIdentifier)
+        )
+        return issues
+    }
+
+    private static func appendMismatch(
+        _ issues: inout [TurboQuantProfileManifestIssue],
+        profileID: String,
+        field: String,
+        expected: String?,
+        actual: String?
+    ) {
+        guard let expected else { return }
+        guard expected != actual else { return }
+        issues.append(
+            TurboQuantProfileManifestIssue(
+                profileID: profileID,
+                field: field,
+                kind: .mismatch,
+                expected: expected,
+                actual: actual,
+                reason: "model fingerprint field does not match"
+            )
+        )
+    }
+
+    private static func normalizedIdentifier(_ value: String) -> String {
+        value
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+            .replacingOccurrences(of: "-", with: "_")
+            .replacingOccurrences(of: ".", with: "_")
+    }
+
+    private static func stableString(_ value: Double) -> String {
+        if value.rounded() == value {
+            return String(Int(value))
+        }
+        return String(value)
+    }
+}
+
+public struct TurboQuantProfileTurboQuantManifest: Codable, Equatable, Sendable {
+    public var layoutVersion: Int
+    public var keyPreset: TurboQuantScheme
+    public var valueBits: Int
+    public var groupSize: Int
+    public var preferredPaths: [TurboQuantAttentionPath]
+    public var fallbackPolicy: TurboQuantFallbackPolicy
+
+    public init(
+        layoutVersion: Int = TurboQuantAttentionLayout.currentVersion,
+        keyPreset: TurboQuantScheme,
+        valueBits: Int,
+        groupSize: Int,
+        preferredPaths: [TurboQuantAttentionPath] = [
+            .onlineFused,
+            .tiledOnlineFused,
+            .twoStageCompressed,
+            .mlxPackedFallback,
+            .baseline,
+        ],
+        fallbackPolicy: TurboQuantFallbackPolicy = .compressedDecodeAllowed
+    ) {
+        self.layoutVersion = layoutVersion
+        self.keyPreset = keyPreset
+        self.valueBits = valueBits
+        self.groupSize = groupSize
+        self.preferredPaths = preferredPaths
+        self.fallbackPolicy = fallbackPolicy
+    }
+}
+
+public struct TurboQuantProfileMemoryMeasurement: Codable, Equatable, Sendable {
+    public var compressedKVBytes: Int?
+    public var fallbackBytes: Int?
+    public var scratchBytes: Int?
+    public var peakResidentBytes: Int?
+
+    public init(
+        compressedKVBytes: Int? = nil,
+        fallbackBytes: Int? = nil,
+        scratchBytes: Int? = nil,
+        peakResidentBytes: Int? = nil
+    ) {
+        self.compressedKVBytes = compressedKVBytes
+        self.fallbackBytes = fallbackBytes
+        self.scratchBytes = scratchBytes
+        self.peakResidentBytes = peakResidentBytes
+    }
+}
+
+public struct TurboQuantMeasuredOutcome: Codable, Equatable, Sendable {
+    public var deviceClass: String
+    public var osVersion: String
+    public var maxContextByMode: [String: Int]
+    public var actualBytesPerToken: Double
+    public var decodeP50Seconds: Double
+    public var decodeP95Seconds: Double
+    public var prefillP50Seconds: Double
+    public var memory: TurboQuantProfileMemoryMeasurement
+    public var logitKL: Double?
+    public var top1MatchRate: Double?
+    public var longContextRetrievalScore: Double?
+    public var sourceBenchmarkID: String?
+    public var measuredAt: String?
+
+    public init(
+        deviceClass: String,
+        osVersion: String,
+        maxContextByMode: [String: Int],
+        actualBytesPerToken: Double,
+        decodeP50Seconds: Double,
+        decodeP95Seconds: Double,
+        prefillP50Seconds: Double,
+        memory: TurboQuantProfileMemoryMeasurement = TurboQuantProfileMemoryMeasurement(),
+        logitKL: Double? = nil,
+        top1MatchRate: Double? = nil,
+        longContextRetrievalScore: Double? = nil,
+        sourceBenchmarkID: String? = nil,
+        measuredAt: String? = nil
+    ) {
+        self.deviceClass = deviceClass
+        self.osVersion = osVersion
+        self.maxContextByMode = maxContextByMode
+        self.actualBytesPerToken = actualBytesPerToken
+        self.decodeP50Seconds = decodeP50Seconds
+        self.decodeP95Seconds = decodeP95Seconds
+        self.prefillP50Seconds = prefillP50Seconds
+        self.memory = memory
+        self.logitKL = logitKL
+        self.top1MatchRate = top1MatchRate
+        self.longContextRetrievalScore = longContextRetrievalScore
+        self.sourceBenchmarkID = sourceBenchmarkID
+        self.measuredAt = measuredAt
+    }
+}
+
+public enum TurboQuantProfileManifestIssueKind: String, Codable, Sendable {
+    case missingField
+    case mismatch
+    case unsupportedSchemaVersion
+    case inconsistentTurboQuantField
+    case missingMeasuredOutcome
+}
+
+public struct TurboQuantProfileManifestIssue: Codable, Equatable, Sendable {
+    public var profileID: String
+    public var field: String
+    public var kind: TurboQuantProfileManifestIssueKind
+    public var expected: String?
+    public var actual: String?
+    public var reason: String
+
+    public init(
+        profileID: String,
+        field: String,
+        kind: TurboQuantProfileManifestIssueKind,
+        expected: String? = nil,
+        actual: String? = nil,
+        reason: String
+    ) {
+        self.profileID = profileID
+        self.field = field
+        self.kind = kind
+        self.expected = expected
+        self.actual = actual
+        self.reason = reason
+    }
+}
+
+public struct TurboQuantProfileManifestValidation: Codable, Equatable, Sendable {
+    public var profileID: String
+    public var issues: [TurboQuantProfileManifestIssue]
+
+    public init(profileID: String, issues: [TurboQuantProfileManifestIssue]) {
+        self.profileID = profileID
+        self.issues = issues
+    }
+
+    public var isValid: Bool { issues.isEmpty }
+}
+
 public struct TurboQuantProfileMeasurements: Codable, Equatable, Sendable {
     public var perplexityDelta: Double?
     public var promptTokensPerSecond: Double?
@@ -155,6 +526,7 @@ public struct TurboQuantModelDescriptor: Equatable, Sendable {
     public var parameterCountB: Double?
     public var routedExperts: Int?
     public var expertsPerToken: Int?
+    public var fingerprint: TurboQuantModelFingerprint?
 
     public init(
         modelID: String,
@@ -163,7 +535,8 @@ public struct TurboQuantModelDescriptor: Equatable, Sendable {
         modality: TurboQuantModelModality? = nil,
         parameterCountB: Double? = nil,
         routedExperts: Int? = nil,
-        expertsPerToken: Int? = nil
+        expertsPerToken: Int? = nil,
+        fingerprint: TurboQuantModelFingerprint? = nil
     ) {
         self.modelID = modelID
         self.modelType = modelType
@@ -173,10 +546,12 @@ public struct TurboQuantModelDescriptor: Equatable, Sendable {
             parameterCountB ?? Self.inferParameterCountB(from: modelID)
         self.routedExperts = routedExperts
         self.expertsPerToken = expertsPerToken
+        self.fingerprint = fingerprint
     }
 
     public static func inferParameterCountB(from modelID: String) -> Double? {
-        let normalized = modelID
+        let normalized =
+            modelID
             .lowercased()
             .replacingOccurrences(of: "_", with: "-")
         let range = NSRange(normalized.startIndex ..< normalized.endIndex, in: normalized)
@@ -255,6 +630,9 @@ public struct TurboQuantProfile: Codable, Equatable, Identifiable, Sendable {
     public var validatedBy: String?
     public var confidence: Double?
     public var measured: TurboQuantProfileMeasurements
+    public var modelFingerprint: TurboQuantModelFingerprint?
+    public var turboQuant: TurboQuantProfileTurboQuantManifest
+    public var measuredOutcomes: [TurboQuantMeasuredOutcome]
     public var notes: [String]
 
     public init(
@@ -297,6 +675,9 @@ public struct TurboQuantProfile: Codable, Equatable, Identifiable, Sendable {
         validatedBy: String? = nil,
         confidence: Double? = nil,
         measured: TurboQuantProfileMeasurements = TurboQuantProfileMeasurements(),
+        modelFingerprint: TurboQuantModelFingerprint? = nil,
+        turboQuant: TurboQuantProfileTurboQuantManifest? = nil,
+        measuredOutcomes: [TurboQuantMeasuredOutcome] = [],
         notes: [String] = []
     ) {
         self.schemaVersion = schemaVersion
@@ -339,6 +720,15 @@ public struct TurboQuantProfile: Codable, Equatable, Identifiable, Sendable {
         self.validatedBy = validatedBy
         self.confidence = confidence
         self.measured = measured
+        self.modelFingerprint = modelFingerprint
+        self.turboQuant =
+            turboQuant
+            ?? TurboQuantProfileTurboQuantManifest(
+                keyPreset: recommendedScheme,
+                valueBits: valueBits,
+                groupSize: groupSize
+            )
+        self.measuredOutcomes = measuredOutcomes
         self.notes = notes
     }
 
@@ -382,6 +772,9 @@ public struct TurboQuantProfile: Codable, Equatable, Identifiable, Sendable {
         case validatedBy
         case confidence
         case measured
+        case modelFingerprint
+        case turboQuant
+        case measuredOutcomes
         case notes
     }
 
@@ -457,6 +850,12 @@ public struct TurboQuantProfile: Codable, Equatable, Identifiable, Sendable {
             measured: try container.decodeIfPresent(
                 TurboQuantProfileMeasurements.self, forKey: .measured)
                 ?? TurboQuantProfileMeasurements(),
+            modelFingerprint: try container.decodeIfPresent(
+                TurboQuantModelFingerprint.self, forKey: .modelFingerprint),
+            turboQuant: try container.decodeIfPresent(
+                TurboQuantProfileTurboQuantManifest.self, forKey: .turboQuant),
+            measuredOutcomes: try container.decodeIfPresent(
+                [TurboQuantMeasuredOutcome].self, forKey: .measuredOutcomes) ?? [],
             notes: try container.decodeIfPresent([String].self, forKey: .notes) ?? []
         )
     }
@@ -505,6 +904,159 @@ public struct TurboQuantProfile: Codable, Equatable, Identifiable, Sendable {
         resolved.turboQuantValueBits = valueBits
         return resolved
     }
+
+    public func productManifestValidation(
+        actualFingerprint: TurboQuantModelFingerprint? = nil,
+        requireMeasuredOutcomes: Bool = true
+    ) -> TurboQuantProfileManifestValidation {
+        var issues = [TurboQuantProfileManifestIssue]()
+        if schemaVersion != 2 {
+            issues.append(
+                TurboQuantProfileManifestIssue(
+                    profileID: id,
+                    field: "schema_version",
+                    kind: .unsupportedSchemaVersion,
+                    expected: "2",
+                    actual: String(schemaVersion),
+                    reason: "TurboQuant product manifests require schema version 2"
+                )
+            )
+        }
+
+        if let modelFingerprint {
+            for field in modelFingerprint.missingRequiredFields {
+                issues.append(
+                    TurboQuantProfileManifestIssue(
+                        profileID: id,
+                        field: field,
+                        kind: .missingField,
+                        reason: "required model fingerprint field is missing"
+                    )
+                )
+            }
+            if let actualFingerprint {
+                issues.append(
+                    contentsOf: modelFingerprint.mismatchIssues(
+                        comparedTo: actualFingerprint,
+                        profileID: id
+                    )
+                )
+            }
+        } else {
+            issues.append(
+                TurboQuantProfileManifestIssue(
+                    profileID: id,
+                    field: "model_fingerprint",
+                    kind: .missingField,
+                    reason: "required model fingerprint is missing"
+                )
+            )
+        }
+
+        if turboQuant.layoutVersion != TurboQuantAttentionLayout.currentVersion {
+            issues.append(
+                TurboQuantProfileManifestIssue(
+                    profileID: id,
+                    field: "turbo_quant.layout_version",
+                    kind: .unsupportedSchemaVersion,
+                    expected: String(TurboQuantAttentionLayout.currentVersion),
+                    actual: String(turboQuant.layoutVersion),
+                    reason: "TurboQuant compressed-cache layout version is not supported"
+                )
+            )
+        }
+        if turboQuant.keyPreset != recommendedScheme {
+            issues.append(
+                TurboQuantProfileManifestIssue(
+                    profileID: id,
+                    field: "turbo_quant.key_preset",
+                    kind: .inconsistentTurboQuantField,
+                    expected: recommendedScheme.rawValue,
+                    actual: turboQuant.keyPreset.rawValue,
+                    reason: "manifest key preset must match the selected profile scheme"
+                )
+            )
+        }
+        if turboQuant.valueBits != valueBits {
+            issues.append(
+                TurboQuantProfileManifestIssue(
+                    profileID: id,
+                    field: "turbo_quant.value_bits",
+                    kind: .inconsistentTurboQuantField,
+                    expected: String(valueBits),
+                    actual: String(turboQuant.valueBits),
+                    reason: "manifest value bits must match the selected profile value bits"
+                )
+            )
+        }
+        if turboQuant.groupSize != groupSize {
+            issues.append(
+                TurboQuantProfileManifestIssue(
+                    profileID: id,
+                    field: "turbo_quant.group_size",
+                    kind: .inconsistentTurboQuantField,
+                    expected: String(groupSize),
+                    actual: String(turboQuant.groupSize),
+                    reason: "manifest group size must match the selected profile group size"
+                )
+            )
+        }
+        if turboQuant.preferredPaths.isEmpty {
+            issues.append(
+                TurboQuantProfileManifestIssue(
+                    profileID: id,
+                    field: "turbo_quant.preferred_paths",
+                    kind: .missingField,
+                    reason: "at least one preferred runtime path is required"
+                )
+            )
+        }
+        if requireMeasuredOutcomes && measuredOutcomes.isEmpty {
+            issues.append(
+                TurboQuantProfileManifestIssue(
+                    profileID: id,
+                    field: "measured_outcomes",
+                    kind: .missingMeasuredOutcome,
+                    reason: "measured product profiles require device and OS outcomes"
+                )
+            )
+        }
+        for (index, outcome) in measuredOutcomes.enumerated() {
+            let prefix = "measured_outcomes[\(index)]"
+            if outcome.deviceClass.isEmpty {
+                issues.append(
+                    TurboQuantProfileManifestIssue(
+                        profileID: id,
+                        field: "\(prefix).device_class",
+                        kind: .missingField,
+                        reason: "measured outcome device class is required"
+                    )
+                )
+            }
+            if outcome.osVersion.isEmpty {
+                issues.append(
+                    TurboQuantProfileManifestIssue(
+                        profileID: id,
+                        field: "\(prefix).os_version",
+                        kind: .missingField,
+                        reason: "measured outcome OS version is required"
+                    )
+                )
+            }
+            if outcome.maxContextByMode.isEmpty {
+                issues.append(
+                    TurboQuantProfileManifestIssue(
+                        profileID: id,
+                        field: "\(prefix).max_context_by_mode",
+                        kind: .missingField,
+                        reason: "measured outcome max context by mode is required"
+                    )
+                )
+            }
+        }
+
+        return TurboQuantProfileManifestValidation(profileID: id, issues: issues)
+    }
 }
 
 public struct TurboQuantProfileRegistry: Sendable {
@@ -527,7 +1079,9 @@ public struct TurboQuantProfileRegistry: Sendable {
         keyHeadDimension: Int? = nil,
         valueHeadDimension: Int? = nil,
         maskMode: TurboQuantMaskMode = .causal,
-        contextLength: Int? = nil
+        contextLength: Int? = nil,
+        fingerprint: TurboQuantModelFingerprint? = nil,
+        requireFingerprint: Bool = false
     ) -> TurboQuantProfile? {
         let descriptor = TurboQuantModelDescriptor(
             modelID: modelID,
@@ -536,13 +1090,15 @@ public struct TurboQuantProfileRegistry: Sendable {
             modality: modality,
             parameterCountB: parameterCountB,
             routedExperts: routedExperts,
-            expertsPerToken: expertsPerToken)
+            expertsPerToken: expertsPerToken,
+            fingerprint: fingerprint)
         return selection(
             for: descriptor,
             keyHeadDimension: keyHeadDimension,
             valueHeadDimension: valueHeadDimension,
             maskMode: maskMode,
-            contextLength: contextLength
+            contextLength: contextLength,
+            requireFingerprint: requireFingerprint
         ).profile
     }
 
@@ -551,7 +1107,8 @@ public struct TurboQuantProfileRegistry: Sendable {
         keyHeadDimension: Int? = nil,
         valueHeadDimension: Int? = nil,
         maskMode: TurboQuantMaskMode = .causal,
-        contextLength: Int? = nil
+        contextLength: Int? = nil,
+        requireFingerprint: Bool = false
     ) -> TurboQuantProfileSelection {
         var diagnostics: [TurboQuantProfileDiagnostic] = []
         for profile in profiles {
@@ -560,7 +1117,8 @@ public struct TurboQuantProfileRegistry: Sendable {
                 keyHeadDimension: keyHeadDimension,
                 valueHeadDimension: valueHeadDimension,
                 maskMode: maskMode,
-                contextLength: contextLength)
+                contextLength: contextLength,
+                requireFingerprint: requireFingerprint)
             diagnostics.append(
                 TurboQuantProfileDiagnostic(
                     profileID: profile.id,
@@ -637,6 +1195,8 @@ extension GenerateParameters {
         valueHeadDimension: Int? = nil,
         maskMode: TurboQuantMaskMode = .causal,
         contextLength: Int? = nil,
+        fingerprint: TurboQuantModelFingerprint? = nil,
+        requireFingerprint: Bool = false,
         base parameters: GenerateParameters = GenerateParameters()
     ) {
         if let profile = registry.profile(
@@ -650,7 +1210,9 @@ extension GenerateParameters {
             keyHeadDimension: keyHeadDimension,
             valueHeadDimension: valueHeadDimension,
             maskMode: maskMode,
-            contextLength: contextLength
+            contextLength: contextLength,
+            fingerprint: fingerprint,
+            requireFingerprint: requireFingerprint
         ) {
             self = profile.applying(to: parameters)
         } else {
@@ -669,11 +1231,32 @@ extension TurboQuantProfile {
         keyHeadDimension: Int? = nil,
         valueHeadDimension: Int? = nil,
         maskMode: TurboQuantMaskMode = .causal,
-        contextLength: Int? = nil
+        contextLength: Int? = nil,
+        requireFingerprint: Bool = false
     ) -> [String] {
         var reasons = [String]()
         if status == .deprecated {
             reasons.append("profile is deprecated")
+        }
+
+        if requireFingerprint, modelFingerprint == nil {
+            reasons.append("model fingerprint metadata is required")
+        }
+        if requireFingerprint, let modelFingerprint {
+            for field in modelFingerprint.missingRequiredFields {
+                reasons.append("\(field) is required")
+            }
+        }
+        if let actualFingerprint = descriptor.fingerprint, let modelFingerprint {
+            let issues = modelFingerprint.mismatchIssues(
+                comparedTo: actualFingerprint,
+                profileID: id
+            )
+            for issue in issues {
+                let expected = issue.expected ?? "nil"
+                let actual = issue.actual ?? "nil"
+                reasons.append("\(issue.field) expected \(expected), got \(actual)")
+            }
         }
 
         let normalizedID = Self.normalized(descriptor.modelID)
@@ -700,8 +1283,9 @@ extension TurboQuantProfile {
         }
         if let modelType = descriptor.modelType {
             let normalizedModelType = Self.normalizedModelType(modelType)
-            let allowedTypes = Set((modelTypes.isEmpty ? [architecture].compactMap { $0 } : modelTypes)
-                .map(Self.normalizedModelType))
+            let allowedTypes = Set(
+                (modelTypes.isEmpty ? [architecture].compactMap { $0 } : modelTypes)
+                    .map(Self.normalizedModelType))
             if !allowedTypes.isEmpty, !allowedTypes.contains(normalizedModelType) {
                 reasons.append("model type '\(modelType)' is not supported")
             }
@@ -712,7 +1296,8 @@ extension TurboQuantProfile {
         if let textConfigModelType = descriptor.textConfigModelType {
             let normalizedTextConfigModelType = Self.normalizedModelType(textConfigModelType)
             let allowedTextTypes = Set(textConfigModelTypes.map(Self.normalizedModelType))
-            if !allowedTextTypes.isEmpty, !allowedTextTypes.contains(normalizedTextConfigModelType) {
+            if !allowedTextTypes.isEmpty, !allowedTextTypes.contains(normalizedTextConfigModelType)
+            {
                 reasons.append("text_config model type '\(textConfigModelType)' is not supported")
             }
         }
@@ -742,18 +1327,20 @@ extension TurboQuantProfile {
             reasons.append(
                 "model size \(parameterCountB)B exceeds maximum \(effectiveMaxParametersB)B")
         }
-        if (minRoutedExperts != nil || maxRoutedExperts != nil), descriptor.routedExperts == nil {
+        if minRoutedExperts != nil || maxRoutedExperts != nil, descriptor.routedExperts == nil {
             reasons.append("routed expert count metadata is required")
         }
         if let minRoutedExperts, let routedExperts = descriptor.routedExperts,
             routedExperts < minRoutedExperts
         {
-            reasons.append("routed expert count \(routedExperts) is below minimum \(minRoutedExperts)")
+            reasons.append(
+                "routed expert count \(routedExperts) is below minimum \(minRoutedExperts)")
         }
         if let maxRoutedExperts, let routedExperts = descriptor.routedExperts,
             routedExperts > maxRoutedExperts
         {
-            reasons.append("routed expert count \(routedExperts) exceeds maximum \(maxRoutedExperts)")
+            reasons.append(
+                "routed expert count \(routedExperts) exceeds maximum \(maxRoutedExperts)")
         }
         if !supportedExpertsPerToken.isEmpty, descriptor.expertsPerToken == nil {
             reasons.append("experts-per-token metadata is required")
@@ -785,7 +1372,8 @@ extension TurboQuantProfile {
             reasons.append("mask mode '\(maskMode.rawValue)' is not supported")
         }
         if let contextLength, let safeContextLength, contextLength > safeContextLength {
-            reasons.append("context length \(contextLength) exceeds safe length \(safeContextLength)")
+            reasons.append(
+                "context length \(contextLength) exceeds safe length \(safeContextLength)")
         }
 
         return reasons
@@ -845,7 +1433,7 @@ private let bundledProfile256KContextLengths =
 private let bundledProfile384KContextLengths =
     bundledProfile256KContextLengths + [393216]
 private let bundledProfile1MContextLengths =
-    bundledProfile256KContextLengths + [524288, 1048576]
+    bundledProfile256KContextLengths + [524288, 1_048_576]
 private let bundledProfileMistralNemoContextLengths =
     bundledProfile128KContextLengths
 
@@ -1105,7 +1693,8 @@ private func qwen35FamilyPatterns(_ version: String, size: String) -> [String] {
     return modelIDPatterns(names)
 }
 
-private func qwen35MoEPatterns(_ version: String, totalSize: String, activeSize: String) -> [String] {
+private func qwen35MoEPatterns(_ version: String, totalSize: String, activeSize: String) -> [String]
+{
     let normalizedVersion = version.replacingOccurrences(of: ".", with: "-")
     let compactVersion = version.filter(\.isNumber)
     let names = [
@@ -1687,8 +2276,12 @@ private let bundledProfiles: [TurboQuantProfile] = [
     ),
     bundledProfile(
         id: "mistral-small-24b",
-        patterns: mistralFamilyPatterns(["mistral-small", "mistral-small-24b", "mistral-small-instruct"]),
-        excludePatterns: mistralTextExcludePatterns + ["*3.1*", "*3-1*", "*3.2*", "*3-2*", "*small-4*"],
+        patterns: mistralFamilyPatterns([
+            "mistral-small", "mistral-small-24b", "mistral-small-instruct",
+        ]),
+        excludePatterns: mistralTextExcludePatterns + [
+            "*3.1*", "*3-1*", "*3.2*", "*3-2*", "*small-4*",
+        ],
         architecture: "mistral",
         modelTypes: ["mistral"],
         minParametersB: 23,
@@ -2799,7 +3392,9 @@ private let bundledProfiles: [TurboQuantProfile] = [
         requiresHeadDimensions: true,
         supportedKeyHeadDimensions: [64, 128],
         confidence: 0.65,
-        extraNotes: ["Covers SmolLM and SmolLM2 small dense variants with runtime head-dimension checks."]
+        extraNotes: [
+            "Covers SmolLM and SmolLM2 small dense variants with runtime head-dimension checks."
+        ]
     ),
     bundledProfile(
         id: "smollm3-3b",

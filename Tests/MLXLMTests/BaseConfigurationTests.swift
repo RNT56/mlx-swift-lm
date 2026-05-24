@@ -117,9 +117,15 @@ public class BaseConfigurationTests: XCTestCase {
             metadata: ["format": "mlx"],
             options: TurboQuantCheckpointConversionOptions(groupSize: 64)
         )
+        let metadata = converted.metadata.merging(
+            TurboQuantCheckpointMetadataValidator.requiredMetadata(
+                profileName: "test-profile",
+                convertedTensorHash: "sha256:test"
+            )
+        ) { _, validated in validated }
         try save(
             arrays: converted.arrays,
-            metadata: converted.metadata,
+            metadata: metadata,
             url: temporaryPath.appending(path: "model.safetensors")
         )
 
@@ -133,6 +139,86 @@ public class BaseConfigurationTests: XCTestCase {
         XCTAssertEqual(linear.preset, .turbo4v2)
         XCTAssertEqual(linear.activeBackend, .mlxPacked)
         XCTAssertEqual(linear(MLXArray.ones([1, 64], dtype: .float32)).shape, [1, 2])
+    }
+
+    func testLoadWeightsFailsClosedForMissingTurboQuantCheckpointMetadata() throws {
+        let temporaryPath = FileManager.default.temporaryDirectory.appending(
+            path: UUID().uuidString, directoryHint: .isDirectory)
+        try FileManager.default.createDirectory(
+            at: temporaryPath, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: temporaryPath) }
+
+        let converted = try turboQuantConvertedArrays(
+            ["linear.weight": MLXArray.ones([2, 64], dtype: .float32)],
+            metadata: ["format": "mlx"],
+            options: TurboQuantCheckpointConversionOptions(groupSize: 64)
+        )
+        try save(
+            arrays: converted.arrays,
+            metadata: converted.metadata,
+            url: temporaryPath.appending(path: "model.safetensors")
+        )
+
+        XCTAssertThrowsError(
+            try loadWeights(
+                modelDirectory: temporaryPath,
+                model: TinyTurboQuantLoadModel()
+            )
+        ) { error in
+            guard
+                case TurboQuantCheckpointMetadataValidationError.invalidMetadata(let issues) = error
+            else {
+                XCTFail("expected TurboQuant checkpoint metadata validation error, got \(error)")
+                return
+            }
+            XCTAssertTrue(issues.contains { $0.field == "turboquant_metadata_schema_version" })
+            XCTAssertTrue(issues.contains { $0.field == "turboquant_profile_name" })
+        }
+    }
+
+    func testLoadWeightsFailsClosedForNewerTurboQuantCheckpointMetadata() throws {
+        let temporaryPath = FileManager.default.temporaryDirectory.appending(
+            path: UUID().uuidString, directoryHint: .isDirectory)
+        try FileManager.default.createDirectory(
+            at: temporaryPath, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: temporaryPath) }
+
+        let converted = try turboQuantConvertedArrays(
+            ["linear.weight": MLXArray.ones([2, 64], dtype: .float32)],
+            metadata: ["format": "mlx"],
+            options: TurboQuantCheckpointConversionOptions(groupSize: 64)
+        )
+        var required = TurboQuantCheckpointMetadataValidator.requiredMetadata(
+            profileName: "test-profile",
+            convertedTensorHash: "sha256:test"
+        )
+        required[TurboQuantCheckpointMetadataValidator.metadataSchemaVersionKey] = "99"
+        let metadata = converted.metadata.merging(required) { _, validated in validated }
+        try save(
+            arrays: converted.arrays,
+            metadata: metadata,
+            url: temporaryPath.appending(path: "model.safetensors")
+        )
+
+        XCTAssertThrowsError(
+            try loadWeights(
+                modelDirectory: temporaryPath,
+                model: TinyTurboQuantLoadModel()
+            )
+        ) { error in
+            guard
+                case TurboQuantCheckpointMetadataValidationError.invalidMetadata(let issues) = error
+            else {
+                XCTFail("expected TurboQuant checkpoint metadata validation error, got \(error)")
+                return
+            }
+            XCTAssertTrue(
+                issues.contains {
+                    $0.field == "turboquant_metadata_schema_version"
+                        && $0.kind == .unsupportedSchemaVersion
+                }
+            )
+        }
     }
 
 }

@@ -31,9 +31,16 @@ explicit `B` or `M` size tokens only; quantization labels such as `4bit` and
 include rejection reasons for metadata, size, shape, mask, and context failures.
 
 The root `TurboQuantProfiles/` directory contains JSON copies of the bundled
-profiles for downstream apps, release tooling, and manual inspection. The Swift
-registry lives in ``TurboQuantProfileRegistry`` so library consumers do not need
-package resources at runtime.
+schema-version-2 profiles for downstream apps, release tooling, and manual
+inspection. The Swift registry lives in ``TurboQuantProfileRegistry`` so library
+consumers do not need package resources at runtime.
+
+Schema version 2 separates advisory matching from measured product manifests.
+The manifest validator reports exact missing or mismatched fields for the model
+fingerprint, TurboQuant layout/preset/value-bit policy, and measured outcomes.
+App preflight code should use strict fingerprint-aware selection when enabling
+TurboQuant automatically; a fingerprint mismatch returns no TurboQuant profile so
+the caller keeps its baseline or packed-cache path instead of guessing.
 
 Bundled profiles keep the quality-first TurboQuant default of 3.5-bit keys,
 4-bit values, and group size 64. Per-profile optimization policy is then tuned
@@ -104,9 +111,12 @@ Profiles are advisory. The runtime still enforces:
 - Mask support for the selected attention path.
 - Fallback to MLX packed quantization when the Metal path is unavailable.
 
-Measured fields such as perplexity delta, token throughput, and memory footprint
-remain optional and should stay empty until reproduced on the target hardware and
-model revision.
+Measured product outcomes must include the device class, OS, max context by
+product mode, actual bytes per token, decode p50/p95, prefill p50, memory, and
+quality gates such as logit KL, top-1 match, and long-context retrieval. Bundled
+profiles that have not been reproduced on target hardware remain usable only as
+conservative routing profiles; ``TurboQuantProfile/productManifestValidation``
+reports the exact fields that still need release evidence.
 
 Use the benchmark entrypoints to generate profile evidence:
 
@@ -126,9 +136,12 @@ quality data needed to reproduce the decision.
 TurboQuant profile selection is independent of converted model weights. For
 weight compression, use `swift run TurboQuantConverter` from the `mlx-swift`
 fork. Converted safetensors carry `quant_method=turboquant` and
-`linear_class=TurboQuantLinear` metadata; `loadWeights` uses that metadata to
-replace matching linear layers with `TurboQuantLinear` before applying the packed
-weight, scale, and bias tensors.
+`linear_class=TurboQuantLinear` metadata plus schema-versioned TurboQuant
+checkpoint metadata. `loadWeights` validates the metadata before replacing
+matching linear layers with `TurboQuantLinear`. Missing metadata, newer schema
+versions, newer layout versions, or profile-name mismatches fail with typed
+``TurboQuantCheckpointMetadataValidationError`` values instead of loading a
+guessed TurboQuant format.
 
 ## Scheme Aliases
 
