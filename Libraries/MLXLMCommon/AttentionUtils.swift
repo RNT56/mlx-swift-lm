@@ -91,6 +91,13 @@ public func withTurboQuantCompressedCacheUpdate<T>(
     let previousOffset = turboQuantCache.offset
     let previousState = turboQuantCache.state.map { $0[.ellipsis] }
     let previousMetaState = turboQuantCache.metaState
+    func restorePreviousState() {
+        turboQuantCache.metaState = previousMetaState
+        turboQuantCache.state = previousState
+        if let baseCache = turboQuantCache as? BaseKVCache {
+            baseCache.offset = previousOffset
+        }
+    }
     do {
         let (compressedKeys, compressedValues) = try turboQuantCache.updateCompressed(
             keys: keys,
@@ -98,11 +105,7 @@ public func withTurboQuantCompressedCacheUpdate<T>(
         )
         return try body(compressedKeys, compressedValues, turboQuantCache)
     } catch {
-        turboQuantCache.metaState = previousMetaState
-        turboQuantCache.state = previousState
-        if let baseCache = turboQuantCache as? BaseKVCache {
-            baseCache.offset = previousOffset
-        }
+        restorePreviousState()
         turboQuantCache.recordCompressedAttentionFailure(String(describing: error))
         return nil
     }
@@ -151,7 +154,7 @@ private func asyncEvalTurboQuantAttentionStorage(
     asyncEval(turboQuantAttentionStorageArrays(keys) + turboQuantAttentionStorageArrays(values))
 }
 
-/// Keep prompt logits exact while still installing compressed KV for decode.
+/// Install compressed KV during prefill while honoring the cache optimization policy.
 private func turboQuantCompressedPrefillAttention(
     queries: MLXArray,
     keys: MLXArray,
@@ -178,6 +181,13 @@ private func turboQuantCompressedPrefillAttention(
     let previousOffset = turboQuantCache.offset
     let previousState = turboQuantCache.state.map { $0[.ellipsis] }
     let previousMetaState = turboQuantCache.metaState
+    func restorePreviousState() {
+        turboQuantCache.metaState = previousMetaState
+        turboQuantCache.state = previousState
+        if let baseCache = turboQuantCache as? BaseKVCache {
+            baseCache.offset = previousOffset
+        }
+    }
     do {
         let (compressedKeys, compressedValues) = try turboQuantCache.updateCompressed(
             keys: keys,
@@ -189,7 +199,7 @@ private func turboQuantCompressedPrefillAttention(
             cache: turboQuantCache
         )
 
-        if previousOffset == 0 {
+        if previousOffset == 0, turboQuantCache.prefersExactInitialPrefill {
             // The exact raw prefill output does not consume the compressed writes, so
             // schedule them explicitly to avoid carrying raw prompt tensors into decode.
             asyncEvalTurboQuantAttentionStorage(keys: compressedKeys, values: compressedValues)
@@ -204,6 +214,22 @@ private func turboQuantCompressedPrefillAttention(
                 ),
                 state
             )
+        }
+
+        if let output = try? turboQuantMetalScaledDotProductAttention(
+            queries: queries,
+            keyCode: compressedKeys,
+            valueCode: compressedValues,
+            scale: scale,
+            mask: adjustedAttentionMask(
+                mask,
+                keyLength: compressedKeys.layout.logicalLength
+            ),
+            sinks: sinks,
+            preferOnlineFused: turboQuantCache.prefersOnlineFusedAttention,
+            kernelProfile: turboQuantCache.attentionDiagnostics.selectedKernelProfile
+        ) {
+            return (output, state)
         }
 
         if let decodedKeys = try? turboQuantMetalDecodeAttention(
@@ -227,13 +253,13 @@ private func turboQuantCompressedPrefillAttention(
             )
         }
 
+        restorePreviousState()
+        turboQuantCache.recordCompressedAttentionFailure(
+            "TurboQuant compressed prefill produced no runnable attention path"
+        )
         return nil
     } catch {
-        turboQuantCache.metaState = previousMetaState
-        turboQuantCache.state = previousState
-        if let baseCache = turboQuantCache as? BaseKVCache {
-            baseCache.offset = previousOffset
-        }
+        restorePreviousState()
         turboQuantCache.recordCompressedAttentionFailure(String(describing: error))
         return nil
     }

@@ -255,6 +255,56 @@ extension MLXRuntimeSwiftTests {
             #expect(cache.attentionDiagnostics.rawFallbackAllocated == false)
         }
 
+        @Test func testTurboQuantMemoryPolicyUsesCompressedInitialPrefillWhenAvailable() throws {
+            guard TurboQuantKernelAvailability.current.supportsMetalPolarQJLAttention else {
+                return
+            }
+
+            let qValues: [Float] = (0 ..< (1 * 4 * 3 * 64)).map { index in
+                let position = Double(index)
+                return Float(0.24 * sin(position * 0.019) + 0.11 * cos(position * 0.061))
+            }
+            let kValues: [Float] = (0 ..< (1 * 2 * 3 * 64)).map { index in
+                let position = Double(index)
+                return Float(0.20 * cos(position * 0.029) - 0.07 * sin(position * 0.073))
+            }
+            let vValues: [Float] = (0 ..< (1 * 2 * 3 * 64)).map { index in
+                let position = Double(index)
+                return Float(0.17 * sin(position * 0.031) + 0.09 * cos(position * 0.047))
+            }
+            let queries = MLXArray(qValues, [1, 4, 3, 64])
+            let keys = MLXArray(kValues, [1, 2, 3, 64])
+            let values = MLXArray(vValues, [1, 2, 3, 64])
+            let cache = TurboQuantKVCache(
+                backend: .metalPolarQJL,
+                optimizationPolicy: .preferMemory
+            )
+
+            let output = attentionWithCacheUpdate(
+                queries: queries,
+                keys: keys,
+                values: values,
+                cache: cache,
+                scale: 0.125,
+                mask: .causal
+            )
+            let compressed = try #require(cache.compressedState)
+            let directCompressed = try turboQuantMetalScaledDotProductAttention(
+                queries: queries,
+                keyCode: compressed.0,
+                valueCode: compressed.1,
+                scale: 0.125,
+                mask: .causal,
+                preferOnlineFused: cache.prefersOnlineFusedAttention,
+                kernelProfile: cache.attentionDiagnostics.selectedKernelProfile
+            )
+
+            #expect(output.shape == [1, 4, 3, 64])
+            #expect(cache.offset == 3)
+            #expect(cache.prefersExactInitialPrefill == false)
+            #expect(allClose(output, directCompressed, rtol: 1e-5, atol: 1e-5).item(Bool.self))
+        }
+
         @Test func testMakeAttentionKVCacheHonorsTurboQuantParameters() throws {
             let parameters = GenerateParameters(
                 maxKVSize: 48,
@@ -772,6 +822,47 @@ extension MLXRuntimeSwiftTests {
             #expect(compressed.0.layout.logicalLength == 8)
             #expect(compressed.0.layout.pinnedPrefixLength == 4)
             #expect(cache.diagnostics.rawFallbackAllocated == false)
+        }
+
+        @Test func testRotatingTurboQuantCompressedBulkWritePreservesLogicalOrder() throws {
+            guard TurboQuantKernelAvailability.current.supportsMetalPolarQJLAttention else {
+                return
+            }
+
+            let tokenCount = 4
+            let headDimension = 64
+            let keysValues: [Float] = (0 ..< (1 * 2 * tokenCount * headDimension)).map {
+                index in
+                let token = (index / headDimension) % tokenCount
+                return Float(token * 16 + 1)
+            }
+            let keys = MLXArray(keysValues, [1, 2, tokenCount, headDimension])
+            let values = keys + 0.5
+            let cache = RotatingTurboQuantKVCache(
+                maxSize: 8,
+                keep: 2,
+                backend: .metalPolarQJL
+            )
+            _ = try cache.updateCompressed(keys: keys, values: values)
+
+            let compressed = try #require(cache.compressedState)
+            let decodedKeys = try turboQuantMetalDecodeAttention(
+                compressed.0,
+                outputDType: .float32
+            )
+            let decoded = decodedKeys.asArray(Float.self)
+            let means = (0 ..< tokenCount).map { token in
+                let start = token * headDimension
+                let end = start + headDimension
+                return decoded[start ..< end].reduce(Float(0), +) / Float(headDimension)
+            }
+
+            #expect(compressed.0.layout.logicalLength == tokenCount)
+            #expect(compressed.0.layout.capacity == 8)
+            #expect(zip(means, means.dropFirst()).allSatisfy { pair in pair.0 < pair.1 })
+            #expect(means[1] - means[0] > 4)
+            #expect(means[2] - means[1] > 4)
+            #expect(means[3] - means[2] > 4)
         }
 
         // MARK: - MambaCache type preservation

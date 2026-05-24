@@ -88,6 +88,15 @@ extension TurboQuantCompressedKVCacheProtocol {
     public var prefersOnlineFusedAttention: Bool {
         optimizationPolicy != .conservative
     }
+
+    public var prefersExactInitialPrefill: Bool {
+        switch optimizationPolicy {
+        case .auto, .conservative:
+            true
+        case .preferMemory, .preferThroughput:
+            false
+        }
+    }
 }
 
 private struct RestoredAttentionLayoutMetadata {
@@ -1044,36 +1053,60 @@ public final class RotatingTurboQuantKVCache: BaseKVCache, QuantizedKVCacheProto
 
         var currentKeys = compressedKeys!
         var currentValues = compressedValues!
-        for token in 0 ..< keys.dim(2) {
-            let physical = physicalSlot(forAbsoluteToken: offset + token)
-            let source = token ..< (token + 1)
-            let target = physical ..< (physical + 1)
+        let tokenCount = keys.dim(2)
+        let physicalStart = physicalSlot(forAbsoluteToken: offset)
+        if tokenCount > 0, physicalStart + tokenCount <= maxCacheSize {
+            let target = physicalStart ..< (physicalStart + tokenCount)
             currentKeys.packedMagnitudes[.ellipsis, target, 0..., 0...] =
-                encodedKeys.packedMagnitudes[.ellipsis, source, 0..., 0...]
-            currentKeys.signs[.ellipsis, target, 0..., 0...] =
-                encodedKeys.signs[.ellipsis, source, 0..., 0...]
+                encodedKeys.packedMagnitudes
+            currentKeys.signs[.ellipsis, target, 0..., 0...] = encodedKeys.signs
             currentKeys.highPrecisionMask[.ellipsis, target, 0..., 0...] =
-                encodedKeys.highPrecisionMask[.ellipsis, source, 0..., 0...]
-            currentKeys.residualSigns[.ellipsis, target, 0..., 0...] =
-                encodedKeys.residualSigns[.ellipsis, source, 0..., 0...]
-            currentKeys.scales[.ellipsis, target, 0..., 0...] =
-                encodedKeys.scales[.ellipsis, source, 0..., 0...]
+                encodedKeys.highPrecisionMask
+            currentKeys.residualSigns[.ellipsis, target, 0..., 0...] = encodedKeys.residualSigns
+            currentKeys.scales[.ellipsis, target, 0..., 0...] = encodedKeys.scales
 
             currentValues.packedMagnitudes[.ellipsis, target, 0..., 0...] =
-                encodedValues.packedMagnitudes[.ellipsis, source, 0..., 0...]
+                encodedValues.packedMagnitudes
             if currentValues.signs.ndim == 5 {
-                currentValues.signs[.ellipsis, target, 0..., 0...] =
-                    encodedValues.signs[.ellipsis, source, 0..., 0...]
+                currentValues.signs[.ellipsis, target, 0..., 0...] = encodedValues.signs
                 currentValues.highPrecisionMask[.ellipsis, target, 0..., 0...] =
-                    encodedValues.highPrecisionMask[.ellipsis, source, 0..., 0...]
+                    encodedValues.highPrecisionMask
                 currentValues.residualSigns[.ellipsis, target, 0..., 0...] =
-                    encodedValues.residualSigns[.ellipsis, source, 0..., 0...]
+                    encodedValues.residualSigns
             }
-            currentValues.scales[.ellipsis, target, 0..., 0...] =
-                encodedValues.scales[.ellipsis, source, 0..., 0...]
+            currentValues.scales[.ellipsis, target, 0..., 0...] = encodedValues.scales
+        } else {
+            for token in 0 ..< tokenCount {
+                let physical = physicalSlot(forAbsoluteToken: offset + token)
+                let source = token ..< (token + 1)
+                let target = physical ..< (physical + 1)
+                currentKeys.packedMagnitudes[.ellipsis, target, 0..., 0...] =
+                    encodedKeys.packedMagnitudes[.ellipsis, source, 0..., 0...]
+                currentKeys.signs[.ellipsis, target, 0..., 0...] =
+                    encodedKeys.signs[.ellipsis, source, 0..., 0...]
+                currentKeys.highPrecisionMask[.ellipsis, target, 0..., 0...] =
+                    encodedKeys.highPrecisionMask[.ellipsis, source, 0..., 0...]
+                currentKeys.residualSigns[.ellipsis, target, 0..., 0...] =
+                    encodedKeys.residualSigns[.ellipsis, source, 0..., 0...]
+                currentKeys.scales[.ellipsis, target, 0..., 0...] =
+                    encodedKeys.scales[.ellipsis, source, 0..., 0...]
+
+                currentValues.packedMagnitudes[.ellipsis, target, 0..., 0...] =
+                    encodedValues.packedMagnitudes[.ellipsis, source, 0..., 0...]
+                if currentValues.signs.ndim == 5 {
+                    currentValues.signs[.ellipsis, target, 0..., 0...] =
+                        encodedValues.signs[.ellipsis, source, 0..., 0...]
+                    currentValues.highPrecisionMask[.ellipsis, target, 0..., 0...] =
+                        encodedValues.highPrecisionMask[.ellipsis, source, 0..., 0...]
+                    currentValues.residualSigns[.ellipsis, target, 0..., 0...] =
+                        encodedValues.residualSigns[.ellipsis, source, 0..., 0...]
+                }
+                currentValues.scales[.ellipsis, target, 0..., 0...] =
+                    encodedValues.scales[.ellipsis, source, 0..., 0...]
+            }
         }
 
-        offset += keys.dim(2)
+        offset += tokenCount
         writeIndex = nextWriteIndex(afterOffset: offset)
         if shouldUpdatePackedFallback {
             _ = packedFallbackCache?.updateQuantized(keys: keys, values: values)
