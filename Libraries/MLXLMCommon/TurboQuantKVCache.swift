@@ -521,7 +521,9 @@ public final class TurboQuantKVCache: QuantizedKVCache, TurboQuantCompressedKVCa
                 mask: mask
             )
         lastAttentionPath = supportsTiled ? .tiledOnlineFused : .twoStageCompressed
-        lastUnsupportedShape = nil
+        lastUnsupportedShape = supportsTiled
+            ? nil
+            : "online fused attention is not throughput-admitted for head dimension \(queries.dim(3)); using two-stage compressed attention"
         return true
     }
 
@@ -1000,7 +1002,9 @@ public final class RotatingTurboQuantKVCache: BaseKVCache, QuantizedKVCacheProto
                 mask: mask
             )
         lastAttentionPath = supportsTiled ? .tiledOnlineFused : .twoStageCompressed
-        lastUnsupportedShape = nil
+        lastUnsupportedShape = supportsTiled
+            ? nil
+            : "online fused attention is not throughput-admitted for head dimension \(queries.dim(3)); using two-stage compressed attention"
         return true
     }
 
