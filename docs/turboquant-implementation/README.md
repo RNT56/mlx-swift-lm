@@ -14,6 +14,12 @@ The executable launch order is owned by:
 /Users/mt/Programming/Schtack/pines/docs/turboquant-implementation/14-worker-launch-schedule.md
 ```
 
+The PR and merge train is owned by:
+
+```text
+/Users/mt/Programming/Schtack/pines/docs/turboquant-implementation/15-pr-merge-plan.md
+```
+
 For this repo, the launch order is:
 
 1. Wave 0: W4 runtime failures/no zero/no fatal.
@@ -23,6 +29,14 @@ For this repo, the launch order is:
 5. Wave 6: W15A speculative verifier.
 
 W4 can start immediately in parallel with MLX Swift W1 and Pines W7/W24. W14A and W15A must not product-activate before lifecycle, evidence, and rollback prerequisites are proven.
+
+Worker PRs in this repo target:
+
+```text
+codex/turboquant-completion-hardening
+```
+
+Final merge to the repo default branch waits for the cross-repo compatibility pair and Pines production pin gate.
 
 ## LM responsibilities
 
