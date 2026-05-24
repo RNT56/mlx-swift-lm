@@ -359,7 +359,8 @@ extension GenerateParameters {
         if resolved.turboQuantAdmission == nil,
             resolved.turboQuantAdmissionPolicy == .automatic
         {
-            resolved.turboQuantAdmission = resolved.automaticTurboQuantAdmission(layerCount: layerCount)
+            resolved.turboQuantAdmission = resolved.automaticTurboQuantAdmission(
+                layerCount: layerCount)
         }
         if let admission = resolved.turboQuantAdmission {
             guard admission.admitted else {
@@ -402,7 +403,8 @@ private func resolvedGenerationParameters(
     let layerCount = (model as? any KVCacheDimensionProvider)?.kvHeads.count
     let resolved = try parameters.resolvedForTurboQuantRuntime(layerCount: layerCount)
     if resolved.kvCacheStrategy == .turboQuant, !(model is any ThrowingLanguageModel) {
-        throw TurboQuantGenerationError.modelRequiresThrowingAttention(String(describing: type(of: model)))
+        throw TurboQuantGenerationError.modelRequiresThrowingAttention(
+            String(describing: type(of: model)))
     }
     return resolved
 }
@@ -873,10 +875,12 @@ public struct TokenIterator: TokenIteratorProtocol {
         self.kvCacheStrategy = runtimeCacheParameters?.kvCacheStrategy ?? .none
         self.turboQuantPreset = runtimeCacheParameters?.turboQuantPreset ?? .turbo3_5
         self.turboQuantBackend = runtimeCacheParameters?.turboQuantBackend ?? .metalPolarQJL
-        self.turboQuantOptimizationPolicy = runtimeCacheParameters?.turboQuantOptimizationPolicy ?? .auto
+        self.turboQuantOptimizationPolicy =
+            runtimeCacheParameters?.turboQuantOptimizationPolicy ?? .auto
         self.turboQuantSeed = runtimeCacheParameters?.turboQuantSeed
         self.turboQuantValueBits = runtimeCacheParameters?.turboQuantValueBits
-        self.turboQuantResidentBudgetBytes = runtimeCacheParameters?.turboQuantPerCacheResidentBudgetBytes
+        self.turboQuantResidentBudgetBytes =
+            runtimeCacheParameters?.turboQuantPerCacheResidentBudgetBytes
 
         self.promptPrefillTime = try measure {
             try prepare(input: input, windowSize: prefillStepSize)
@@ -1050,8 +1054,10 @@ public struct SpeculativeTokenIterator: TokenIteratorProtocol {
         self.mainModel = mainModel
         self.draftModel = draftModel
 
-        let mainRuntimeParameters = try resolvedGenerationParameters(for: mainModel, parameters: parameters)
-        let draftRuntimeParameters = try resolvedGenerationParameters(for: draftModel, parameters: parameters)
+        let mainRuntimeParameters = try resolvedGenerationParameters(
+            for: mainModel, parameters: parameters)
+        let draftRuntimeParameters = try resolvedGenerationParameters(
+            for: draftModel, parameters: parameters)
         self.mainCache = mainCache ?? mainModel.newCache(parameters: mainRuntimeParameters)
         self.draftCache = draftCache ?? draftModel.newCache(parameters: draftRuntimeParameters)
         guard canTrimPromptCache(self.mainCache), canTrimPromptCache(self.draftCache) else {
@@ -1334,7 +1340,8 @@ public struct MTPTokenIterator: TokenIteratorProtocol {
                 turboQuantOptimizationPolicy: runtimeParameters.turboQuantOptimizationPolicy,
                 turboQuantSeed: runtimeParameters.turboQuantSeed,
                 turboQuantValueBits: runtimeParameters.turboQuantValueBits,
-                turboQuantResidentBudgetBytes: runtimeParameters.turboQuantPerCacheResidentBudgetBytes
+                turboQuantResidentBudgetBytes: runtimeParameters
+                    .turboQuantPerCacheResidentBudgetBytes
             )
         }
 

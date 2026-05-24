@@ -153,17 +153,13 @@ public struct TurboQuantLayerCacheFootprint: Codable, Equatable, Sendable {
 
         let keyBytesPerHead =
             groupsPerVector
-            * (
-                keyMagnitudeWordsPerGroup * MemoryLayout<UInt32>.stride
-                    + bitsetWordsPerGroup * MemoryLayout<UInt32>.stride * 3
-                    + 3 * MemoryLayout<Float>.stride
-            )
+            * (keyMagnitudeWordsPerGroup * MemoryLayout<UInt32>.stride
+                + bitsetWordsPerGroup * MemoryLayout<UInt32>.stride * 3
+                + 3 * MemoryLayout<Float>.stride)
         let valueBytesPerHead =
             groupsPerVector
-            * (
-                valueMagnitudeWordsPerGroup * MemoryLayout<UInt32>.stride
-                    + 2 * MemoryLayout<Float>.stride
-            )
+            * (valueMagnitudeWordsPerGroup * MemoryLayout<UInt32>.stride
+                + 2 * MemoryLayout<Float>.stride)
         let keyBytesPerTokenPerLayer = keyBytesPerHead * kvHeadCount
         let valueBytesPerTokenPerLayer = valueBytesPerHead * kvHeadCount
         let bytesPerTokenPerLayer = keyBytesPerTokenPerLayer + valueBytesPerTokenPerLayer
@@ -488,7 +484,8 @@ public struct TurboQuantAdmissionPlanner: Sendable {
                 uiReserveBytes: options.defaultUIReserveBytes
             )
         let requestedContext = max(1, requestedContextLength)
-        let requestedValueBits = min(8, max(options.minimumValueBits, valueBits ?? preset.defaultValueBits))
+        let requestedValueBits = min(
+            8, max(options.minimumValueBits, valueBits ?? preset.defaultValueBits))
         var downgrades: [TurboQuantAdmissionDowngrade] = []
         var candidate = initialCandidate(
             requestedContextLength: requestedContext,
@@ -579,7 +576,8 @@ public struct TurboQuantAdmissionPlanner: Sendable {
             downgrades.append(
                 TurboQuantAdmissionDowngrade(
                     reason: .loweredValueBits,
-                    message: "Lowered TurboQuant value bits from \(previousBits) to \(candidate.valueBits)."
+                    message:
+                        "Lowered TurboQuant value bits from \(previousBits) to \(candidate.valueBits)."
                 )
             )
             plan = memoryPlan(
@@ -641,7 +639,8 @@ public struct TurboQuantAdmissionPlanner: Sendable {
             groupSize: groupSize,
             sample: sample
         )
-        if reducedContext < candidate.contextLength, reducedContext >= options.minimumContextLength {
+        if reducedContext < candidate.contextLength, reducedContext >= options.minimumContextLength
+        {
             candidate.contextLength = reducedContext
             downgrades.append(
                 TurboQuantAdmissionDowngrade(
@@ -696,7 +695,8 @@ public struct TurboQuantAdmissionPlanner: Sendable {
 
         let refusal = TurboQuantAdmissionDowngrade(
             reason: .refusedInsufficientMemory,
-            message: "Refused generation because the model, cache, and reserves exceed available memory."
+            message:
+                "Refused generation because the model, cache, and reserves exceed available memory."
         )
         downgrades.append(refusal)
         return TurboQuantAdmission(
@@ -771,7 +771,8 @@ public struct TurboQuantAdmissionPlanner: Sendable {
             downgrades.append(
                 TurboQuantAdmissionDowngrade(
                     reason: .thermalOrBatterySaver,
-                    message: "Selected Battery Saver settings because power or thermal state is constrained."
+                    message:
+                        "Selected Battery Saver settings because power or thermal state is constrained."
                 )
             )
         }
@@ -949,7 +950,8 @@ public struct TurboQuantAdmissionPlanner: Sendable {
         contextLength: Int,
         mode: TurboQuantUserMode
     ) -> Int {
-        let perLayerRaw = profile.layerCount > 0 ? profile.kvCacheBytes(contextLength: 1) / profile.layerCount : 0
+        let perLayerRaw =
+            profile.layerCount > 0 ? profile.kvCacheBytes(contextLength: 1) / profile.layerCount : 0
         let tokenWindow: Int
         switch mode {
         case .fastest:

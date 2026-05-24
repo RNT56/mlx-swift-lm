@@ -345,7 +345,8 @@ private func turboQuantAttentionFallbackLadder(
     failures.append("packed quantized SDPA fallback unavailable")
 
     do {
-        let (decodedKeys, decodedValues) = try cache.decodedCompressedState(outputDType: queries.dtype)
+        let (decodedKeys, decodedValues) = try cache.decodedCompressedState(
+            outputDType: queries.dtype)
         let output = exactScaledDotProductAttention(
             queries: queries,
             keys: decodedKeys,
@@ -572,7 +573,10 @@ public func attentionWithKVStateThrowing(
     }
 }
 
-@available(*, deprecated, message: "Use attentionWithKVStateThrowing so TurboQuant failures remain recoverable.")
+@available(
+    *, deprecated,
+    message: "Use attentionWithKVStateThrowing so TurboQuant failures remain recoverable."
+)
 public func attentionWithKVState(
     queries: MLXArray,
     state: AttentionKVState,
@@ -772,7 +776,11 @@ public func attentionWithCacheUpdateReturningStateThrowing(
     }
 }
 
-@available(*, deprecated, message: "Use attentionWithCacheUpdateReturningStateThrowing so TurboQuant failures remain recoverable.")
+@available(
+    *, deprecated,
+    message:
+        "Use attentionWithCacheUpdateReturningStateThrowing so TurboQuant failures remain recoverable."
+)
 public func attentionWithCacheUpdateReturningState(
     queries: MLXArray,
     keys: MLXArray,

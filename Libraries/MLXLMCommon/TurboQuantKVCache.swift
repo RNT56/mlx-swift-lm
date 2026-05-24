@@ -293,10 +293,11 @@ private func turboQuantCompactOrStorageShape(
     code: TurboQuantAttentionCode
 ) -> Bool {
     array.shape == [1]
-        || array.shape == turboQuantStorageShape(
-            code,
-            wordsPerGroup: code.layout.bitsetWordsPerGroup
-        )
+        || array.shape
+            == turboQuantStorageShape(
+                code,
+                wordsPerGroup: code.layout.bitsetWordsPerGroup
+            )
 }
 
 private func validateTurboQuantCode(_ code: TurboQuantAttentionCode, context: String) throws {
@@ -635,7 +636,8 @@ public final class TurboQuantKVCache: QuantizedKVCache, TurboQuantCompressedKVCa
             } else if newValue.count == 10 {
                 lastUnsupportedShape =
                     "compressed TurboQuant state restored without Metal attention support"
-                cacheLifecycle = .failed(reason: lastUnsupportedShape ?? "unsupported compressed state")
+                cacheLifecycle = .failed(
+                    reason: lastUnsupportedShape ?? "unsupported compressed state")
             } else {
                 super.state = newValue
             }
@@ -652,7 +654,8 @@ public final class TurboQuantKVCache: QuantizedKVCache, TurboQuantCompressedKVCa
         let logicalLength: Int
         let capacity: Int
         if let compressedKeys, let compressedValues {
-            compressedBytes = turboQuantCodeBytes(compressedKeys) + turboQuantCodeBytes(compressedValues)
+            compressedBytes =
+                turboQuantCodeBytes(compressedKeys) + turboQuantCodeBytes(compressedValues)
             logicalLength = compressedKeys.layout.logicalLength
             capacity = compressedKeys.layout.capacity
         } else {
@@ -878,7 +881,8 @@ public final class TurboQuantKVCache: QuantizedKVCache, TurboQuantCompressedKVCa
                 mask: mask
             )
         lastAttentionPath = supportsTiled ? .tiledOnlineFused : .twoStageCompressed
-        lastUnsupportedShape = supportsTiled
+        lastUnsupportedShape =
+            supportsTiled
             ? nil
             : "online fused attention is not throughput-admitted for head dimension \(queries.dim(3)); using two-stage compressed attention"
         return true
@@ -1336,7 +1340,8 @@ public final class RotatingTurboQuantKVCache: BaseKVCache, QuantizedKVCacheProto
         let logicalLength: Int
         let capacity: Int
         if let compressedKeys, let compressedValues {
-            compressedBytes = turboQuantCodeBytes(compressedKeys) + turboQuantCodeBytes(compressedValues)
+            compressedBytes =
+                turboQuantCodeBytes(compressedKeys) + turboQuantCodeBytes(compressedValues)
             logicalLength = compressedKeys.layout.logicalLength
             capacity = compressedKeys.layout.capacity
         } else {
@@ -1346,8 +1351,11 @@ public final class RotatingTurboQuantKVCache: BaseKVCache, QuantizedKVCacheProto
         }
         let packedBytes =
             turboQuantArrayBytes(packedFallbackCache?.state ?? [])
-            + turboQuantArrayBytes([packedKeys?.weight, packedKeys?.scales, packedKeys?.biases].compactMap { $0 })
-            + turboQuantArrayBytes([packedValues?.weight, packedValues?.scales, packedValues?.biases].compactMap { $0 })
+            + turboQuantArrayBytes(
+                [packedKeys?.weight, packedKeys?.scales, packedKeys?.biases].compactMap { $0 })
+            + turboQuantArrayBytes(
+                [packedValues?.weight, packedValues?.scales, packedValues?.biases].compactMap { $0 }
+            )
         return TurboQuantRuntimeCacheFootprint(
             logicalLength: logicalLength,
             capacity: capacity,
@@ -1500,7 +1508,8 @@ public final class RotatingTurboQuantKVCache: BaseKVCache, QuantizedKVCacheProto
                 mask: mask
             )
         lastAttentionPath = supportsTiled ? .tiledOnlineFused : .twoStageCompressed
-        lastUnsupportedShape = supportsTiled
+        lastUnsupportedShape =
+            supportsTiled
             ? nil
             : "online fused attention is not throughput-admitted for head dimension \(queries.dim(3)); using two-stage compressed attention"
         return true
@@ -1748,7 +1757,8 @@ public final class RotatingTurboQuantKVCache: BaseKVCache, QuantizedKVCacheProto
             } else if newValue.count == 10 {
                 lastUnsupportedShape =
                     "compressed rotating TurboQuant state restored without Metal attention support"
-                cacheLifecycle = .failed(reason: lastUnsupportedShape ?? "unsupported compressed state")
+                cacheLifecycle = .failed(
+                    reason: lastUnsupportedShape ?? "unsupported compressed state")
             } else {
                 let rawCache = materializedRawFallbackCache()
                 rawCache.state = newValue

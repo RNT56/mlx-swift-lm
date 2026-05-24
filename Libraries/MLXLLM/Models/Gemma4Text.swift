@@ -841,7 +841,9 @@ public class Gemma4AssistantModel: Module, LLMModel, DualModelMTP, KVCacheDimens
         return mainModel(inputs, cache: cache)
     }
 
-    public func prepare(_ input: LMInput, cache: [KVCache], windowSize: Int?) throws -> PrepareResult {
+    public func prepare(_ input: LMInput, cache: [KVCache], windowSize: Int?) throws
+        -> PrepareResult
+    {
         guard let mainModel = mainModelRef as? Gemma4TextModel else {
             throw Gemma4AssistantError.requiresDualModelMTP
         }
@@ -850,7 +852,8 @@ public class Gemma4AssistantModel: Module, LLMModel, DualModelMTP, KVCacheDimens
 
     public func validateMTPOrchestration(mainModel: any BaseLanguageModel) throws {
         guard mainModel is Gemma4TextModel else {
-            throw Gemma4AssistantError.incompatibleMainModel(String(describing: type(of: mainModel)))
+            throw Gemma4AssistantError.incompatibleMainModel(
+                String(describing: type(of: mainModel)))
         }
     }
 
