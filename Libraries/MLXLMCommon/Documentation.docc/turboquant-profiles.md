@@ -115,7 +115,7 @@ Measured product outcomes must include the device class, OS, max context by
 product mode, actual bytes per token, decode p50/p95, prefill p50, memory, and
 quality gates such as logit KL, top-1 match, and long-context retrieval. Bundled
 profiles that have not been reproduced on target hardware remain usable only as
-conservative routing profiles; ``TurboQuantProfile/productManifestValidation``
+conservative routing profiles; ``TurboQuantProfile/productManifestValidation(actualFingerprint:requireMeasuredOutcomes:)``
 reports the exact fields that still need release evidence.
 
 Use the benchmark entrypoints to generate profile evidence:

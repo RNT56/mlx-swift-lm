@@ -11,6 +11,17 @@ import MLXNN
 // MARK: - Configuration
 
 public struct DeepseekV4Configuration: Codable, Sendable {
+    enum AttentionLayerType: String, Codable, Sendable {
+        case sliding = "sliding_attention"
+        case compressedSparse = "compressed_sparse_attention"
+        case heavilyCompressed = "heavily_compressed_attention"
+    }
+
+    enum MLPLayerType: String, Codable, Sendable {
+        case hashMoE = "hash_moe"
+        case moe
+    }
+
     // Core architecture
     var vocabSize: Int
     var hiddenSize: Int
@@ -29,7 +40,11 @@ public struct DeepseekV4Configuration: Codable, Sendable {
     // Attention / compression (per layer)
     var slidingWindow: Int
     var compressRatios: [Int]
+    var compressRates: [String: Int]?
+    var compressRateCSA: Int
+    var compressRateHCA: Int
     var compressRopeTheta: Float
+    var layerTypes: [AttentionLayerType]
 
     // MoE
     var nRoutedExperts: Int
@@ -41,6 +56,7 @@ public struct DeepseekV4Configuration: Codable, Sendable {
     var numHashLayers: Int
     var numNextnPredictLayers: Int
     var normTopkProb: Bool
+    var mlpLayerTypes: [MLPLayerType]
 
     // Hyper-Connections (mHC)
     var hcMult: Int
@@ -51,6 +67,14 @@ public struct DeepseekV4Configuration: Codable, Sendable {
     var ropeTheta: Float
     var ropeScaling: [String: StringOrNumber]?
     var maxPositionEmbeddings: Int
+
+    // Compressed sparse attention indexer
+    var indexHeads: Int
+    var indexHeadDim: Int
+    var indexTopK: Int
+
+    // Output
+    var tieWordEmbeddings: Bool
 
     // Nope head dim (derived)
     var nopeHeadDim: Int { headDim - qkRopeHeadDim }
@@ -69,7 +93,11 @@ public struct DeepseekV4Configuration: Codable, Sendable {
         case oLoraRank = "o_lora_rank"
         case slidingWindow = "sliding_window"
         case compressRatios = "compress_ratios"
+        case compressRates = "compress_rates"
+        case compressRateCSA = "compress_rate_csa"
+        case compressRateHCA = "compress_rate_hca"
         case compressRopeTheta = "compress_rope_theta"
+        case layerTypes = "layer_types"
         case nRoutedExperts = "n_routed_experts"
         case nSharedExperts = "n_shared_experts"
         case numExpertsPerTok = "num_experts_per_tok"
@@ -79,12 +107,131 @@ public struct DeepseekV4Configuration: Codable, Sendable {
         case numHashLayers = "num_hash_layers"
         case numNextnPredictLayers = "num_nextn_predict_layers"
         case normTopkProb = "norm_topk_prob"
+        case mlpLayerTypes = "mlp_layer_types"
         case hcMult = "hc_mult"
         case hcSinkhornIters = "hc_sinkhorn_iters"
         case hcEps = "hc_eps"
         case ropeTheta = "rope_theta"
         case ropeScaling = "rope_scaling"
         case maxPositionEmbeddings = "max_position_embeddings"
+        case indexHeads = "index_n_heads"
+        case indexHeadDim = "index_head_dim"
+        case indexTopK = "index_topk"
+        case tieWordEmbeddings = "tie_word_embeddings"
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        vocabSize = try container.decodeIfPresent(Int.self, forKey: .vocabSize) ?? 129_280
+        hiddenSize = try container.decodeIfPresent(Int.self, forKey: .hiddenSize) ?? 4_096
+        moeIntermediateSize =
+            try container.decodeIfPresent(Int.self, forKey: .moeIntermediateSize) ?? 2_048
+        numHiddenLayers = try container.decodeIfPresent(Int.self, forKey: .numHiddenLayers) ?? 43
+        numAttentionHeads = try container.decodeIfPresent(Int.self, forKey: .numAttentionHeads) ?? 64
+        headDim = try container.decodeIfPresent(Int.self, forKey: .headDim) ?? 512
+        qLoraRank = try container.decodeIfPresent(Int.self, forKey: .qLoraRank) ?? 1_024
+        qkRopeHeadDim = try container.decodeIfPresent(Int.self, forKey: .qkRopeHeadDim) ?? 64
+        rmsNormEps = try container.decodeIfPresent(Float.self, forKey: .rmsNormEps) ?? 1.0e-6
+        oGroups = try container.decodeIfPresent(Int.self, forKey: .oGroups) ?? 8
+        oLoraRank = try container.decodeIfPresent(Int.self, forKey: .oLoraRank) ?? 1_024
+        slidingWindow = try container.decodeIfPresent(Int.self, forKey: .slidingWindow) ?? 128
+
+        compressRates = try container.decodeIfPresent([String: Int].self, forKey: .compressRates)
+        compressRateCSA =
+            try container.decodeIfPresent(Int.self, forKey: .compressRateCSA)
+            ?? compressRates?["compressed_sparse_attention"] ?? 4
+        compressRateHCA =
+            try container.decodeIfPresent(Int.self, forKey: .compressRateHCA)
+            ?? compressRates?["heavily_compressed_attention"] ?? 128
+        compressRatios = try container.decodeIfPresent([Int].self, forKey: .compressRatios) ?? []
+        compressRopeTheta =
+            try container.decodeIfPresent(Float.self, forKey: .compressRopeTheta) ?? 160_000
+
+        nRoutedExperts = try container.decodeIfPresent(Int.self, forKey: .nRoutedExperts) ?? 256
+        nSharedExperts = try container.decodeIfPresent(Int.self, forKey: .nSharedExperts) ?? 1
+        numExpertsPerTok =
+            try container.decodeIfPresent(Int.self, forKey: .numExpertsPerTok) ?? 6
+        scoringFunc =
+            try container.decodeIfPresent(String.self, forKey: .scoringFunc) ?? "sqrtsoftplus"
+        routedScalingFactor =
+            try container.decodeIfPresent(Float.self, forKey: .routedScalingFactor) ?? 1.5
+        swiguLimit = try container.decodeIfPresent(Float.self, forKey: .swiguLimit) ?? 10
+        numHashLayers = try container.decodeIfPresent(Int.self, forKey: .numHashLayers) ?? 3
+        numNextnPredictLayers =
+            try container.decodeIfPresent(Int.self, forKey: .numNextnPredictLayers) ?? 0
+        normTopkProb = try container.decodeIfPresent(Bool.self, forKey: .normTopkProb) ?? true
+
+        hcMult = try container.decodeIfPresent(Int.self, forKey: .hcMult) ?? 4
+        hcSinkhornIters = try container.decodeIfPresent(Int.self, forKey: .hcSinkhornIters) ?? 20
+        hcEps = try container.decodeIfPresent(Float.self, forKey: .hcEps) ?? 1.0e-6
+
+        ropeTheta = try container.decodeIfPresent(Float.self, forKey: .ropeTheta) ?? 10_000
+        ropeScaling = try container.decodeIfPresent(
+            [String: StringOrNumber].self, forKey: .ropeScaling)
+        maxPositionEmbeddings =
+            try container.decodeIfPresent(Int.self, forKey: .maxPositionEmbeddings) ?? 1_048_576
+
+        indexHeads = try container.decodeIfPresent(Int.self, forKey: .indexHeads) ?? 64
+        indexHeadDim = try container.decodeIfPresent(Int.self, forKey: .indexHeadDim) ?? 128
+        indexTopK = try container.decodeIfPresent(Int.self, forKey: .indexTopK) ?? 512
+        tieWordEmbeddings =
+            try container.decodeIfPresent(Bool.self, forKey: .tieWordEmbeddings) ?? false
+
+        if let explicitLayerTypes = try container.decodeIfPresent(
+            [AttentionLayerType].self, forKey: .layerTypes)
+        {
+            layerTypes = Array(explicitLayerTypes.prefix(numHiddenLayers))
+        } else {
+            let csaRate = compressRateCSA
+            let ratios = compressRatios.isEmpty
+                ? Self.defaultCompressRatios(
+                    count: numHiddenLayers,
+                    compressedSparseRate: csaRate,
+                    heavilyCompressedRate: compressRateHCA)
+                : compressRatios
+            let resolvedLayerTypes = ratios.prefix(numHiddenLayers).map {
+                switch $0 {
+                case 0:
+                    return DeepseekV4Configuration.AttentionLayerType.sliding
+                case csaRate:
+                    return DeepseekV4Configuration.AttentionLayerType.compressedSparse
+                default:
+                    return DeepseekV4Configuration.AttentionLayerType.heavilyCompressed
+                }
+            }
+            layerTypes = resolvedLayerTypes
+        }
+        if layerTypes.count < numHiddenLayers {
+            layerTypes += Array(
+                repeating: .heavilyCompressed,
+                count: numHiddenLayers - layerTypes.count)
+        }
+
+        if let explicitMLPTypes = try container.decodeIfPresent(
+            [MLPLayerType].self, forKey: .mlpLayerTypes)
+        {
+            mlpLayerTypes = Array(explicitMLPTypes.prefix(numHiddenLayers))
+        } else {
+            mlpLayerTypes =
+                Array(repeating: .hashMoE, count: min(numHiddenLayers, numHashLayers))
+                + Array(repeating: .moe, count: max(0, numHiddenLayers - numHashLayers))
+        }
+        if mlpLayerTypes.count < numHiddenLayers {
+            mlpLayerTypes += Array(repeating: .moe, count: numHiddenLayers - mlpLayerTypes.count)
+        }
+    }
+
+    private static func defaultCompressRatios(
+        count: Int,
+        compressedSparseRate: Int,
+        heavilyCompressedRate: Int
+    ) -> [Int] {
+        guard count > 0 else { return [] }
+        if count == 1 { return [0] }
+        return (0 ..< count).map { index in
+            if index == 0 { return 0 }
+            return index.isMultiple(of: 2) ? heavilyCompressedRate : compressedSparseRate
+        }
     }
 }
 
@@ -210,14 +357,14 @@ private func hcPost(
 /// Lightweight Module to hold the three Hyper-Connection tensors loaded from checkpoint.
 /// Key names (fn, base, scale) match the `hc_attn.*` / `hc_ffn.*` / `hc_head.*` paths.
 class HCParams: Module {
-    var fn: MLXArray
-    var base: MLXArray
-    var scale: MLXArray
+    @ParameterInfo(key: "fn") var fn: MLXArray
+    @ParameterInfo(key: "base") var base: MLXArray
+    @ParameterInfo(key: "scale") var scale: MLXArray
 
     init(fn: MLXArray, base: MLXArray, scale: MLXArray) {
-        self.fn = fn
-        self.base = base
-        self.scale = scale
+        self._fn.wrappedValue = fn
+        self._base.wrappedValue = base
+        self._scale.wrappedValue = scale
     }
 }
 
@@ -281,8 +428,378 @@ private func deepseekAttentionWithSinks(
         scale: scale, mask: mask, sinks: sinks)
 }
 
+final class DeepseekV4KVCache: KVCache, CustomDebugStringConvertible {
+    let layerType: DeepseekV4Configuration.AttentionLayerType
+    let slidingWindow: Int
+    var offset: Int = 0
+
+    private var keys: MLXArray?
+    private var values: MLXArray?
+    private var compressionKV = [String: MLXArray]()
+    private var compressionGate = [String: MLXArray]()
+    private var compressionEntries = [String: Int]()
+    private var compressed = [String: MLXArray]()
+
+    init(layerType: DeepseekV4Configuration.AttentionLayerType, slidingWindow: Int) {
+        self.layerType = layerType
+        self.slidingWindow = slidingWindow
+    }
+
+    var maxSize: Int? {
+        layerType == .sliding ? slidingWindow : nil
+    }
+
+    func update(keys newKeys: MLXArray, values newValues: MLXArray) -> (MLXArray, MLXArray) {
+        let nextKeys = keys.map { concatenated([$0, newKeys], axis: 2) } ?? newKeys
+        let nextValues = values.map { concatenated([$0, newValues], axis: 2) } ?? newValues
+        let keep = layerType == .sliding ? max(slidingWindow, 1) : Int.max
+        if nextKeys.dim(2) > keep {
+            keys = nextKeys[.ellipsis, (nextKeys.dim(2) - keep)..., 0...]
+            values = nextValues[.ellipsis, (nextValues.dim(2) - keep)..., 0...]
+        } else {
+            keys = nextKeys
+            values = nextValues
+        }
+        offset += newKeys.dim(2)
+        return (keys ?? newKeys, values ?? newValues)
+    }
+
+    var state: [MLXArray] {
+        get {
+            guard let keys, let values else { return [] }
+            return [keys, values]
+        }
+        set {
+            guard newValue.count == 2 else {
+                keys = nil
+                values = nil
+                return
+            }
+            keys = newValue[0]
+            values = newValue[1]
+        }
+    }
+
+    var metaState: [String] {
+        get { ["deepseek_v4", layerType.rawValue, "\(offset)", "\(slidingWindow)"] }
+        set {
+            if newValue.count >= 3, let parsedOffset = Int(newValue[2]) {
+                offset = parsedOffset
+            }
+        }
+    }
+
+    var isTrimmable: Bool { true }
+
+    @discardableResult
+    func trim(_ n: Int) -> Int {
+        let trimmed = min(offset, n)
+        offset -= trimmed
+        if trimmed > 0 {
+            keys = nil
+            values = nil
+        }
+        return trimmed
+    }
+
+    func makeMask(
+        n: Int,
+        windowSize: Int?,
+        returnArray: Bool
+    ) -> MLXFast.ScaledDotProductAttentionMaskMode {
+        if n == 1 { return .none }
+        let effectiveWindow = windowSize ?? maxSize
+        if returnArray || (effectiveWindow != nil && n > effectiveWindow!) {
+            return .array(createCausalMask(n: n, offset: offset, windowSize: effectiveWindow))
+        }
+        return .causal
+    }
+
+    func innerState() -> [MLXArray] {
+        state
+    }
+
+    func copy() -> any KVCache {
+        let copy = DeepseekV4KVCache(layerType: layerType, slidingWindow: slidingWindow)
+        copy.offset = offset
+        copy.keys = keys
+        copy.values = values
+        copy.compressionKV = compressionKV
+        copy.compressionGate = compressionGate
+        copy.compressionEntries = compressionEntries
+        copy.compressed = compressed
+        return copy
+    }
+
+    func storeCompressionWeights(
+        name: String,
+        kv: MLXArray,
+        gate: MLXArray,
+        compressRate: Int
+    ) -> (MLXArray, MLXArray, Int) {
+        let firstWindowPosition = (compressionEntries[name] ?? 0) * compressRate
+        var kv = kv
+        var gate = gate
+        if let priorKV = compressionKV[name], let priorGate = compressionGate[name], priorKV.dim(1) > 0 {
+            kv = concatenated([priorKV, kv], axis: 1)
+            gate = concatenated([priorGate, gate], axis: 1)
+        }
+
+        let usable = (kv.dim(1) / compressRate) * compressRate
+        if usable < kv.dim(1) {
+            compressionKV[name] = kv[0..., usable..., 0...]
+            compressionGate[name] = gate[0..., usable..., 0...]
+        } else {
+            compressionKV.removeValue(forKey: name)
+            compressionGate.removeValue(forKey: name)
+        }
+
+        return (kv[0..., ..<usable, 0...], gate[0..., ..<usable, 0...], firstWindowPosition)
+    }
+
+    func updateCompressedState(name: String, compressed newCompressed: MLXArray) -> MLXArray {
+        if let previous = compressed[name], newCompressed.dim(1) > 0 {
+            compressed[name] = concatenated([previous, newCompressed], axis: 1)
+        } else if compressed[name] == nil {
+            compressed[name] = newCompressed
+        }
+        compressionEntries[name, default: 0] += newCompressed.dim(1)
+        return compressed[name] ?? newCompressed
+    }
+
+    var debugDescription: String {
+        "DeepseekV4KVCache(type: \(layerType.rawValue), offset: \(offset), keys: \(keys?.shape.description ?? "-"))"
+    }
+}
+
+private func deepseekCompressionPositions(
+    batch: Int,
+    windows: Int,
+    firstWindowPosition: Int,
+    rate: Int
+) -> MLXArray {
+    let positions = MLXArray(Int32(0) ..< Int32(windows)) * Int32(rate) + Int32(firstWindowPosition)
+    return tiled(positions[.newAxis, 0...], repetitions: [batch, 1])
+}
+
+final class DeepseekV4IndexerCompressor: Module {
+    let config: DeepseekV4Configuration
+
+    @ModuleInfo(key: "wkv") var wkv: Linear
+    @ModuleInfo(key: "wgate") var wgate: Linear
+    @ParameterInfo(key: "ape") var ape: MLXArray
+    @ModuleInfo(key: "norm") var norm: RMSNorm
+
+    init(config: DeepseekV4Configuration) {
+        self.config = config
+        self._wkv.wrappedValue = Linear(config.hiddenSize, 2 * config.indexHeadDim, bias: false)
+        self._wgate.wrappedValue = Linear(config.hiddenSize, 2 * config.indexHeadDim, bias: false)
+        self._ape.wrappedValue = zeros([config.compressRateCSA, 2 * config.indexHeadDim])
+        self._norm.wrappedValue = RMSNorm(dimensions: config.indexHeadDim, eps: config.rmsNormEps)
+    }
+
+    func callAsFunction(_ x: MLXArray, cache: DeepseekV4KVCache?) -> MLXArray {
+        let batch = x.dim(0)
+        let rate = config.compressRateCSA
+        var kv = wkv(x)
+        var gate = wgate(x)
+        if let cache {
+            (kv, gate, _) = cache.storeCompressionWeights(
+                name: "indexer", kv: kv, gate: gate, compressRate: rate)
+        } else {
+            let usable = (kv.dim(1) / rate) * rate
+            kv = kv[0..., ..<usable, 0...]
+            gate = gate[0..., ..<usable, 0...]
+        }
+        guard kv.dim(1) > 0 else {
+            return zeros([batch, 0, config.indexHeadDim], dtype: x.dtype)
+        }
+
+        let windows = kv.dim(1) / rate
+        kv = kv.reshaped(batch, windows, rate, -1)
+        gate = gate.reshaped(batch, windows, rate, -1) + ape.asType(gate.dtype)
+        var compressed = (kv * softmax(gate.asType(.float32), axis: 2, precise: true).asType(kv.dtype))
+            .sum(axis: 2)
+        if compressed.dim(-1) > config.indexHeadDim {
+            compressed = compressed[.ellipsis, ..<config.indexHeadDim]
+        }
+        compressed = norm(compressed)
+        if let cache {
+            return cache.updateCompressedState(name: "indexer", compressed: compressed)
+        }
+        return compressed
+    }
+}
+
+final class DeepseekV4Indexer: Module {
+    let config: DeepseekV4Configuration
+    let scale: Float
+    let weightsScale: Float
+
+    @ModuleInfo(key: "compressor") var compressor: DeepseekV4IndexerCompressor
+    @ModuleInfo(key: "wq_b") var wqB: Linear
+    @ModuleInfo(key: "weights_proj") var weightsProj: Linear
+
+    init(config: DeepseekV4Configuration) {
+        self.config = config
+        self.scale = pow(Float(config.indexHeadDim), -0.5)
+        self.weightsScale = pow(Float(config.indexHeads), -0.5)
+        self._compressor.wrappedValue = DeepseekV4IndexerCompressor(config: config)
+        self._wqB.wrappedValue = Linear(
+            config.qLoraRank, config.indexHeads * config.indexHeadDim, bias: false)
+        self._weightsProj.wrappedValue = Linear(config.hiddenSize, config.indexHeads, bias: false)
+    }
+
+    func callAsFunction(
+        _ hiddenStates: MLXArray,
+        qResidual: MLXArray,
+        cache: DeepseekV4KVCache?
+    ) -> MLXArray {
+        let batch = hiddenStates.dim(0)
+        let length = hiddenStates.dim(1)
+        let compressedKV = compressor(hiddenStates, cache: cache)
+        let compressedLength = compressedKV.dim(1)
+        guard compressedLength > 0 else {
+            return zeros([batch, length, 0], dtype: .int32)
+        }
+
+        let queries = wqB(qResidual)
+            .reshaped(batch, length, config.indexHeads, config.indexHeadDim)
+        var scores = matmul(
+            queries.asType(.float32),
+            compressedKV.asType(.float32).transposed(0, 2, 1)[0..., .newAxis, 0..., 0...]
+        )
+        scores = relu(scores) * scale
+        let weights = weightsProj(hiddenStates).asType(.float32) * weightsScale
+        var indexScores = (scores * weights[0..., 0..., 0..., .newAxis]).sum(axis: 2)
+
+        let cacheOffset = cache?.offset ?? 0
+        let positions = MLXArray(Int32(cacheOffset) ..< Int32(cacheOffset + length))
+            .reshaped(1, length)
+        let causalThreshold = (positions + 1).floorDivide(config.compressRateCSA)
+        let entryIndices = MLXArray(Int32(0) ..< Int32(compressedLength))
+        let futureMask = entryIndices.reshaped(1, 1, -1) .>= causalThreshold[0..., 0..., .newAxis]
+        indexScores = MLX.where(futureMask, MLXArray(-1.0e9).asType(indexScores.dtype), indexScores)
+
+        let topK = min(config.indexTopK, compressedLength)
+        let selected = argPartition(-indexScores, kth: max(topK - 1, 0), axis: -1)[0..., 0..., ..<topK]
+        let invalid = selected .>= causalThreshold[0..., 0..., .newAxis]
+        return MLX.where(invalid, MLXArray(Int32(-1)), selected)
+    }
+}
+
+final class DeepseekV4AttentionCompressor: Module {
+    let config: DeepseekV4Configuration
+    let layerType: DeepseekV4Configuration.AttentionLayerType
+    let compressRate: Int
+
+    @ModuleInfo(key: "wkv") var wkv: Linear
+    @ModuleInfo(key: "wgate") var wgate: Linear
+    @ParameterInfo(key: "ape") var ape: MLXArray
+    @ModuleInfo(key: "norm") var norm: RMSNorm
+    @ModuleInfo(key: "indexer") var indexer: DeepseekV4Indexer?
+
+    init(config: DeepseekV4Configuration, layerType: DeepseekV4Configuration.AttentionLayerType) {
+        self.config = config
+        self.layerType = layerType
+        self.compressRate =
+            layerType == .compressedSparse ? config.compressRateCSA : config.compressRateHCA
+        let projectionDim = layerType == .compressedSparse ? 2 * config.headDim : config.headDim
+        self._wkv.wrappedValue = Linear(config.hiddenSize, projectionDim, bias: false)
+        self._wgate.wrappedValue = Linear(config.hiddenSize, projectionDim, bias: false)
+        self._ape.wrappedValue = zeros([compressRate, projectionDim])
+        self._norm.wrappedValue = RMSNorm(dimensions: config.headDim, eps: config.rmsNormEps)
+        if layerType == .compressedSparse {
+            self._indexer.wrappedValue = DeepseekV4Indexer(config: config)
+        }
+    }
+
+    func callAsFunction(
+        _ hiddenStates: MLXArray,
+        qResidual: MLXArray,
+        cache: DeepseekV4KVCache?
+    ) -> (kv: MLXArray, bias: MLXArray?) {
+        let batch = hiddenStates.dim(0)
+        let sequenceLength = hiddenStates.dim(1)
+        var kv = wkv(hiddenStates)
+        var gate = wgate(hiddenStates)
+        let firstWindowPosition: Int
+        if let cache {
+            (kv, gate, firstWindowPosition) = cache.storeCompressionWeights(
+                name: "compressor", kv: kv, gate: gate, compressRate: compressRate)
+        } else {
+            let usable = (kv.dim(1) / compressRate) * compressRate
+            kv = kv[0..., ..<usable, 0...]
+            gate = gate[0..., ..<usable, 0...]
+            firstWindowPosition = 0
+        }
+
+        var compressed: MLXArray
+        if kv.dim(1) > 0 {
+            let windows = kv.dim(1) / compressRate
+            kv = kv.reshaped(batch, windows, compressRate, -1)
+            gate = gate.reshaped(batch, windows, compressRate, -1) + ape.asType(gate.dtype)
+            compressed = (kv * softmax(gate.asType(.float32), axis: 2, precise: true).asType(kv.dtype))
+                .sum(axis: 2)
+            if compressed.dim(-1) > config.headDim {
+                compressed = compressed[.ellipsis, ..<config.headDim]
+            }
+            _ = deepseekCompressionPositions(
+                batch: batch,
+                windows: windows,
+                firstWindowPosition: firstWindowPosition,
+                rate: compressRate)
+            compressed = norm(compressed)
+        } else {
+            compressed = zeros([batch, 0, config.headDim], dtype: hiddenStates.dtype)
+        }
+
+        if let cache {
+            compressed = cache.updateCompressedState(name: "compressor", compressed: compressed)
+        }
+        let compressedKV = compressed[0..., .newAxis, 0..., 0...]
+        guard compressedKV.dim(2) > 0 else {
+            return (compressedKV, nil)
+        }
+
+        if layerType == .heavilyCompressed {
+            if sequenceLength == 1 {
+                return (compressedKV, nil)
+            }
+            let entryIndices = MLXArray(Int32(0) ..< Int32(compressedKV.dim(2)))
+            let cacheOffset = cache?.offset ?? 0
+            let positions = MLXArray(Int32(cacheOffset) ..< Int32(cacheOffset + sequenceLength))
+                .reshaped(1, sequenceLength)
+            let causalThreshold = (positions + 1).floorDivide(compressRate)
+            let future =
+                entryIndices.reshaped(1, 1, 1, -1) .>= causalThreshold[0..., .newAxis, 0..., .newAxis]
+            let bias = MLX.where(
+                future,
+                MLXArray(-1.0e9).asType(hiddenStates.dtype),
+                MLXArray(0.0).asType(hiddenStates.dtype)
+            )
+            return (compressedKV, bias)
+        }
+
+        guard let indexer else { return (compressedKV, nil) }
+        let indices = indexer(hiddenStates, qResidual: qResidual, cache: cache)
+        let compressedLength = compressedKV.dim(2)
+        let entryIndices = MLXArray(Int32(0) ..< Int32(compressedLength)).reshaped(1, 1, 1, -1)
+        let valid = indices .>= 0
+        let safeIndices = MLX.where(valid, indices, MLXArray(Int32(compressedLength)))
+        let hits = (safeIndices[0..., 0..., 0..., .newAxis] .== entryIndices).any(axis: -2)
+        let bias = MLX.where(
+            hits,
+            MLXArray(0.0).asType(hiddenStates.dtype),
+            MLXArray(-1.0e9).asType(hiddenStates.dtype)
+        )[0..., .newAxis, 0..., 0...]
+        return (compressedKV, bias)
+    }
+}
+
 class DeepseekV4Attention: Module {
     let config: DeepseekV4Configuration
+    let layerType: DeepseekV4Configuration.AttentionLayerType
     let numHeads: Int
     let headDim: Int
     let nopeHeadDim: Int
@@ -310,10 +827,12 @@ class DeepseekV4Attention: Module {
 
     // Attention sink bias (per head, no .weight suffix)
     // Stored via update(parameters:) using the key "attn_sink"
-    var attn_sink: MLXArray
+    @ParameterInfo(key: "attn_sink") var attn_sink: MLXArray
+    @ModuleInfo(key: "compressor") var compressor: DeepseekV4AttentionCompressor?
 
-    init(config: DeepseekV4Configuration) {
+    init(config: DeepseekV4Configuration, layerIndex: Int) {
         self.config = config
+        self.layerType = config.layerTypes[layerIndex]
         self.numHeads = config.numAttentionHeads
         self.headDim = config.headDim
         self.nopeHeadDim = config.nopeHeadDim
@@ -343,7 +862,12 @@ class DeepseekV4Attention: Module {
 
         // Attention sink: per-head bias [numAttentionHeads], applied to attention logits before softmax.
         // Shape matches numAttentionHeads (== qkRopeHeadDim in this architecture).
-        self.attn_sink = zeros([config.numAttentionHeads])
+        self._attn_sink.wrappedValue = zeros([config.numAttentionHeads])
+        if layerType != .sliding {
+            self._compressor.wrappedValue = DeepseekV4AttentionCompressor(
+                config: config,
+                layerType: layerType)
+        }
 
         // RoPE using compress_rope_theta (used for most layers with compress_ratio != 0)
         // We use a single rope config as a simplification
@@ -426,7 +950,8 @@ class DeepseekV4Attention: Module {
 
         // --- Query ---
         // Low-rank Q: wq_a -> q_norm -> wq_b
-        var q = wqB(qNorm(wqA(x)))  // [B, L, n_heads * head_dim]
+        let qResidual = qNorm(wqA(x))
+        var q = wqB(qResidual)  // [B, L, n_heads * head_dim]
         q = q.reshaped(B, L, numHeads, headDim)
             .transposed(0, 2, 1, 3)  // [B, n_heads, L, head_dim]
         // Per-head RMS normalization (no learnable scale)
@@ -450,6 +975,7 @@ class DeepseekV4Attention: Module {
         let kFull = concatenated([kvNope, kvRope], axis: -1)  // [B, 1, L, head_dim]
         // In reference k = v = kFull: both K and V have rope applied to their rope dims.
         // attentionWithCacheUpdate handles the KV cache update internally.
+        let deepseekCache = cache as? DeepseekV4KVCache
 
         // --- Attention ---
         // Pass kFull as both keys and values; cache update happens inside.
@@ -461,17 +987,57 @@ class DeepseekV4Attention: Module {
             attn_sink.sum().item(Float.self) != 0
             ? attn_sink.asType(queries.dtype)
             : nil
-        let output = deepseekAttentionWithSinks(
-            queries: queries,
-            keys: kFull,
-            values: kFull,
-            cache: cache,
-            scale: scale,
-            mask: mask,
-            sinks: sinksToUse
-        )
-        .transposed(0, 2, 1, 3)
-        .reshaped(B, L, numHeads, headDim)  // [B, L, n_heads, head_dim]
+        var output: MLXArray
+        if let compressor {
+            let (cachedKeys, cachedValues) =
+                cache?.update(keys: kFull, values: kFull) ?? (kFull, kFull)
+            let compressed = compressor(x, qResidual: qResidual, cache: deepseekCache)
+            let keys = concatenated([cachedKeys, compressed.kv.asType(cachedKeys.dtype)], axis: 2)
+            let values = concatenated([cachedValues, compressed.kv.asType(cachedValues.dtype)], axis: 2)
+            let compressedMask: MLXFast.ScaledDotProductAttentionMaskMode
+            if let bias = compressed.bias {
+                let localKeyLength = cachedKeys.dim(2)
+                let localMask =
+                    switch mask {
+                    case .array(let maskArray):
+                        maskArray
+                    default:
+                        createCausalMask(n: L, offset: max(localKeyLength - L, 0))
+                    }
+                let localMask4D =
+                    localMask.ndim == 2
+                    ? localMask[.newAxis, .newAxis, 0..., 0...]
+                    : localMask
+                let joinedMask = concatenated(
+                    [
+                        MLX.where(
+                            localMask4D,
+                            MLXArray(0.0).asType(queries.dtype),
+                            MLXArray(-1.0e9).asType(queries.dtype)),
+                        bias.asType(queries.dtype),
+                    ],
+                    axis: -1)
+                compressedMask = .array(joinedMask)
+            } else {
+                compressedMask = mask
+            }
+            output = MLXFast.scaledDotProductAttention(
+                queries: queries, keys: keys, values: values,
+                scale: scale, mask: compressedMask, sinks: sinksToUse)
+        } else {
+            output = deepseekAttentionWithSinks(
+                queries: queries,
+                keys: kFull,
+                values: kFull,
+                cache: cache,
+                scale: scale,
+                mask: mask,
+                sinks: sinksToUse
+            )
+        }
+        output = output
+            .transposed(0, 2, 1, 3)
+            .reshaped(B, L, numHeads, headDim)  // [B, L, n_heads, head_dim]
 
         // --- Grouped output projection ---
         let oLora = groupedOutputProjection(output)  // [B, L, oGroups * oLoraRank]
@@ -507,43 +1073,46 @@ class DeepseekV4Expert: Module, UnaryLayer {
     }
 }
 
-/// MoE routing gate with sqrtsoftplus (score-based routing only; hash routing not implemented).
+/// MoE routing gate with score-based routing or token-hash routing via tid2eid.
 class DeepseekV4Gate: Module {
     let topK: Int
     let nRoutedExperts: Int
     let routedScalingFactor: Float
     let normTopkProb: Bool
     let scoringFunc: String
+    let isHash: Bool
 
-    var weight: MLXArray  // [n_routed_experts, hidden_size]
-    var e_score_correction_bias: MLXArray  // [n_routed_experts]
+    @ParameterInfo(key: "weight") var weight: MLXArray  // [n_routed_experts, hidden_size]
+    @ParameterInfo(key: "e_score_correction_bias") var e_score_correction_bias: MLXArray  // [n_routed_experts]
+    @ParameterInfo(key: "tid2eid") var tid2eid: MLXArray  // [vocab_size, top_k]
 
-    init(config: DeepseekV4Configuration) {
+    init(config: DeepseekV4Configuration, isHash: Bool) {
         self.topK = config.numExpertsPerTok
         self.nRoutedExperts = config.nRoutedExperts
         self.routedScalingFactor = config.routedScalingFactor
         self.normTopkProb = config.normTopkProb
         self.scoringFunc = config.scoringFunc
-        self.weight = zeros([config.nRoutedExperts, config.hiddenSize])
-        self.e_score_correction_bias = zeros([config.nRoutedExperts])
+        self.isHash = isHash
+        self._weight.wrappedValue = zeros([config.nRoutedExperts, config.hiddenSize])
+        self._e_score_correction_bias.wrappedValue = zeros([config.nRoutedExperts])
+        self._tid2eid.wrappedValue = zeros([config.vocabSize, config.numExpertsPerTok], dtype: .int32)
     }
 
-    /// Allow hash-routing layers (0..numHashLayers-1) to load without e_score_correction_bias.
-    /// Those layers use tid2eid hash routing in the original code; we keep the zero default.
+    /// Hash-routing layers can load with only `tid2eid`; dense router weights are not required.
     override func updateMissing(
         parameter: String,
         verify: VerifyUpdate,
         path: [String],
         modulePath: [String]
     ) throws {
-        if parameter == "e_score_correction_bias" {
+        if parameter == "e_score_correction_bias" || (isHash && parameter == "weight") {
             return  // keep zero-initialized default
         }
         try super.updateMissing(
             parameter: parameter, verify: verify, path: path, modulePath: modulePath)
     }
 
-    func callAsFunction(_ x: MLXArray) -> (MLXArray, MLXArray) {
+    func callAsFunction(_ x: MLXArray, inputIds: MLXArray?) -> (MLXArray, MLXArray) {
         // Compute expert scores
         let logits = x.matmul(weight.T)  // [B, S, n_experts]
         var scores: MLXArray
@@ -557,11 +1126,15 @@ class DeepseekV4Gate: Module {
             scores = sqrtSoftplus(logits)
         }
 
-        // Bias-shifted scores for top-k selection (bias not applied to routing weights)
-        let scoresForChoice = scores + e_score_correction_bias
-
-        // Top-k selection
-        let inds = argPartition(-scoresForChoice, kth: topK - 1, axis: -1)[.ellipsis, ..<topK]
+        let inds: MLXArray
+        if isHash, let inputIds {
+            let routed = tid2eid[inputIds.asType(.int32)].asType(.int32)
+            inds = routed.dim(-1) > topK ? routed[.ellipsis, ..<topK] : routed
+        } else {
+            // Bias-shifted scores for top-k selection (bias not applied to routing weights)
+            let scoresForChoice = scores + e_score_correction_bias
+            inds = argPartition(-scoresForChoice, kth: topK - 1, axis: -1)[.ellipsis, ..<topK]
+        }
 
         // Gather weights using original (non-biased) scores
         var selectedScores = takeAlong(scores, inds, axis: -1)
@@ -584,7 +1157,7 @@ class DeepseekV4MoE: Module, UnaryLayer {
     var gate: DeepseekV4Gate
     @ModuleInfo(key: "shared_experts") var sharedExperts: DeepseekV4Expert
 
-    init(config: DeepseekV4Configuration) {
+    init(config: DeepseekV4Configuration, layerIndex: Int) {
         self.numExpertsPerTok = config.numExpertsPerTok
 
         // Routed experts (stacked via SwitchGLU, same as V3)
@@ -601,7 +1174,9 @@ class DeepseekV4MoE: Module, UnaryLayer {
                 return silu(x)
             }
         )
-        self.gate = DeepseekV4Gate(config: config)
+        self.gate = DeepseekV4Gate(
+            config: config,
+            isHash: config.mlpLayerTypes[layerIndex] == .hashMoE)
 
         // Shared expert (1 expert, same intermediate size)
         self._sharedExperts.wrappedValue = DeepseekV4Expert(
@@ -611,8 +1186,8 @@ class DeepseekV4MoE: Module, UnaryLayer {
         )
     }
 
-    func callAsFunction(_ x: MLXArray) -> MLXArray {
-        let (indices, scores) = gate(x)
+    func callAsFunction(_ x: MLXArray, inputIds: MLXArray?) -> MLXArray {
+        let (indices, scores) = gate(x, inputIds: inputIds)
         var y = switchMLP(x, indices)
         y = (y * scores[.ellipsis, .newAxis]).sum(axis: -2)
 
@@ -620,12 +1195,17 @@ class DeepseekV4MoE: Module, UnaryLayer {
         y = y + sharedExperts(x)
         return y
     }
+
+    func callAsFunction(_ x: MLXArray) -> MLXArray {
+        callAsFunction(x, inputIds: nil)
+    }
 }
 
 // MARK: - Decoder Block (with mHC Hyper-Connections)
 
 public class DeepseekV4Block: Module {
     let config: DeepseekV4Configuration
+    let layerIndex: Int
 
     // Key "attn" matches checkpoint path `layers.{l}.attn.*`
     @ModuleInfo(key: "attn") var selfAttn: DeepseekV4Attention
@@ -640,11 +1220,12 @@ public class DeepseekV4Block: Module {
     var hc_attn: HCParams
     var hc_ffn: HCParams
 
-    init(config: DeepseekV4Configuration) {
+    init(config: DeepseekV4Configuration, layerIndex: Int) {
         self.config = config
+        self.layerIndex = layerIndex
 
-        self._selfAttn.wrappedValue = DeepseekV4Attention(config: config)
-        self.ffn = DeepseekV4MoE(config: config)
+        self._selfAttn.wrappedValue = DeepseekV4Attention(config: config, layerIndex: layerIndex)
+        self.ffn = DeepseekV4MoE(config: config, layerIndex: layerIndex)
 
         self._attnNorm.wrappedValue = RMSNorm(
             dimensions: config.hiddenSize, eps: config.rmsNormEps)
@@ -667,6 +1248,7 @@ public class DeepseekV4Block: Module {
 
     func callAsFunction(
         _ x: MLXArray,
+        inputIds: MLXArray,
         mask: MLXFast.ScaledDotProductAttentionMaskMode,
         cache: KVCache?
     ) -> MLXArray {
@@ -702,7 +1284,7 @@ public class DeepseekV4Block: Module {
         )
 
         // FFN sublayer: [B,S,D] -> [B,S,D]
-        let ffnOut = ffn(ffnNorm(xFfn))
+        let ffnOut = ffn(ffnNorm(xFfn), inputIds: inputIds)
 
         // HC post for FFN: [B,S,D] -> [B,S,hc,D]
         return hcPost(x: ffnOut, residual: residualFfn, post: postFfn, comb: combFfn)
@@ -733,7 +1315,7 @@ public class DeepseekV4ModelInner: Module {
         let retainMTP = MTPConfig.retainMTPWeights && config.numNextnPredictLayers > 0
         let totalCount = config.numHiddenLayers - (retainMTP ? 0 : config.numNextnPredictLayers)
         self.layers = (0 ..< totalCount).map {
-            _ in DeepseekV4Block(config: config)
+            DeepseekV4Block(config: config, layerIndex: $0)
         }
         self._norm.wrappedValue = RMSNorm(dimensions: config.hiddenSize, eps: config.rmsNormEps)
 
@@ -764,7 +1346,7 @@ public class DeepseekV4ModelInner: Module {
         let attentionMask = createAttentionMask(h: hForMask, cache: cache?.first)
 
         for (i, layer) in layers.prefix(totalLayerCount).enumerated() {
-            h = layer(h, mask: attentionMask, cache: cache?[i])
+            h = layer(h, inputIds: x, mask: attentionMask, cache: cache?[i])
         }
 
         // HC head: [B, S, hc, D] -> [B, S, D]
@@ -795,6 +1377,9 @@ public class DeepseekV4Model: Module, LLMModel, KVCacheDimensionProvider, LoRAMo
 
     public func callAsFunction(_ inputs: MLXArray, cache: [KVCache]? = nil) -> MLXArray {
         let out = model(inputs, cache: cache)
+        if args.tieWordEmbeddings {
+            return model.embedTokens.asLinear(out)
+        }
         return lmHead(out)
     }
 
@@ -826,8 +1411,9 @@ public class DeepseekV4Model: Module, LLMModel, KVCacheDimensionProvider, LoRAMo
 
         // 2. Stack per-expert weights into SwitchGLU format (for non-pre-stacked checkpoints)
         // MLX quantized checkpoints already have stacked weights; this is a no-op for them.
-        let mainLayerCount = args.numHiddenLayers - args.numNextnPredictLayers
-        for l in 0 ..< mainLayerCount {
+        let instantiatedLayerCount = model.layers.count
+        let stackLayerCount = min(args.numHiddenLayers, instantiatedLayerCount)
+        for l in 0 ..< stackLayerCount {
             let prefix = "model.layers.\(l)"
             for projName in ["gate_proj", "down_proj", "up_proj"] {
                 for key in ["weight", "scales", "biases"] {
@@ -849,23 +1435,16 @@ public class DeepseekV4Model: Module, LLMModel, KVCacheDimensionProvider, LoRAMo
             }
         }
 
-        // 3. Filter out MTP (multi-token prediction) layers and rotary_emb keys
-        // Also drop compressor/indexer sub-module keys (not yet implemented)
-        let numMainLayers = args.numHiddenLayers - args.numNextnPredictLayers
+        // 3. Filter out MTP (multi-token prediction) layers and rotary_emb keys.
         var finalWeights = [String: MLXArray]()
         for (key, value) in newWeights {
             // Drop rotary embedding precomputed frequencies
             if key.contains("rotary_emb.inv_freq") { continue }
-            // Drop compressor/indexer sub-module weights
-            // TODO: implement DeepseekV4Compressor and DeepseekV4Indexer modules.
-            if key.contains(".attn.compressor.") || key.contains(".attn.indexer.") { continue }
-            // Drop gate.tid2eid
-            if key.contains(".ffn.gate.tid2eid") { continue }
 
             if key.starts(with: "model.layers.") {
                 let parts = key.split(separator: ".")
                 if parts.count >= 3, let layerIdx = Int(parts[2]) {
-                    if layerIdx >= numMainLayers && !MTPConfig.retainMTPWeights {
+                    if layerIdx >= instantiatedLayerCount {
                         continue
                     }
                 }
@@ -873,6 +1452,13 @@ public class DeepseekV4Model: Module, LLMModel, KVCacheDimensionProvider, LoRAMo
             finalWeights[key] = value
         }
         return finalWeights
+    }
+
+    public func newCache(parameters: GenerateParameters?) -> [KVCache] {
+        let mainLayerCount = args.numHiddenLayers - args.numNextnPredictLayers
+        return (0 ..< mainLayerCount).map {
+            DeepseekV4KVCache(layerType: args.layerTypes[$0], slidingWindow: args.slidingWindow)
+        }
     }
 
     public var loraLayers: [Module] {
@@ -898,7 +1484,8 @@ extension DeepseekV4Model: MTPLanguageModel {
         // Run the main model body (excludes MTP layers \u2014 DeepseekV4ModelInner only
         // instantiates `numMain` blocks, so this is the standard forward pass)
         let mainHidden = model(inputs, cache: cache)
-        let mainLogits = lmHead(mainHidden)
+        let mainLogits =
+            args.tieWordEmbeddings ? model.embedTokens.asLinear(mainHidden) : lmHead(mainHidden)
         var result = [mainLogits]
 
         // Chain MTP blocks stored in `model.mtpLayers`
@@ -915,14 +1502,16 @@ extension DeepseekV4Model: MTPLanguageModel {
             let hForMask = h.reshaped([B, S, hc * args.hiddenSize])
             let attentionMask = createAttentionMask(h: hForMask, cache: mtpCache?.first)
 
-            h = mtpLayer(h, mask: attentionMask, cache: mtpCache?.first)
+            h = mtpLayer(h, inputIds: inputs, mask: attentionMask, cache: mtpCache?.first)
 
             // Reduce back to [B, S, D]
             prevHidden = hcHead(
                 x: h, hcFn: model.hc_head.fn, hcScale: model.hc_head.scale,
                 hcBase: model.hc_head.base, eps: args.hcEps)
 
-            let mtpLogits = lmHead(model.norm(prevHidden))
+            let mtpHidden = model.norm(prevHidden)
+            let mtpLogits =
+                args.tieWordEmbeddings ? model.embedTokens.asLinear(mtpHidden) : lmHead(mtpHidden)
             result.append(mtpLogits)
         }
 
@@ -930,8 +1519,11 @@ extension DeepseekV4Model: MTPLanguageModel {
     }
 
     public func makeMTPCaches(parameters: GenerateParameters?) -> [[KVCache]] {
-        return (0 ..< args.numNextnPredictLayers).map { _ in
-            [KVCacheSimple()]
+        let mainLayerCount = args.numHiddenLayers - args.numNextnPredictLayers
+        return (0 ..< args.numNextnPredictLayers).map { index in
+            let layerIndex = mainLayerCount + index
+            let layerType = args.layerTypes[min(layerIndex, args.layerTypes.count - 1)]
+            return [DeepseekV4KVCache(layerType: layerType, slidingWindow: args.slidingWindow)]
         }
     }
 }

@@ -284,7 +284,12 @@ private class Gemma4Attention: Module {
             )
         } else {
             guard let kProj, let kNorm, let vNorm else {
-                fatalError("Gemma4 assistant layer \(layerIdx) requires shared KV state")
+                attentionState = nil
+                attentionOutput = MLXArray.zeros(
+                    [B, nHeads, L, effectiveHeadDim],
+                    dtype: x.dtype)
+                let output = attentionOutput.transposed(0, 2, 1, 3).reshaped(B, L, -1)
+                return (oProj(output), attentionState, activePositionOffset)
             }
             var k = kProj(x).reshaped(B, L, nKvHeads, effectiveHeadDim)
             k = kNorm(k)
@@ -689,6 +694,26 @@ extension Gemma4TextModel: LoRAModel {
 
 // MARK: - Assistant
 
+public enum Gemma4AssistantError: Error, LocalizedError, Equatable {
+    case requiresDualModelMTP
+    case incompatibleMainModel(String)
+    case missingMainHiddenState
+    case missingSharedKV(layerIndex: Int, layerType: String)
+
+    public var errorDescription: String? {
+        switch self {
+        case .requiresDualModelMTP:
+            "Gemma4 assistant is a draft-only MTP model and requires dual-model orchestration with a Gemma4TextModel verifier."
+        case .incompatibleMainModel(let type):
+            "Gemma4 assistant requires Gemma4TextModel as the verifier model, got \(type)."
+        case .missingMainHiddenState:
+            "Gemma4 assistant could not read the verifier hidden state after the main forward pass."
+        case .missingSharedKV(let layerIndex, let layerType):
+            "Gemma4 assistant layer \(layerIndex) (\(layerType)) requires committed KV state from the verifier model."
+        }
+    }
+}
+
 public class Gemma4AssistantModel: Module, LLMModel, DualModelMTP, KVCacheDimensionProvider,
     LoRAModel
 {
@@ -749,20 +774,46 @@ public class Gemma4AssistantModel: Module, LLMModel, DualModelMTP, KVCacheDimens
     }
 
     public func callAsFunction(_ inputs: MLXArray, cache: [KVCache]?) -> MLXArray {
-        fatalError("Gemma4AssistantModel requires callMTP(_:cache:mtpCaches:) with mainModelRef")
+        guard let mainModel = mainModelRef as? Gemma4TextModel else {
+            return MLXArray.zeros([inputs.dim(0), inputs.dim(1), 0])
+        }
+        return mainModel(inputs, cache: cache)
+    }
+
+    public func prepare(_ input: LMInput, cache: [KVCache], windowSize: Int?) throws -> PrepareResult {
+        guard let mainModel = mainModelRef as? Gemma4TextModel else {
+            throw Gemma4AssistantError.requiresDualModelMTP
+        }
+        return try mainModel.prepare(input, cache: cache, windowSize: windowSize)
+    }
+
+    public func validateMTPOrchestration(mainModel: any BaseLanguageModel) throws {
+        guard mainModel is Gemma4TextModel else {
+            throw Gemma4AssistantError.incompatibleMainModel(String(describing: type(of: mainModel)))
+        }
     }
 
     public func callMTP(_ inputs: MLXArray, cache: [KVCache]?, mtpCaches: [[KVCache]]?)
         -> [MLXArray]
     {
+        (try? callMTPChecked(inputs, cache: cache, mtpCaches: mtpCaches)) ?? []
+    }
+
+    public func callMTPChecked(_ inputs: MLXArray, cache: [KVCache]?, mtpCaches: [[KVCache]]?)
+        throws -> [MLXArray]
+    {
         guard let mainModel = mainModelRef as? Gemma4TextModel else {
-            fatalError("Gemma4AssistantModel currently requires Gemma4TextModel as mainModelRef")
+            if let mainModelRef {
+                throw Gemma4AssistantError.incompatibleMainModel(
+                    String(describing: type(of: mainModelRef)))
+            }
+            throw Gemma4AssistantError.requiresDualModelMTP
         }
 
         let posOffset = cache?.first?.ropeOffset ?? .scalar(0)
         let mainLogits = mainModel(inputs, cache: cache)
         guard let hBackbone = mainModel.lastHiddenState else {
-            fatalError("Gemma4AssistantModel could not read the main model hidden state")
+            throw Gemma4AssistantError.missingMainHiddenState
         }
 
         var logits = [mainLogits]
@@ -797,6 +848,11 @@ public class Gemma4AssistantModel: Module, LLMModel, DualModelMTP, KVCacheDimens
 
             for layer in model.layers {
                 let sharedKV = sharedKVState(for: layer.layerType, mainCache: cache)
+                guard sharedKV != nil else {
+                    throw Gemma4AssistantError.missingSharedKV(
+                        layerIndex: layer.layerIdx,
+                        layerType: layer.layerType)
+                }
                 let (out, _, _) = layer(
                     hAssistant,
                     mask: nil,

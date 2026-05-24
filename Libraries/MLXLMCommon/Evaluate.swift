@@ -1052,10 +1052,12 @@ public struct MTPTokenIterator: TokenIteratorProtocol {
     private var mtpLogits: [MLXArray]?
     private var pendingTokens = [Int]()
     private var pendingIndex = 0
+    private var runtimeError: Error?
 
     public var acceptedDraftTokens = 0
     public var totalDraftTokens = 0
     public var promptPrefillTime: TimeInterval = 0.0
+    public var lastRuntimeError: Error? { runtimeError }
 
     public init(
         input: LMInput,
@@ -1068,6 +1070,10 @@ public struct MTPTokenIterator: TokenIteratorProtocol {
         self.model = model
         self.cache = cache ?? model.newCache(parameters: parameters)
         self.mtpCaches = model.makeMTPCaches(parameters: parameters)
+
+        if let dualModel = model as? any DualModelMTP, let mainModel = dualModel.mainModelRef {
+            try dualModel.validateMTPOrchestration(mainModel: mainModel)
+        }
 
         guard canTrimPromptCache(self.cache) else {
             throw KVCacheError(message: "MTP speculative decoding requires trimmable KV caches.")
@@ -1116,6 +1122,8 @@ public struct MTPTokenIterator: TokenIteratorProtocol {
     }
 
     mutating func speculateRound() {
+        guard runtimeError == nil else { return }
+
         let remaining = maxTokens.map { $0 - tokenCount } ?? numMTPTokens
         let numDraft = Swift.min(remaining, numMTPTokens)
         guard numDraft > 0 else {
@@ -1138,7 +1146,14 @@ public struct MTPTokenIterator: TokenIteratorProtocol {
         }
 
         if draftTokens.isEmpty {
-            let mtpResult = model.callMTP(y.tokens[.newAxis], cache: cache, mtpCaches: mtpCaches)
+            let mtpResult: [MLXArray]
+            do {
+                mtpResult = try model.callMTPChecked(
+                    y.tokens[.newAxis], cache: cache, mtpCaches: mtpCaches)
+            } catch {
+                runtimeError = error
+                return
+            }
             guard !mtpResult.isEmpty else { return }
 
             var logits = mtpResult[0][0..., -1, 0...]
@@ -1167,8 +1182,14 @@ public struct MTPTokenIterator: TokenIteratorProtocol {
         let verifyInput = LMInput.Text(tokens: concatenated(verifyTokens))
         let verifyStart = verifyInput.tokens.dim(0) - (draftTokens.count + 1)
 
-        let mtpResult = model.callMTP(
-            verifyInput.tokens[.newAxis], cache: cache, mtpCaches: mtpCaches)
+        let mtpResult: [MLXArray]
+        do {
+            mtpResult = try model.callMTPChecked(
+                verifyInput.tokens[.newAxis], cache: cache, mtpCaches: mtpCaches)
+        } catch {
+            runtimeError = error
+            return
+        }
         guard !mtpResult.isEmpty else { return }
 
         let mainLogits = mtpResult[0]
@@ -1285,6 +1306,8 @@ public struct MTPTokenIterator: TokenIteratorProtocol {
     }
 
     mutating public func next() -> Int? {
+        guard runtimeError == nil else { return nil }
+
         if let maxTokens, tokenCount >= maxTokens {
             return nil
         }
@@ -1783,6 +1806,7 @@ public func generate(
     let iterator: any TokenIteratorProtocol
     if let mtpModel = draftModel as? DualModelMTP {
         mtpModel.mainModelRef = context.model
+        try mtpModel.validateMTPOrchestration(mainModel: context.model)
         iterator = try MTPTokenIterator(
             input: input,
             model: mtpModel,
