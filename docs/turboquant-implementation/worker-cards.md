@@ -2,7 +2,19 @@
 
 This file preserves the `mlx-swift-lm` worker scope from the cross-repo plan.
 
-## W4 - Typed errors and no fatal/zero
+Use the Pines [Worker Launch Schedule](/Users/mt/Programming/Schtack/pines/docs/turboquant-implementation/14-worker-launch-schedule.md) for execution order. For `mlx-swift-lm`, the executable order is:
+
+| Wave | Worker | Can run when |
+| --- | --- | --- |
+| Wave 0 | W4 typed errors/no zero/no fatal | immediately |
+| Wave 1 | W5 cache lifecycle | W4 product path behavior is safe enough to record state |
+| Wave 3 | W6 profile v2 and W22 quality outputs | contracts and evidence schemas are stable |
+| Wave 4 | W14A KV snapshot export/import | W5 lifecycle/runtime snapshot exists |
+| Wave 6 | W15A speculative verifier | rollback-safe compressed cache prerequisites exist |
+
+W4 is the first LM implementation branch. W14A and W15A may be designed earlier, but activation waits for their wave gates.
+
+## Wave 0 - W4 typed errors and no fatal/zero
 
 Branch: `tq/lm-typed-errors-no-zero`
 
@@ -28,7 +40,7 @@ Acceptance:
 - no product path fatal-errors;
 - Pines can catch typed error.
 
-## W5 - Cache lifecycle
+## Wave 1 - W5 cache lifecycle
 
 Branch: `tq/lm-cache-lifecycle`
 
@@ -58,7 +70,7 @@ Acceptance:
 - snapshot stable after expansion;
 - Pines can query lifecycle.
 
-## W6 - Profile schema v2
+## Wave 3 - W6 profile schema v2
 
 Branch: `tq/lm-profile-v2`
 
@@ -85,7 +97,7 @@ Acceptance:
 - profile mismatch disables TurboQuant safely;
 - every profile has test coverage.
 
-## W14A - LM KV snapshot export/import
+## Wave 4 - W14A LM KV snapshot export/import
 
 Branch: `tq/lm-kv-snapshots`
 
@@ -105,7 +117,7 @@ Acceptance:
 - valid snapshot restores;
 - invalid snapshot fails before use.
 
-## W15A - LM speculative verifier
+## Wave 6 - W15A LM speculative verifier
 
 Branch: `tq/lm-speculative`
 

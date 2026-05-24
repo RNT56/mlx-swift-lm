@@ -2,6 +2,8 @@
 
 W6 owns model profile schema v2. W22 owns quality gate output. Together they ensure TurboQuant activation is based on model structure and measured quality, not model names alone.
 
+Launch wave: Wave 3. Profile v2 and quality output become product-relevant once bridge integration and evidence schemas exist.
+
 ## W6 worker
 
 | Worker | Branch | Phase | Priority |

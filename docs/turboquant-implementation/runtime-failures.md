@@ -2,6 +2,8 @@
 
 W4 owns the P0 safety blocker: no product-path zero output and no product-path fatal on TurboQuant attention failure.
 
+Launch wave: Wave 0. This starts immediately and runs in parallel with MLX Swift W1 and Pines W7/W24.
+
 ## Worker
 
 | Worker | Branch | Phase | Priority |

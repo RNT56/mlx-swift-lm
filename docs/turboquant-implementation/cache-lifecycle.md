@@ -2,6 +2,8 @@
 
 W5 owns the compressed-cache lifecycle and runtime snapshot. Pines needs these facts to record RunDecision, calibrate memory, debug failures, and validate snapshots.
 
+Launch wave: Wave 1. Start after W4 has made product attention failure behavior safe enough for lifecycle state to be meaningful.
+
 ## Worker
 
 | Worker | Branch | Phase | Priority |

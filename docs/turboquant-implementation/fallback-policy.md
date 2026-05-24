@@ -2,6 +2,8 @@
 
 Fallbacks are correctness and memory contracts. A fallback may only run if it is semantically correct and budgeted by Pines admission.
 
+Launch wave: Wave 0/Wave 1. The policy contract is defined with W4/W5 and consumed by Pines W24/W8.
+
 ## Worker
 
 Fallback work is shared by:

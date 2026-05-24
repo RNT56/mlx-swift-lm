@@ -2,6 +2,8 @@
 
 This document covers the later LM work for compressed KV snapshot export/import and speculative target verification. Both are gated behind earlier safety, lifecycle, and evidence work.
 
+Launch waves: W14A snapshots are Wave 4; W15A speculative verifier is Wave 6. Earlier design is allowed behind disabled flags, but activation waits for lifecycle, evidence, and rollback gates.
+
 ## Snapshot worker
 
 | Worker | Branch | Phase | Priority |

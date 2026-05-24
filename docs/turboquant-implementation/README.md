@@ -8,6 +8,22 @@ Cross-repo release-train docs live in:
 /Users/mt/Programming/Schtack/pines/docs/turboquant-implementation
 ```
 
+The executable launch order is owned by:
+
+```text
+/Users/mt/Programming/Schtack/pines/docs/turboquant-implementation/14-worker-launch-schedule.md
+```
+
+For this repo, the launch order is:
+
+1. Wave 0: W4 runtime failures/no zero/no fatal.
+2. Wave 1: W5 cache lifecycle/runtime snapshot.
+3. Wave 3: W6 model profile v2 and W22 quality outputs.
+4. Wave 4: W14A KV snapshot export/import.
+5. Wave 6: W15A speculative verifier.
+
+W4 can start immediately in parallel with MLX Swift W1 and Pines W7/W24. W14A and W15A must not product-activate before lifecycle, evidence, and rollback prerequisites are proven.
+
 ## LM responsibilities
 
 `mlx-swift-lm` owns:
@@ -28,12 +44,12 @@ Cross-repo release-train docs live in:
 
 ## Required reading
 
-1. [Runtime Failures](runtime-failures.md)
-2. [Cache Lifecycle](cache-lifecycle.md)
-3. [Fallback Policy](fallback-policy.md)
-4. [Model Profile v2 and Quality](model-profile-v2-quality.md)
-5. [KV Snapshots and Speculative Verifier](kv-snapshots-speculative.md)
-6. [LM Worker Cards](worker-cards.md)
+1. [LM Worker Cards](worker-cards.md)
+2. [Runtime Failures](runtime-failures.md)
+3. [Cache Lifecycle](cache-lifecycle.md)
+4. [Fallback Policy](fallback-policy.md)
+5. [Model Profile v2 and Quality](model-profile-v2-quality.md)
+6. [KV Snapshots and Speculative Verifier](kv-snapshots-speculative.md)
 
 ## Non-negotiables
 
