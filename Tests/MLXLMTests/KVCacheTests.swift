@@ -255,6 +255,112 @@ extension MLXRuntimeSwiftTests {
             #expect(cache.attentionDiagnostics.rawFallbackAllocated == false)
         }
 
+        @Test func testThrowingAttentionWithCacheUpdateMatchesNonThrowingRawPath() throws {
+            let queries = MLXArray.ones([1, 1, 2, 8], dtype: .float32)
+            let keys = MLXArray.ones([1, 1, 2, 8], dtype: .float32)
+            let values = MLXArray.ones([1, 1, 2, 8], dtype: .float32) * 3.0
+
+            let throwingCache = KVCacheSimple()
+            let throwingResult = try attentionWithCacheUpdateReturningStateThrowing(
+                queries: queries,
+                keys: keys,
+                values: values,
+                cache: throwingCache,
+                scale: 1 / sqrt(Float(8)),
+                mask: .causal
+            )
+
+            let nonThrowingCache = KVCacheSimple()
+            let nonThrowingResult = attentionWithCacheUpdateReturningState(
+                queries: queries,
+                keys: keys,
+                values: values,
+                cache: nonThrowingCache,
+                scale: 1 / sqrt(Float(8)),
+                mask: .causal
+            )
+
+            #expect(throwingResult.output.shape == nonThrowingResult.output.shape)
+            #expect(
+                allClose(
+                    throwingResult.output,
+                    nonThrowingResult.output,
+                    rtol: 1e-5,
+                    atol: 1e-5
+                ).item(Bool.self)
+            )
+            guard case .raw = throwingResult.state else {
+                Issue.record("Expected raw attention state")
+                return
+            }
+        }
+
+        @Test func testTurboQuantPrefillRecordsLifecycleFallbackAndFootprint() throws {
+            guard TurboQuantKernelAvailability.current.supportsMetalPolarQJLAttention else {
+                return
+            }
+
+            let cache = TurboQuantKVCache(
+                preset: .turbo4v2,
+                groupSize: 64,
+                backend: .metalPolarQJL,
+                seed: 0xA17_0000_0000_0002,
+                valueBits: 4
+            )
+            let queries = MLXArray.ones([1, 4, 3, 64], dtype: .float32)
+            let keys = MLXArray.ones([1, 2, 3, 64], dtype: .float32)
+            let values = MLXArray.ones([1, 2, 3, 64], dtype: .float32)
+
+            _ = attentionWithCacheUpdateReturningState(
+                queries: queries,
+                keys: keys,
+                values: values,
+                cache: cache,
+                scale: 0.125,
+                mask: .causal
+            )
+
+            let compressed = try #require(cache.compressedState)
+            #expect(compressed.0.layout.logicalLength == 3)
+            #expect(cache.fallbackResults.last?.toPath == .baseline)
+            #expect(cache.fallbackResults.last?.policy == .exactRequired)
+            #expect(cache.fallbackResults.last?.isSemanticallyExact == true)
+            if case .compressedCommitted(let logicalLength, let capacity) = cache.cacheLifecycle {
+                #expect(logicalLength == 3)
+                #expect(capacity >= 3)
+            } else {
+                Issue.record("Expected compressed committed lifecycle")
+            }
+            #expect(cache.cacheFootprint.compressedBytes > 0)
+            #expect(cache.cacheFootprint.rawShadowBytes == 0)
+            #expect(cache.diagnostics.footprint?.compressedBytes == cache.cacheFootprint.compressedBytes)
+            #expect(turboQuantAggregateCacheFootprint([cache]).compressedBytes > 0)
+        }
+
+        @Test func testTurboQuantDecodedFallbackReportsTransientFootprint() throws {
+            guard TurboQuantKernelAvailability.current.supportsMetalPolarQJLAttention else {
+                return
+            }
+
+            let cache = TurboQuantKVCache(backend: .metalPolarQJL)
+            let keys = MLXArray.ones([1, 2, 2, 64], dtype: .float32)
+            let values = MLXArray.ones([1, 2, 2, 64], dtype: .float32)
+            _ = try cache.updateCompressed(keys: keys, values: values)
+
+            let decoded = try cache.decodedCompressedState(outputDType: .float32)
+            #expect(cache.cacheFootprint.decodedTransientBytes == decoded.0.nbytes + decoded.1.nbytes)
+            if case .decodeCompressed = cache.cacheLifecycle {
+            } else {
+                Issue.record("Expected decode-compressed lifecycle")
+            }
+
+            _ = try cache.updateCompressed(
+                keys: MLXArray.ones([1, 2, 1, 64], dtype: .float32),
+                values: MLXArray.ones([1, 2, 1, 64], dtype: .float32)
+            )
+            #expect(cache.cacheFootprint.decodedTransientBytes == 0)
+        }
+
         @Test func testTurboQuantMemoryPolicyUsesCompressedInitialPrefillWhenAvailable() throws {
             guard TurboQuantKernelAvailability.current.supportsMetalPolarQJLAttention else {
                 return
@@ -392,6 +498,44 @@ extension MLXRuntimeSwiftTests {
             #expect(
                 cache.attentionDiagnostics.lastUnsupportedShape?
                     .contains("compressed attention failed") == true)
+        }
+
+        @Test func testThrowingTurboQuantCompressedCacheUpdateRollsBackOnFailure() throws {
+            guard TurboQuantKernelAvailability.current.supportsMetalPolarQJLAttention else {
+                return
+            }
+
+            enum TestFailure: Error {
+                case forced
+            }
+
+            let cache = TurboQuantKVCache(backend: .metalPolarQJL)
+            let queries = MLXArray.ones([1, 2, 1, 64], dtype: .float32)
+            let keys = MLXArray.ones([1, 2, 2, 64], dtype: .float32)
+            let values = MLXArray.ones([1, 2, 2, 64], dtype: .float32)
+
+            do {
+                _ = try withTurboQuantCompressedCacheUpdateThrowing(
+                    queries: queries,
+                    keys: keys,
+                    values: values,
+                    cache: cache,
+                    mask: .none
+                ) { _, _, _ in
+                    throw TestFailure.forced
+                }
+                Issue.record("Expected forced compressed update failure")
+            } catch {
+                #expect(String(describing: error).contains("forced"))
+            }
+
+            #expect(cache.offset == 0)
+            #expect(cache.state.isEmpty)
+            #expect(cache.compressedState == nil)
+            if case .failed = cache.cacheLifecycle {
+            } else {
+                Issue.record("Expected failed lifecycle after forced compressed update failure")
+            }
         }
 
         @Test func testTurboQuantOptimizationPolicyPropagatesToPromptCaches() throws {
