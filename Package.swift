@@ -34,11 +34,14 @@ let package = Package(
         .library(
             name: "IntegrationTestHelpers",
             targets: ["IntegrationTestHelpers"]),
+        .executable(
+            name: "TurboQuantModelBenchmark",
+            targets: ["TurboQuantModelBenchmark"]),
     ],
     dependencies: [
         .package(
             url: "https://github.com/RNT56/mlx-swift",
-            revision: "c88d18c62b699927602b0eff76648d846fca297d"),
+            revision: "09cbbbe16e270753be3679383c928dc60359ea76"),
         .package(url: "https://github.com/swiftlang/swift-syntax.git", "600.0.0" ..< "604.0.0"),
     ],
     targets: [
@@ -114,6 +117,14 @@ let package = Package(
             ],
             path: "Libraries/IntegrationTestHelpers",
             exclude: ["README.md"]
+        ),
+        .executableTarget(
+            name: "TurboQuantModelBenchmark",
+            dependencies: [
+                "MLXLMCommon",
+                .product(name: "MLX", package: "mlx-swift"),
+            ],
+            path: "tools/TurboQuantModelBenchmark"
         ),
         .testTarget(
             name: "MLXLMTests",

@@ -3,6 +3,17 @@ import MLX
 
 public typealias QuantizedKVStorage = (MLXArray, MLXArray, MLXArray?)
 
+private enum TurboQuantAttentionStateError: Error, CustomStringConvertible {
+    case compressedAttentionUnavailable(String)
+
+    var description: String {
+        switch self {
+        case .compressedAttentionUnavailable(let message):
+            "TurboQuant compressed attention unavailable: \(message)"
+        }
+    }
+}
+
 /// Cached attention state that can be passed between model layers without assuming raw KV arrays.
 public enum AttentionKVState {
     case raw(keys: MLXArray, values: MLXArray)
@@ -265,13 +276,13 @@ private func turboQuantCompressedPrefillAttention(
     }
 }
 
-public func attentionWithKVState(
+public func attentionWithKVStateThrowing(
     queries: MLXArray,
     state: AttentionKVState,
     scale: Float,
     mask: MLXFast.ScaledDotProductAttentionMaskMode = .none,
     sinks: MLXArray? = nil
-) -> MLXArray {
+) throws -> MLXArray {
     switch state {
     case .raw(let keys, let values):
         return MLXFast.scaledDotProductAttention(
@@ -333,10 +344,40 @@ public func attentionWithKVState(
                     sinks: sinks
                 )
             }
-            fatalError(
-                "TurboQuant compressed attention failed and compressed state could not be decoded: \(error)"
+            throw TurboQuantAttentionStateError.compressedAttentionUnavailable(
+                "compressed attention failed and compressed state could not be decoded: \(error)"
             )
         }
+    }
+}
+
+public func attentionWithKVState(
+    queries: MLXArray,
+    state: AttentionKVState,
+    scale: Float,
+    mask: MLXFast.ScaledDotProductAttentionMaskMode = .none,
+    sinks: MLXArray? = nil
+) -> MLXArray {
+    do {
+        return try attentionWithKVStateThrowing(
+            queries: queries,
+            state: state,
+            scale: scale,
+            mask: mask,
+            sinks: sinks
+        )
+    } catch {
+        if case .turboQuant(_, let values, let cache) = state {
+            cache.recordCompressedAttentionFailure(String(describing: error))
+            if ProcessInfo.processInfo.environment["TURBOQUANT_FATAL_FALLBACK"] == "1" {
+                fatalError(String(describing: error))
+            }
+            return MLXArray.zeros(
+                [queries.dim(0), queries.dim(1), queries.dim(2), values.layout.headDimension],
+                dtype: queries.dtype
+            )
+        }
+        fatalError(String(describing: error))
     }
 }
 

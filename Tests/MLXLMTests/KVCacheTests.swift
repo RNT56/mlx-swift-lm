@@ -865,6 +865,53 @@ extension MLXRuntimeSwiftTests {
             #expect(means[3] - means[2] > 4)
         }
 
+        @Test func testTurboQuantCompressedCacheExpansionGrowsValueBitsets() throws {
+            guard TurboQuantKernelAvailability.current.supportsMetalPolarQJLAttention else {
+                return
+            }
+
+            let cache = TurboQuantKVCache(backend: .metalPolarQJL)
+            let firstTokenCount = 255
+            let secondTokenCount = 3
+            let firstKeys = MLXArray.ones([1, 2, firstTokenCount, 64], dtype: .float32)
+            let firstValues = firstKeys + 0.25
+            let secondKeys = MLXArray.ones([1, 2, secondTokenCount, 64], dtype: .float32) * 2.0
+            let secondValues = secondKeys + 0.25
+
+            _ = try cache.updateCompressed(keys: firstKeys, values: firstValues)
+            let beforeExpansion = try #require(cache.compressedState)
+            #expect(beforeExpansion.0.layout.capacity == 256)
+            #expect(beforeExpansion.1.signs.dim(2) == 256)
+
+            _ = try cache.updateCompressed(keys: secondKeys, values: secondValues)
+            let expanded = try #require(cache.compressedState)
+            #expect(expanded.0.layout.logicalLength == firstTokenCount + secondTokenCount)
+            #expect(expanded.0.layout.capacity == 512)
+            #expect(expanded.1.layout.capacity == 512)
+            #expect(expanded.1.packedMagnitudes.dim(2) == 512)
+            #expect(expanded.1.signs.dim(2) == 512)
+            #expect(expanded.1.highPrecisionMask.dim(2) == 512)
+            #expect(expanded.1.residualSigns.dim(2) == 512)
+            #expect(expanded.1.scales.dim(2) == 512)
+
+            let decodedValues = try turboQuantMetalDecodeAttention(
+                expanded.1,
+                outputDType: .float32
+            )
+            #expect(decodedValues.shape == [1, 2, firstTokenCount + secondTokenCount, 64])
+
+            let restored = TurboQuantKVCache(backend: .metalPolarQJL)
+            restored.metaState = cache.metaState
+            restored.state = cache.state
+            let restoredCompressed = try #require(restored.compressedState)
+            #expect(restoredCompressed.1.signs.dim(2) == 512)
+            let restoredValues = try turboQuantMetalDecodeAttention(
+                restoredCompressed.1,
+                outputDType: .float32
+            )
+            #expect(restoredValues.shape == decodedValues.shape)
+        }
+
         // MARK: - MambaCache type preservation
 
         @Test func testMambaCacheRoundTrip() throws {

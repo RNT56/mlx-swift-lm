@@ -615,7 +615,7 @@ public struct TokenIterator: TokenIteratorProtocol {
     /// Initialize a `TokenIterator` with the given input.
     ///
     /// If more control is needed over the generation,
-    /// ``init(input:model:cache:processor:sampler:prefillStepSize:maxTokens:)``
+    /// ``init(input:model:cache:processor:sampler:prefillStepSize:maxTokens:cacheParameters:)``
     /// allows a caller to specify ``LogitProcessor`` and ``LogitSampler``
     /// directly.
     ///

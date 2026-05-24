@@ -108,6 +108,19 @@ Measured fields such as perplexity delta, token throughput, and memory footprint
 remain optional and should stay empty until reproduced on the target hardware and
 model revision.
 
+Use the benchmark entrypoints to generate profile evidence:
+
+```sh
+swift run TurboQuantBenchmark --iterations 25
+swift run TurboQuantModelBenchmark --iterations 25
+```
+
+The core benchmark records kernel-level decode, matmul, QK/AV, and fused-attention
+behavior. The model benchmark records compressed prefill, decode attention, and
+rotating-cache growth. Promote bundled profile fields from pending to measured
+only when the JSON includes the model revision, device, OS, latency, memory, and
+quality data needed to reproduce the decision.
+
 ## Converted Weights
 
 TurboQuant profile selection is independent of converted model weights. For

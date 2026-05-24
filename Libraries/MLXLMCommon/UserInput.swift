@@ -208,6 +208,7 @@ public struct UserInput {
     ///   - prompt: text prompt
     ///   - images: optional images
     ///   - videos: optional videos
+    ///   - audio: optional audio
     ///   - tools: optional tool specifications
     ///   - additionalContext: optional context (model specific)
     /// ### See Also
@@ -258,6 +259,7 @@ public struct UserInput {
     ///   - messages: array of dictionaries representing the prompt in a model specific format
     ///   - images: optional images
     ///   - videos: optional videos
+    ///   - audio: optional audio
     ///   - tools: optional tool specifications
     ///   - additionalContext: optional context (model specific)
     /// ### See Also
@@ -332,6 +334,7 @@ public struct UserInput {
     ///   - prompt: the prompt
     ///   - images: optional images
     ///   - videos: optional videos
+    ///   - audio: optional audio
     ///   - tools: optional tool specifications
     ///   - processing: optional processing to be applied to media
     ///   - additionalContext: optional context (model specific)
