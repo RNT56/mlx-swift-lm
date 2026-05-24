@@ -3,13 +3,16 @@ import MLX
 
 public typealias QuantizedKVStorage = (MLXArray, MLXArray, MLXArray?)
 
-private enum TurboQuantAttentionStateError: Error, CustomStringConvertible {
+public enum TurboQuantAttentionStateError: Error, CustomStringConvertible, Equatable {
     case compressedAttentionUnavailable(String)
+    case noSemanticallyCorrectFallback(String)
 
-    var description: String {
+    public var description: String {
         switch self {
         case .compressedAttentionUnavailable(let message):
             "TurboQuant compressed attention unavailable: \(message)"
+        case .noSemanticallyCorrectFallback(let message):
+            "TurboQuant attention has no semantically correct fallback: \(message)"
         }
     }
 }
@@ -77,7 +80,7 @@ public func adjustedAttentionMask(
     }
 }
 
-public func withTurboQuantCompressedCacheUpdate<T>(
+public func withTurboQuantCompressedCacheUpdateThrowing<T>(
     queries: MLXArray,
     keys: MLXArray,
     values: MLXArray,
@@ -87,7 +90,7 @@ public func withTurboQuantCompressedCacheUpdate<T>(
         TurboQuantAttentionCode, TurboQuantAttentionCode, any TurboQuantCompressedKVCacheProtocol
     )
         throws -> T
-) -> T? {
+) throws -> T? {
     guard var turboQuantCache = cache as? TurboQuantCompressedKVCacheProtocol,
         turboQuantCache.supportsCompressedAttention(
             queries: queries,
@@ -114,10 +117,48 @@ public func withTurboQuantCompressedCacheUpdate<T>(
             keys: keys,
             values: values
         )
+        try turboQuantCache.validateCompressedState(context: "compressed cache update")
         return try body(compressedKeys, compressedValues, turboQuantCache)
     } catch {
         restorePreviousState()
         turboQuantCache.recordCompressedAttentionFailure(String(describing: error))
+        throw error
+    }
+}
+
+public func withTurboQuantCompressedCacheUpdate<T>(
+    queries: MLXArray,
+    keys: MLXArray,
+    values: MLXArray,
+    cache: KVCache?,
+    mask: MLXFast.ScaledDotProductAttentionMaskMode,
+    _ body: (
+        TurboQuantAttentionCode, TurboQuantAttentionCode, any TurboQuantCompressedKVCacheProtocol
+    )
+        throws -> T
+) -> T? {
+    do {
+        return try withTurboQuantCompressedCacheUpdateThrowing(
+            queries: queries,
+            keys: keys,
+            values: values,
+            cache: cache,
+            mask: mask,
+            body
+        )
+    } catch {
+        if let turboQuantCache = cache as? TurboQuantCompressedKVCacheProtocol {
+            let reason = "compressed attention failed: \(String(describing: error))"
+            turboQuantCache.recordFallback(
+                TurboQuantFallbackResult(
+                    fromPath: turboQuantCache.attentionDiagnostics.activeAttentionPath,
+                    toPath: nil,
+                    policy: .fatalOnFailure,
+                    reason: reason,
+                    isSemanticallyExact: false
+                )
+            )
+        }
         return nil
     }
 }
@@ -148,6 +189,196 @@ func packedQuantizedAttentionFallback(
     )
 }
 
+private func recordTurboQuantFallback(
+    cache: any TurboQuantCompressedKVCacheProtocol,
+    path: TurboQuantFallbackPath,
+    reason: String
+) {
+    let toPath: TurboQuantAttentionPath? =
+        switch path {
+        case .onlineFusedCompressed:
+            .onlineFused
+        case .tiledOnlineFused:
+            .tiledOnlineFused
+        case .twoStageQKAV:
+            .twoStageCompressed
+        case .packedQuantizedSDPA:
+            .mlxPackedFallback
+        case .decodedCompressedSDPA, .rawExactSDPA:
+            .baseline
+        case .typedFailure:
+            nil
+        }
+    let policy: TurboQuantFallbackPolicy =
+        switch path {
+        case .packedQuantizedSDPA:
+            .packedAllowed
+        case .decodedCompressedSDPA:
+            .compressedDecodeAllowed
+        case .rawExactSDPA, .onlineFusedCompressed, .tiledOnlineFused, .twoStageQKAV:
+            .exactRequired
+        case .typedFailure:
+            .fatalOnFailure
+        }
+    cache.recordFallback(
+        TurboQuantFallbackResult(
+            fromPath: cache.attentionDiagnostics.activeAttentionPath,
+            toPath: toPath,
+            policy: policy,
+            reason: reason,
+            isSemanticallyExact: path == .rawExactSDPA || path == .decodedCompressedSDPA
+        )
+    )
+}
+
+private func exactScaledDotProductAttention(
+    queries: MLXArray,
+    keys: MLXArray,
+    values: MLXArray,
+    scale: Float,
+    mask: MLXFast.ScaledDotProductAttentionMaskMode,
+    sinks: MLXArray?
+) -> MLXArray {
+    MLXFast.scaledDotProductAttention(
+        queries: queries,
+        keys: keys,
+        values: values,
+        scale: scale,
+        mask: mask,
+        sinks: sinks
+    )
+}
+
+private func turboQuantAttentionFallbackLadder(
+    queries: MLXArray,
+    keyCode: TurboQuantAttentionCode,
+    valueCode: TurboQuantAttentionCode,
+    cache: any TurboQuantCompressedKVCacheProtocol,
+    scale: Float,
+    mask: MLXFast.ScaledDotProductAttentionMaskMode,
+    sinks: MLXArray?,
+    rawExactKeys: MLXArray? = nil,
+    rawExactValues: MLXArray? = nil,
+    rawExactReason: String? = nil
+) throws -> MLXArray {
+    let adjustedMask = adjustedAttentionMask(
+        mask,
+        keyLength: keyCode.layout.logicalLength
+    )
+    try cache.validateCompressedState(context: "attention fallback ladder")
+
+    var failures: [String] = []
+    let canUseOnline =
+        sinks == nil && cache.prefersOnlineFusedAttention
+        && keyCode.layout.headDimension == valueCode.layout.headDimension
+        && MLX.turboQuantMetalSupportsOnlineFusedAttention(
+            queries: queries,
+            keyCode: keyCode,
+            mask: adjustedMask
+        )
+
+    if canUseOnline {
+        do {
+            return try turboQuantMetalScaledDotProductAttention(
+                queries: queries,
+                keyCode: keyCode,
+                valueCode: valueCode,
+                scale: scale,
+                mask: adjustedMask,
+                sinks: sinks,
+                preferOnlineFused: true,
+                kernelProfile: cache.attentionDiagnostics.selectedKernelProfile
+            )
+        } catch {
+            let reason = "online fused compressed attention failed: \(error)"
+            failures.append(reason)
+        }
+    } else {
+        failures.append("online fused compressed attention unsupported for this query/cache/mask")
+    }
+
+    do {
+        let output = try turboQuantMetalScaledDotProductAttention(
+            queries: queries,
+            keyCode: keyCode,
+            valueCode: valueCode,
+            scale: scale,
+            mask: adjustedMask,
+            sinks: sinks,
+            preferOnlineFused: false,
+            kernelProfile: cache.attentionDiagnostics.selectedKernelProfile
+        )
+        if !failures.isEmpty {
+            recordTurboQuantFallback(
+                cache: cache,
+                path: .twoStageQKAV,
+                reason: failures.joined(separator: "; ")
+            )
+        }
+        return output
+    } catch {
+        let reason = "two-stage compressed QK/AV attention failed: \(error)"
+        failures.append(reason)
+    }
+
+    if let output = packedQuantizedAttentionFallback(
+        queries: queries,
+        cache: cache,
+        scale: scale,
+        mask: adjustedMask,
+        sinks: sinks
+    ) {
+        recordTurboQuantFallback(
+            cache: cache,
+            path: .packedQuantizedSDPA,
+            reason: failures.joined(separator: "; ")
+        )
+        return output
+    }
+    failures.append("packed quantized SDPA fallback unavailable")
+
+    do {
+        let (decodedKeys, decodedValues) = try cache.decodedCompressedState(outputDType: queries.dtype)
+        let output = exactScaledDotProductAttention(
+            queries: queries,
+            keys: decodedKeys,
+            values: decodedValues,
+            scale: scale,
+            mask: adjustedMask,
+            sinks: sinks
+        )
+        recordTurboQuantFallback(
+            cache: cache,
+            path: .decodedCompressedSDPA,
+            reason: failures.joined(separator: "; ")
+        )
+        return output
+    } catch {
+        failures.append("decode compressed K/V fallback failed: \(error)")
+    }
+
+    if let rawExactKeys, let rawExactValues {
+        let output = exactScaledDotProductAttention(
+            queries: queries,
+            keys: rawExactKeys,
+            values: rawExactValues,
+            scale: scale,
+            mask: mask,
+            sinks: sinks
+        )
+        recordTurboQuantFallback(
+            cache: cache,
+            path: .rawExactSDPA,
+            reason: rawExactReason ?? failures.joined(separator: "; ")
+        )
+        return output
+    }
+
+    let reason = failures.joined(separator: "; ")
+    recordTurboQuantFallback(cache: cache, path: .typedFailure, reason: reason)
+    throw TurboQuantAttentionStateError.compressedAttentionUnavailable(reason)
+}
+
 private func turboQuantAttentionStorageArrays(_ code: TurboQuantAttentionCode) -> [MLXArray] {
     [
         code.packedMagnitudes,
@@ -160,13 +391,18 @@ private func turboQuantAttentionStorageArrays(_ code: TurboQuantAttentionCode) -
 
 private func asyncEvalTurboQuantAttentionStorage(
     keys: TurboQuantAttentionCode,
-    values: TurboQuantAttentionCode
+    values: TurboQuantAttentionCode,
+    output: MLXArray? = nil
 ) {
-    asyncEval(turboQuantAttentionStorageArrays(keys) + turboQuantAttentionStorageArrays(values))
+    var arrays = turboQuantAttentionStorageArrays(keys) + turboQuantAttentionStorageArrays(values)
+    if let output {
+        arrays.append(output)
+    }
+    asyncEval(arrays)
 }
 
 /// Install compressed KV during prefill while honoring the cache optimization policy.
-private func turboQuantCompressedPrefillAttention(
+private func turboQuantCompressedPrefillAttentionThrowing(
     queries: MLXArray,
     keys: MLXArray,
     values: MLXArray,
@@ -174,7 +410,7 @@ private func turboQuantCompressedPrefillAttention(
     scale: Float,
     mask: MLXFast.ScaledDotProductAttentionMaskMode,
     sinks: MLXArray?
-) -> (output: MLXArray, state: AttentionKVState)? {
+) throws -> (output: MLXArray, state: AttentionKVState)? {
     guard queries.dim(2) > 1, queries.dim(2) == keys.dim(2) else {
         return nil
     }
@@ -204,6 +440,7 @@ private func turboQuantCompressedPrefillAttention(
             keys: keys,
             values: values
         )
+        try turboQuantCache.validateCompressedState(context: "compressed prefill append")
         let state = AttentionKVState.turboQuant(
             keys: compressedKeys,
             values: compressedValues,
@@ -213,67 +450,68 @@ private func turboQuantCompressedPrefillAttention(
         if previousOffset == 0, turboQuantCache.prefersExactInitialPrefill {
             // The exact raw prefill output does not consume the compressed writes, so
             // schedule them explicitly to avoid carrying raw prompt tensors into decode.
-            asyncEvalTurboQuantAttentionStorage(keys: compressedKeys, values: compressedValues)
+            let output = exactScaledDotProductAttention(
+                queries: queries,
+                keys: keys,
+                values: values,
+                scale: scale,
+                mask: mask,
+                sinks: sinks
+            )
+            asyncEvalTurboQuantAttentionStorage(
+                keys: compressedKeys,
+                values: compressedValues,
+                output: output
+            )
+            recordTurboQuantFallback(
+                cache: turboQuantCache,
+                path: .rawExactSDPA,
+                reason: "preserving exact initial prefill logits while committing compressed cache"
+            )
             return (
-                MLXFast.scaledDotProductAttention(
-                    queries: queries,
-                    keys: keys,
-                    values: values,
-                    scale: scale,
-                    mask: mask,
-                    sinks: sinks
-                ),
+                output,
                 state
             )
         }
 
-        if let output = try? turboQuantMetalScaledDotProductAttention(
+        let output = try turboQuantAttentionFallbackLadder(
             queries: queries,
             keyCode: compressedKeys,
             valueCode: compressedValues,
+            cache: turboQuantCache,
             scale: scale,
-            mask: adjustedAttentionMask(
-                mask,
-                keyLength: compressedKeys.layout.logicalLength
-            ),
+            mask: mask,
             sinks: sinks,
-            preferOnlineFused: turboQuantCache.prefersOnlineFusedAttention,
-            kernelProfile: turboQuantCache.attentionDiagnostics.selectedKernelProfile
-        ) {
-            return (output, state)
-        }
-
-        if let decodedKeys = try? turboQuantMetalDecodeAttention(
-            compressedKeys, outputDType: queries.dtype),
-            let decodedValues = try? turboQuantMetalDecodeAttention(
-                compressedValues, outputDType: queries.dtype)
-        {
-            return (
-                MLXFast.scaledDotProductAttention(
-                    queries: queries,
-                    keys: decodedKeys,
-                    values: decodedValues,
-                    scale: scale,
-                    mask: adjustedAttentionMask(
-                        mask,
-                        keyLength: compressedKeys.layout.logicalLength
-                    ),
-                    sinks: sinks
-                ),
-                state
-            )
-        }
-
-        restorePreviousState()
-        turboQuantCache.recordCompressedAttentionFailure(
-            "TurboQuant compressed prefill produced no runnable attention path"
+            rawExactKeys: keys,
+            rawExactValues: values,
+            rawExactReason: "compressed prefill failed; using exact raw chunk output"
         )
-        return nil
+        return (output, state)
     } catch {
         restorePreviousState()
         turboQuantCache.recordCompressedAttentionFailure(String(describing: error))
-        return nil
+        throw error
     }
+}
+
+private func turboQuantCompressedPrefillAttention(
+    queries: MLXArray,
+    keys: MLXArray,
+    values: MLXArray,
+    cache: KVCache?,
+    scale: Float,
+    mask: MLXFast.ScaledDotProductAttentionMaskMode,
+    sinks: MLXArray?
+) -> (output: MLXArray, state: AttentionKVState)? {
+    try? turboQuantCompressedPrefillAttentionThrowing(
+        queries: queries,
+        keys: keys,
+        values: values,
+        cache: cache,
+        scale: scale,
+        mask: mask,
+        sinks: sinks
+    )
 }
 
 public func attentionWithKVStateThrowing(
@@ -309,41 +547,17 @@ public func attentionWithKVStateThrowing(
 
     case .turboQuant(let keys, let values, let cache):
         do {
-            return try turboQuantMetalScaledDotProductAttention(
+            return try turboQuantAttentionFallbackLadder(
                 queries: queries,
                 keyCode: keys,
                 valueCode: values,
-                scale: scale,
-                mask: mask,
-                sinks: sinks,
-                preferOnlineFused: cache.prefersOnlineFusedAttention,
-                kernelProfile: cache.attentionDiagnostics.selectedKernelProfile
-            )
-        } catch {
-            cache.recordCompressedAttentionFailure(String(describing: error))
-            if let output = packedQuantizedAttentionFallback(
-                queries: queries,
                 cache: cache,
                 scale: scale,
                 mask: mask,
                 sinks: sinks
-            ) {
-                return output
-            }
-            if let decodedKeys = try? turboQuantMetalDecodeAttention(
-                keys, outputDType: queries.dtype),
-                let decodedValues = try? turboQuantMetalDecodeAttention(
-                    values, outputDType: queries.dtype)
-            {
-                return MLXFast.scaledDotProductAttention(
-                    queries: queries,
-                    keys: decodedKeys,
-                    values: decodedValues,
-                    scale: scale,
-                    mask: mask,
-                    sinks: sinks
-                )
-            }
+            )
+        } catch {
+            cache.recordCompressedAttentionFailure(String(describing: error))
             throw TurboQuantAttentionStateError.compressedAttentionUnavailable(
                 "compressed attention failed and compressed state could not be decoded: \(error)"
             )
@@ -430,7 +644,7 @@ public func attentionWithCacheUpdate(
     ).output
 }
 
-public func attentionWithCacheUpdateReturningState(
+public func attentionWithCacheUpdateReturningStateThrowing(
     queries: MLXArray,
     keys: MLXArray,
     values: MLXArray,
@@ -438,11 +652,11 @@ public func attentionWithCacheUpdateReturningState(
     scale: Float,
     mask: MLXFast.ScaledDotProductAttentionMaskMode = .none,
     sinks: MLXArray? = nil
-) -> (output: MLXArray, state: AttentionKVState) {
+) throws -> (output: MLXArray, state: AttentionKVState) {
     guard let cache else {
         let state = AttentionKVState.raw(keys: keys, values: values)
         return (
-            attentionWithKVState(
+            try attentionWithKVStateThrowing(
                 queries: queries,
                 state: state,
                 scale: scale,
@@ -452,7 +666,7 @@ public func attentionWithCacheUpdateReturningState(
             state
         )
     }
-    if let prefill = turboQuantCompressedPrefillAttention(
+    if let prefill = try turboQuantCompressedPrefillAttentionThrowing(
         queries: queries,
         keys: keys,
         values: values,
@@ -463,34 +677,50 @@ public func attentionWithCacheUpdateReturningState(
     ) {
         return prefill
     }
-    if let result = withTurboQuantCompressedCacheUpdate(
-        queries: queries,
-        keys: keys,
-        values: values,
-        cache: cache,
-        mask: mask,
-        { compressedKeys, compressedValues, turboQuantCache in
-            let output = try turboQuantMetalScaledDotProductAttention(
+    if var turboQuantCache = cache as? TurboQuantCompressedKVCacheProtocol,
+        turboQuantCache.supportsCompressedAttention(
+            queries: queries,
+            keys: keys,
+            values: values,
+            mask: mask
+        )
+    {
+        let previousOffset = turboQuantCache.offset
+        let previousState = turboQuantCache.state.map { $0[.ellipsis] }
+        let previousMetaState = turboQuantCache.metaState
+        func restorePreviousState() {
+            turboQuantCache.metaState = previousMetaState
+            turboQuantCache.state = previousState
+            if let baseCache = turboQuantCache as? BaseKVCache {
+                baseCache.offset = previousOffset
+            }
+        }
+        do {
+            let (compressedKeys, compressedValues) = try turboQuantCache.updateCompressed(
+                keys: keys,
+                values: values
+            )
+            try turboQuantCache.validateCompressedState(context: "decode compressed update")
+            let state = AttentionKVState.turboQuant(
+                keys: compressedKeys,
+                values: compressedValues,
+                cache: turboQuantCache
+            )
+            let output = try turboQuantAttentionFallbackLadder(
                 queries: queries,
                 keyCode: compressedKeys,
                 valueCode: compressedValues,
+                cache: turboQuantCache,
                 scale: scale,
                 mask: mask,
-                sinks: sinks,
-                preferOnlineFused: turboQuantCache.prefersOnlineFusedAttention,
-                kernelProfile: turboQuantCache.attentionDiagnostics.selectedKernelProfile
+                sinks: sinks
             )
-            return (
-                output,
-                AttentionKVState.turboQuant(
-                    keys: compressedKeys,
-                    values: compressedValues,
-                    cache: turboQuantCache
-                )
-            )
+            return (output, state)
+        } catch {
+            restorePreviousState()
+            turboQuantCache.recordCompressedAttentionFailure(String(describing: error))
+            throw error
         }
-    ) {
-        return result
     }
     if let quantizedKVCache = cache as? QuantizedKVCacheProtocol {
         let (quantizedKeys, quantizedValues) = quantizedKVCache.updateQuantized(
@@ -501,7 +731,7 @@ public func attentionWithCacheUpdateReturningState(
             cache: quantizedKVCache
         )
         return (
-            attentionWithKVState(
+            try attentionWithKVStateThrowing(
                 queries: queries,
                 state: state,
                 scale: scale,
@@ -514,7 +744,7 @@ public func attentionWithCacheUpdateReturningState(
         let (cachedKeys, cachedValues) = cache.update(keys: keys, values: values)
         let state = AttentionKVState.raw(keys: cachedKeys, values: cachedValues)
         return (
-            attentionWithKVState(
+            try attentionWithKVStateThrowing(
                 queries: queries,
                 state: state,
                 scale: scale,
@@ -523,5 +753,41 @@ public func attentionWithCacheUpdateReturningState(
             ),
             state
         )
+    }
+}
+
+public func attentionWithCacheUpdateReturningState(
+    queries: MLXArray,
+    keys: MLXArray,
+    values: MLXArray,
+    cache: KVCache?,
+    scale: Float,
+    mask: MLXFast.ScaledDotProductAttentionMaskMode = .none,
+    sinks: MLXArray? = nil
+) -> (output: MLXArray, state: AttentionKVState) {
+    do {
+        return try attentionWithCacheUpdateReturningStateThrowing(
+            queries: queries,
+            keys: keys,
+            values: values,
+            cache: cache,
+            scale: scale,
+            mask: mask,
+            sinks: sinks
+        )
+    } catch {
+        if let turboQuantCache = cache as? TurboQuantCompressedKVCacheProtocol {
+            let reason = "compressed attention failed: \(String(describing: error))"
+            turboQuantCache.recordFallback(
+                TurboQuantFallbackResult(
+                    fromPath: turboQuantCache.attentionDiagnostics.activeAttentionPath,
+                    toPath: nil,
+                    policy: .fatalOnFailure,
+                    reason: reason,
+                    isSemanticallyExact: false
+                )
+            )
+        }
+        fatalError(String(describing: error))
     }
 }

@@ -16,6 +16,52 @@ public typealias TurboQuantRuntimeSelfTestStatus = MLX.TurboQuantRuntimeSelfTest
 let defaultTurboQuantSeed: UInt64 = 0x9E37_79B9_7F4A_7C15
 private let turboQuantValueSeedSalt: UInt64 = 0xD1B5_4A32_D192_ED03
 
+public enum TurboQuantFallbackPath: String, Equatable, Codable, Sendable, CaseIterable {
+    case onlineFusedCompressed
+    case tiledOnlineFused
+    case twoStageQKAV
+    case packedQuantizedSDPA
+    case decodedCompressedSDPA
+    case rawExactSDPA
+    case typedFailure
+}
+
+public struct TurboQuantRuntimeCacheFootprint: Equatable, Codable, Sendable {
+    public var logicalLength: Int
+    public var capacity: Int
+    public var compressedBytes: Int
+    public var packedFallbackBytes: Int
+    public var rawShadowBytes: Int
+    public var decodedTransientBytes: Int
+    public var lifecycle: TurboQuantCacheLifecycle
+
+    public init(
+        logicalLength: Int,
+        capacity: Int,
+        compressedBytes: Int,
+        packedFallbackBytes: Int = 0,
+        rawShadowBytes: Int = 0,
+        decodedTransientBytes: Int = 0,
+        lifecycle: TurboQuantCacheLifecycle
+    ) {
+        self.logicalLength = logicalLength
+        self.capacity = capacity
+        self.compressedBytes = compressedBytes
+        self.packedFallbackBytes = packedFallbackBytes
+        self.rawShadowBytes = rawShadowBytes
+        self.decodedTransientBytes = decodedTransientBytes
+        self.lifecycle = lifecycle
+    }
+
+    public var residentBytes: Int {
+        compressedBytes + packedFallbackBytes + rawShadowBytes
+    }
+
+    public var totalBytesIncludingTransient: Int {
+        residentBytes + decodedTransientBytes
+    }
+}
+
 public enum KVCacheStrategy: String, Codable, Sendable, CaseIterable {
     case none
     case mlxAffine
@@ -39,6 +85,8 @@ public struct TurboQuantAttentionDiagnostics: Equatable, Codable, Sendable {
     public var fallbackReason: String?
     public var lastUnsupportedShape: String?
     public var rawFallbackAllocated: Bool
+    public var cacheLifecycle: TurboQuantCacheLifecycle = .empty
+    public var lastFallback: TurboQuantFallbackResult?
 }
 
 public struct TurboQuantKVCacheDiagnostics: Equatable, Codable, Sendable {
@@ -59,15 +107,21 @@ public struct TurboQuantKVCacheDiagnostics: Equatable, Codable, Sendable {
     public var valueBits: Int
     public var maxSize: Int?
     public var rawFallbackAllocated: Bool
+    public var cacheLifecycle: TurboQuantCacheLifecycle = .empty
+    public var lastFallback: TurboQuantFallbackResult?
+    public var footprint: TurboQuantRuntimeCacheFootprint?
 }
 
-public protocol TurboQuantCompressedKVCacheProtocol: KVCache {
+public protocol TurboQuantCompressedKVCacheProtocol: KVCache, AnyObject {
     var preset: TurboQuantPreset { get }
     var requestedBackend: TurboQuantBackend { get }
     var activeBackend: TurboQuantBackend { get }
     var optimizationPolicy: TurboQuantOptimizationPolicy { get }
     var attentionDiagnostics: TurboQuantAttentionDiagnostics { get }
     var compressedState: (TurboQuantAttentionCode, TurboQuantAttentionCode)? { get }
+    var cacheLifecycle: TurboQuantCacheLifecycle { get }
+    var fallbackResults: [TurboQuantFallbackResult] { get }
+    var cacheFootprint: TurboQuantRuntimeCacheFootprint { get }
 
     func supportsCompressedAttention(
         queries: MLXArray,
@@ -82,6 +136,10 @@ public protocol TurboQuantCompressedKVCacheProtocol: KVCache {
     )
 
     func recordCompressedAttentionFailure(_ message: String)
+    func recordFallback(_ result: TurboQuantFallbackResult)
+    func validateCompressedState(context: String) throws
+    func decodedCompressedState(outputDType: DType) throws -> (MLXArray, MLXArray)
+    func releaseRawShadow()
 }
 
 extension TurboQuantCompressedKVCacheProtocol {
@@ -96,6 +154,36 @@ extension TurboQuantCompressedKVCacheProtocol {
         case .preferMemory, .preferThroughput:
             false
         }
+    }
+}
+
+public func turboQuantCacheFootprints(
+    _ cache: [KVCache]
+) -> [TurboQuantRuntimeCacheFootprint] {
+    cache.compactMap { ($0 as? TurboQuantCompressedKVCacheProtocol)?.cacheFootprint }
+}
+
+public func turboQuantAggregateCacheFootprint(
+    _ cache: [KVCache]
+) -> TurboQuantRuntimeCacheFootprint {
+    let footprints = turboQuantCacheFootprints(cache)
+    return footprints.reduce(
+        TurboQuantRuntimeCacheFootprint(
+            logicalLength: 0,
+            capacity: 0,
+            compressedBytes: 0,
+            lifecycle: .empty
+        )
+    ) { partial, item in
+        TurboQuantRuntimeCacheFootprint(
+            logicalLength: partial.logicalLength + item.logicalLength,
+            capacity: partial.capacity + item.capacity,
+            compressedBytes: partial.compressedBytes + item.compressedBytes,
+            packedFallbackBytes: partial.packedFallbackBytes + item.packedFallbackBytes,
+            rawShadowBytes: partial.rawShadowBytes + item.rawShadowBytes,
+            decodedTransientBytes: partial.decodedTransientBytes + item.decodedTransientBytes,
+            lifecycle: item.lifecycle
+        )
     }
 }
 
@@ -170,6 +258,157 @@ private enum TurboQuantCacheError: Error, CustomStringConvertible {
     }
 }
 
+private func turboQuantArrayBytes(_ arrays: [MLXArray]) -> Int {
+    arrays.reduce(0) { $0 + $1.nbytes }
+}
+
+private func turboQuantCodeBytes(_ code: TurboQuantAttentionCode) -> Int {
+    turboQuantArrayBytes([
+        code.packedMagnitudes,
+        code.signs,
+        code.highPrecisionMask,
+        code.residualSigns,
+        code.scales,
+    ])
+}
+
+private func turboQuantStorageShape(
+    _ code: TurboQuantAttentionCode,
+    wordsPerGroup: Int
+) -> [Int] {
+    [
+        code.layout.batchSize,
+        code.layout.kvHeadCount,
+        code.layout.capacity,
+        code.layout.groupsPerVector,
+        wordsPerGroup,
+    ]
+}
+
+private func turboQuantCompactOrStorageShape(
+    _ array: MLXArray,
+    code: TurboQuantAttentionCode
+) -> Bool {
+    array.shape == [1]
+        || array.shape == turboQuantStorageShape(
+            code,
+            wordsPerGroup: code.layout.bitsetWordsPerGroup
+        )
+}
+
+private func validateTurboQuantCode(_ code: TurboQuantAttentionCode, context: String) throws {
+    let layout = code.layout
+    guard layout.layoutVersion == TurboQuantAttentionLayout.currentVersion else {
+        throw TurboQuantCacheError.compressedStorageInvalid(
+            "\(context): unsupported layout version \(layout.layoutVersion)"
+        )
+    }
+    guard layout.batchSize > 0, layout.kvHeadCount > 0, layout.capacity > 0,
+        layout.logicalLength >= 0, layout.logicalLength <= layout.capacity,
+        layout.headDimension > 0, code.groupSize > 0
+    else {
+        throw TurboQuantCacheError.compressedStorageInvalid(
+            "\(context): invalid layout shape \(layout)"
+        )
+    }
+    guard layout.ringOffset >= 0, layout.ringOffset < layout.capacity else {
+        throw TurboQuantCacheError.compressedStorageInvalid(
+            "\(context): ring offset \(layout.ringOffset) is outside capacity \(layout.capacity)"
+        )
+    }
+    guard layout.pinnedPrefixLength >= 0, layout.pinnedPrefixLength <= layout.capacity else {
+        throw TurboQuantCacheError.compressedStorageInvalid(
+            "\(context): pinned prefix \(layout.pinnedPrefixLength) is outside capacity \(layout.capacity)"
+        )
+    }
+    let ringCapacity = layout.capacity - layout.pinnedPrefixLength
+    if ringCapacity == 0 {
+        guard layout.ringOffset == 0 else {
+            throw TurboQuantCacheError.compressedStorageInvalid(
+                "\(context): ring offset must be zero when pinned prefix consumes capacity"
+            )
+        }
+    } else {
+        guard layout.ringOffset < ringCapacity else {
+            throw TurboQuantCacheError.compressedStorageInvalid(
+                "\(context): ring offset \(layout.ringOffset) is outside rotating region \(ringCapacity)"
+            )
+        }
+    }
+    guard layout.groupsPerVector == (layout.headDimension + code.groupSize - 1) / code.groupSize
+    else {
+        throw TurboQuantCacheError.compressedStorageInvalid(
+            "\(context): groups per vector does not match head dimension and group size"
+        )
+    }
+
+    let packedShape = turboQuantStorageShape(code, wordsPerGroup: layout.magnitudeWordsPerGroup)
+    let bitsetShape = turboQuantStorageShape(code, wordsPerGroup: layout.bitsetWordsPerGroup)
+    let scalesShape = turboQuantStorageShape(code, wordsPerGroup: code.scalesPerGroup)
+
+    guard code.packedMagnitudes.dtype == .uint32, code.packedMagnitudes.shape == packedShape else {
+        throw TurboQuantCacheError.compressedStorageInvalid(
+            "\(context): packed magnitudes shape/dtype mismatch"
+        )
+    }
+    guard code.scales.dtype == .float32, code.scales.shape == scalesShape else {
+        throw TurboQuantCacheError.compressedStorageInvalid(
+            "\(context): scales shape/dtype mismatch"
+        )
+    }
+    if code.role == .key {
+        guard code.signs.dtype == .uint32, code.signs.shape == bitsetShape,
+            code.highPrecisionMask.dtype == .uint32, code.highPrecisionMask.shape == bitsetShape,
+            code.residualSigns.dtype == .uint32,
+            turboQuantCompactOrStorageShape(code.residualSigns, code: code)
+        else {
+            throw TurboQuantCacheError.compressedStorageInvalid(
+                "\(context): key bitset storage shape/dtype mismatch"
+            )
+        }
+    } else {
+        guard code.signs.dtype == .uint32,
+            turboQuantCompactOrStorageShape(code.signs, code: code),
+            code.highPrecisionMask.dtype == .uint32,
+            turboQuantCompactOrStorageShape(code.highPrecisionMask, code: code),
+            code.residualSigns.dtype == .uint32,
+            turboQuantCompactOrStorageShape(code.residualSigns, code: code)
+        else {
+            throw TurboQuantCacheError.compressedStorageInvalid(
+                "\(context): value bitset storage shape/dtype mismatch"
+            )
+        }
+    }
+}
+
+private func validateTurboQuantPair(
+    keys: TurboQuantAttentionCode,
+    values: TurboQuantAttentionCode,
+    context: String
+) throws {
+    try validateTurboQuantCode(keys, context: "\(context) key")
+    try validateTurboQuantCode(values, context: "\(context) value")
+    guard keys.role == .key, values.role == .value else {
+        throw TurboQuantCacheError.compressedStorageInvalid(
+            "\(context): compressed state must contain key and value codes"
+        )
+    }
+    guard keys.layout.layoutVersion == values.layout.layoutVersion,
+        keys.layout.batchSize == values.layout.batchSize,
+        keys.layout.kvHeadCount == values.layout.kvHeadCount,
+        keys.layout.capacity == values.layout.capacity,
+        keys.layout.logicalLength == values.layout.logicalLength,
+        keys.layout.ringOffset == values.layout.ringOffset,
+        keys.layout.pinnedPrefixLength == values.layout.pinnedPrefixLength,
+        keys.preset == values.preset,
+        keys.groupSize == values.groupSize
+    else {
+        throw TurboQuantCacheError.compressedStorageInvalid(
+            "\(context): key and value compressed metadata differ"
+        )
+    }
+}
+
 public final class TurboQuantKVCache: QuantizedKVCache, TurboQuantCompressedKVCacheProtocol {
     private var compressedKeys: TurboQuantAttentionCode?
     private var compressedValues: TurboQuantAttentionCode?
@@ -177,6 +416,9 @@ public final class TurboQuantKVCache: QuantizedKVCache, TurboQuantCompressedKVCa
     private var lastAttentionPath: TurboQuantAttentionPath = .mlxPackedFallback
     private var lastUnsupportedShape: String?
     private var restoredLayoutMetadata: RestoredAttentionLayoutMetadata?
+    private var lastDecodedTransientBytes: Int = 0
+    public private(set) var cacheLifecycle: TurboQuantCacheLifecycle = .empty
+    public private(set) var fallbackResults: [TurboQuantFallbackResult] = []
 
     public let preset: TurboQuantPreset
     public let requestedBackend: TurboQuantBackend
@@ -313,6 +555,8 @@ public final class TurboQuantKVCache: QuantizedKVCache, TurboQuantCompressedKVCa
             if activeBackend == .metalPolarQJL, newValue.isEmpty {
                 compressedKeys = nil
                 compressedValues = nil
+                lastDecodedTransientBytes = 0
+                cacheLifecycle = .empty
                 return
             }
             if activeBackend == .metalPolarQJL, newValue.count == 10 {
@@ -376,9 +620,16 @@ public final class TurboQuantKVCache: QuantizedKVCache, TurboQuantCompressedKVCa
                     residualSigns: newValue[8],
                     scales: newValue[9]
                 )
+                if let compressedKeys {
+                    cacheLifecycle = .compressedCommitted(
+                        logicalLength: compressedKeys.layout.logicalLength,
+                        capacity: compressedKeys.layout.capacity
+                    )
+                }
             } else if newValue.count == 10 {
                 lastUnsupportedShape =
                     "compressed TurboQuant state restored without Metal attention support"
+                cacheLifecycle = .failed(reason: lastUnsupportedShape ?? "unsupported compressed state")
             } else {
                 super.state = newValue
             }
@@ -389,6 +640,77 @@ public final class TurboQuantKVCache: QuantizedKVCache, TurboQuantCompressedKVCa
         guard let compressedKeys, let compressedValues else { return nil }
         return (compressedKeys, compressedValues)
     }
+
+    public var cacheFootprint: TurboQuantRuntimeCacheFootprint {
+        let compressedBytes: Int
+        let logicalLength: Int
+        let capacity: Int
+        if let compressedKeys, let compressedValues {
+            compressedBytes = turboQuantCodeBytes(compressedKeys) + turboQuantCodeBytes(compressedValues)
+            logicalLength = compressedKeys.layout.logicalLength
+            capacity = compressedKeys.layout.capacity
+        } else {
+            compressedBytes = 0
+            logicalLength = offset
+            capacity = 0
+        }
+        return TurboQuantRuntimeCacheFootprint(
+            logicalLength: logicalLength,
+            capacity: capacity,
+            compressedBytes: compressedBytes,
+            packedFallbackBytes: turboQuantArrayBytes(super.state),
+            decodedTransientBytes: lastDecodedTransientBytes,
+            lifecycle: cacheLifecycle
+        )
+    }
+
+    public func recordFallback(_ result: TurboQuantFallbackResult) {
+        fallbackResults.append(result)
+        lastUnsupportedShape = result.reason
+        if let toPath = result.toPath {
+            lastAttentionPath = toPath
+        }
+        switch result.policy {
+        case .packedAllowed:
+            cacheLifecycle = .degradedPackedFallback(reason: result.reason)
+        case .compressedDecodeAllowed:
+            cacheLifecycle = .degradedDecodedFallback(reason: result.reason)
+        case .fatalOnFailure:
+            cacheLifecycle = .failed(reason: result.reason)
+        case .exactRequired:
+            break
+        }
+    }
+
+    public func validateCompressedState(context: String) throws {
+        guard let compressedKeys, let compressedValues else {
+            if offset == 0 { return }
+            throw TurboQuantCacheError.compressedStorageInvalid(
+                "\(context): no compressed state exists for offset \(offset)"
+            )
+        }
+        try validateTurboQuantPair(keys: compressedKeys, values: compressedValues, context: context)
+    }
+
+    public func decodedCompressedState(outputDType: DType) throws -> (MLXArray, MLXArray) {
+        try validateCompressedState(context: "decode compressed state")
+        guard let compressedKeys, let compressedValues else {
+            throw TurboQuantCacheError.compressedStorageInvalid("decode compressed state missing")
+        }
+        cacheLifecycle = .decodeCompressed
+        let decodedKeys = try MLX.turboQuantMetalDecodeAttention(
+            compressedKeys,
+            outputDType: outputDType
+        )
+        let decodedValues = try MLX.turboQuantMetalDecodeAttention(
+            compressedValues,
+            outputDType: outputDType
+        )
+        lastDecodedTransientBytes = decodedKeys.nbytes + decodedValues.nbytes
+        return (decodedKeys, decodedValues)
+    }
+
+    public func releaseRawShadow() {}
 
     public override func getQuantizedState() -> (
         (MLXArray, MLXArray, MLXArray?), (MLXArray, MLXArray, MLXArray?)
@@ -452,7 +774,9 @@ public final class TurboQuantKVCache: QuantizedKVCache, TurboQuantCompressedKVCa
             optimizationPolicy: optimizationPolicy,
             fallbackReason: backendFallbackReason,
             lastUnsupportedShape: lastUnsupportedShape,
-            rawFallbackAllocated: false
+            rawFallbackAllocated: false,
+            cacheLifecycle: cacheLifecycle,
+            lastFallback: fallbackResults.last
         )
     }
 
@@ -475,7 +799,10 @@ public final class TurboQuantKVCache: QuantizedKVCache, TurboQuantCompressedKVCa
             bits: bits,
             valueBits: valueBits,
             maxSize: nil,
-            rawFallbackAllocated: false
+            rawFallbackAllocated: false,
+            cacheLifecycle: cacheLifecycle,
+            lastFallback: fallbackResults.last,
+            footprint: cacheFootprint
         )
     }
 
@@ -545,6 +872,10 @@ public final class TurboQuantKVCache: QuantizedKVCache, TurboQuantCompressedKVCa
     ) {
         let previousOffset = offset
         let tokenCount = keys.dim(2)
+        if tokenCount > 1 {
+            cacheLifecycle = previousOffset == 0 ? .rawPrefillChunkOpen : cacheLifecycle
+        }
+        cacheLifecycle = .compressingChunk(start: previousOffset, count: tokenCount)
         try ensureCompressedCapacity(
             keys: keys, values: values, requiredLength: previousOffset + tokenCount)
 
@@ -613,12 +944,19 @@ public final class TurboQuantKVCache: QuantizedKVCache, TurboQuantCompressedKVCa
         currentValues.layout.logicalLength = offset
         compressedKeys = currentKeys
         compressedValues = currentValues
+        lastDecodedTransientBytes = 0
+        try validateCompressedState(context: "compressed append")
+        cacheLifecycle = .compressedCommitted(
+            logicalLength: offset,
+            capacity: currentKeys.layout.capacity
+        )
         return (currentKeys, currentValues)
     }
 
     public func recordCompressedAttentionFailure(_ message: String) {
         lastAttentionPath = .mlxPackedFallback
         lastUnsupportedShape = "compressed attention failed: \(message)"
+        cacheLifecycle = .failed(reason: message)
     }
 
     public override func copy() -> any KVCache {
@@ -854,10 +1192,13 @@ public final class RotatingTurboQuantKVCache: BaseKVCache, QuantizedKVCacheProto
     private var lastAttentionPath: TurboQuantAttentionPath = .mlxPackedFallback
     private var lastUnsupportedShape: String?
     private var restoredLayoutMetadata: RestoredAttentionLayoutMetadata?
+    private var lastDecodedTransientBytes: Int = 0
     private let keep: Int
     private let step: Int
     private let maxCacheSize: Int
     private var writeIndex: Int
+    public private(set) var cacheLifecycle: TurboQuantCacheLifecycle = .empty
+    public private(set) var fallbackResults: [TurboQuantFallbackResult] = []
 
     public let preset: TurboQuantPreset
     public let requestedBackend: TurboQuantBackend
@@ -872,6 +1213,10 @@ public final class RotatingTurboQuantKVCache: BaseKVCache, QuantizedKVCacheProto
 
     public override var maxSize: Int? { maxCacheSize }
     public override var isTrimmable: Bool { offset < maxCacheSize }
+
+    private func pinnedPrefixLength(forLogicalLength logicalLength: Int) -> Int {
+        min(keep, maxCacheSize, max(0, logicalLength))
+    }
 
     public init(
         maxSize: Int,
@@ -964,6 +1309,88 @@ public final class RotatingTurboQuantKVCache: BaseKVCache, QuantizedKVCacheProto
         return (compressedKeys, compressedValues)
     }
 
+    public var cacheFootprint: TurboQuantRuntimeCacheFootprint {
+        let compressedBytes: Int
+        let logicalLength: Int
+        let capacity: Int
+        if let compressedKeys, let compressedValues {
+            compressedBytes = turboQuantCodeBytes(compressedKeys) + turboQuantCodeBytes(compressedValues)
+            logicalLength = compressedKeys.layout.logicalLength
+            capacity = compressedKeys.layout.capacity
+        } else {
+            compressedBytes = 0
+            logicalLength = min(offset, maxCacheSize)
+            capacity = maxCacheSize
+        }
+        let packedBytes =
+            turboQuantArrayBytes(packedFallbackCache?.state ?? [])
+            + turboQuantArrayBytes([packedKeys?.weight, packedKeys?.scales, packedKeys?.biases].compactMap { $0 })
+            + turboQuantArrayBytes([packedValues?.weight, packedValues?.scales, packedValues?.biases].compactMap { $0 })
+        return TurboQuantRuntimeCacheFootprint(
+            logicalLength: logicalLength,
+            capacity: capacity,
+            compressedBytes: compressedBytes,
+            packedFallbackBytes: packedBytes,
+            rawShadowBytes: turboQuantArrayBytes(rawFallbackCache?.state ?? []),
+            decodedTransientBytes: lastDecodedTransientBytes,
+            lifecycle: cacheLifecycle
+        )
+    }
+
+    public func recordFallback(_ result: TurboQuantFallbackResult) {
+        fallbackResults.append(result)
+        lastUnsupportedShape = result.reason
+        if let toPath = result.toPath {
+            lastAttentionPath = toPath
+        }
+        switch result.policy {
+        case .packedAllowed:
+            cacheLifecycle = .degradedPackedFallback(reason: result.reason)
+        case .compressedDecodeAllowed:
+            cacheLifecycle = .degradedDecodedFallback(reason: result.reason)
+        case .fatalOnFailure:
+            cacheLifecycle = .failed(reason: result.reason)
+        case .exactRequired:
+            break
+        }
+    }
+
+    public func validateCompressedState(context: String) throws {
+        guard let compressedKeys, let compressedValues else {
+            if offset == 0 { return }
+            throw TurboQuantCacheError.compressedStorageInvalid(
+                "\(context): no compressed rotating state exists for offset \(offset)"
+            )
+        }
+        try validateTurboQuantPair(keys: compressedKeys, values: compressedValues, context: context)
+    }
+
+    public func decodedCompressedState(outputDType: DType) throws -> (MLXArray, MLXArray) {
+        try validateCompressedState(context: "decode rotating compressed state")
+        guard let compressedKeys, let compressedValues else {
+            throw TurboQuantCacheError.compressedStorageInvalid(
+                "decode rotating compressed state missing"
+            )
+        }
+        cacheLifecycle = .decodeCompressed
+        let decodedKeys = try MLX.turboQuantMetalDecodeAttention(
+            compressedKeys,
+            outputDType: outputDType
+        )
+        let decodedValues = try MLX.turboQuantMetalDecodeAttention(
+            compressedValues,
+            outputDType: outputDType
+        )
+        lastDecodedTransientBytes = decodedKeys.nbytes + decodedValues.nbytes
+        return (decodedKeys, decodedValues)
+    }
+
+    public func releaseRawShadow() {
+        if compressedKeys != nil, compressedValues != nil {
+            rawFallbackCache = nil
+        }
+    }
+
     public var attentionDiagnostics: TurboQuantAttentionDiagnostics {
         let availability = TurboQuantKernelAvailability.current
         return TurboQuantAttentionDiagnostics(
@@ -975,7 +1402,9 @@ public final class RotatingTurboQuantKVCache: BaseKVCache, QuantizedKVCacheProto
             optimizationPolicy: optimizationPolicy,
             fallbackReason: backendFallbackReason,
             lastUnsupportedShape: lastUnsupportedShape,
-            rawFallbackAllocated: rawFallbackCache != nil
+            rawFallbackAllocated: rawFallbackCache != nil,
+            cacheLifecycle: cacheLifecycle,
+            lastFallback: fallbackResults.last
         )
     }
 
@@ -1047,6 +1476,12 @@ public final class RotatingTurboQuantKVCache: BaseKVCache, QuantizedKVCacheProto
         TurboQuantAttentionCode,
         TurboQuantAttentionCode
     ) {
+        let previousOffset = offset
+        let tokenCount = keys.dim(2)
+        if tokenCount > 1 {
+            cacheLifecycle = previousOffset == 0 ? .rawPrefillChunkOpen : cacheLifecycle
+        }
+        cacheLifecycle = .compressingChunk(start: previousOffset, count: tokenCount)
         let shouldUpdatePackedFallback =
             packedFallbackCache != nil
             && turboQuantSupportsPackedFallback(keys: keys, values: values, groupSize: groupSize)
@@ -1079,7 +1514,6 @@ public final class RotatingTurboQuantKVCache: BaseKVCache, QuantizedKVCacheProto
 
         var currentKeys = compressedKeys!
         var currentValues = compressedValues!
-        let tokenCount = keys.dim(2)
         let physicalStart = physicalSlot(forAbsoluteToken: offset)
         if tokenCount > 0, physicalStart + tokenCount <= maxCacheSize {
             let target = physicalStart ..< (physicalStart + tokenCount)
@@ -1157,6 +1591,13 @@ public final class RotatingTurboQuantKVCache: BaseKVCache, QuantizedKVCacheProto
         compressedValues = currentValues
         packedKeys = nil
         packedValues = nil
+        lastDecodedTransientBytes = 0
+        releaseRawShadow()
+        try validateCompressedState(context: "rotating compressed append")
+        cacheLifecycle = .compressedCommitted(
+            logicalLength: currentKeys.layout.logicalLength,
+            capacity: currentKeys.layout.capacity
+        )
         return (currentKeys, currentValues)
     }
 
@@ -1197,6 +1638,8 @@ public final class RotatingTurboQuantKVCache: BaseKVCache, QuantizedKVCacheProto
                 compressedKeys = nil
                 compressedValues = nil
                 rawFallbackCache = nil
+                lastDecodedTransientBytes = 0
+                cacheLifecycle = .empty
                 return
             }
             if activeBackend == .metalPolarQJL, newValue.count == 10 {
@@ -1209,14 +1652,16 @@ public final class RotatingTurboQuantKVCache: BaseKVCache, QuantizedKVCacheProto
                     restoredLayoutMetadata?.valueHeadDimension
                     ?? max(groupSize, (newValue[5].dim(3) * groupSize))
                 let logicalLength = restoredLayoutMetadata?.logicalLength ?? min(offset, capacity)
+                let pinnedPrefixLength =
+                    restoredLayoutMetadata?.pinnedPrefixLength
+                    ?? min(keep, capacity, max(0, logicalLength))
                 let keyLayout = MLX.TurboQuantAttentionLayout(
                     batchSize: newValue[0].dim(0),
                     kvHeadCount: restoredLayoutMetadata?.kvHeadCount ?? newValue[0].dim(1),
                     capacity: capacity,
                     logicalLength: logicalLength,
                     ringOffset: restoredLayoutMetadata?.ringOffset ?? ringOffset(forOffset: offset),
-                    pinnedPrefixLength: restoredLayoutMetadata?.pinnedPrefixLength
-                        ?? min(keep, capacity),
+                    pinnedPrefixLength: pinnedPrefixLength,
                     headDimension: keyHeadDimension,
                     groupsPerVector: newValue[0].dim(3),
                     magnitudeWordsPerGroup: newValue[0].dim(4),
@@ -1228,8 +1673,7 @@ public final class RotatingTurboQuantKVCache: BaseKVCache, QuantizedKVCacheProto
                     capacity: capacity,
                     logicalLength: logicalLength,
                     ringOffset: restoredLayoutMetadata?.ringOffset ?? ringOffset(forOffset: offset),
-                    pinnedPrefixLength: restoredLayoutMetadata?.pinnedPrefixLength
-                        ?? min(keep, capacity),
+                    pinnedPrefixLength: pinnedPrefixLength,
                     headDimension: valueHeadDimension,
                     groupsPerVector: newValue[5].dim(3),
                     magnitudeWordsPerGroup: newValue[5].dim(4),
@@ -1261,9 +1705,16 @@ public final class RotatingTurboQuantKVCache: BaseKVCache, QuantizedKVCacheProto
                     residualSigns: newValue[8],
                     scales: newValue[9]
                 )
+                if let compressedKeys {
+                    cacheLifecycle = .compressedCommitted(
+                        logicalLength: compressedKeys.layout.logicalLength,
+                        capacity: compressedKeys.layout.capacity
+                    )
+                }
             } else if newValue.count == 10 {
                 lastUnsupportedShape =
                     "compressed rotating TurboQuant state restored without Metal attention support"
+                cacheLifecycle = .failed(reason: lastUnsupportedShape ?? "unsupported compressed state")
             } else {
                 let rawCache = materializedRawFallbackCache()
                 rawCache.state = newValue
@@ -1272,6 +1723,7 @@ public final class RotatingTurboQuantKVCache: BaseKVCache, QuantizedKVCacheProto
                 packedFallbackCache = nil
                 compressedKeys = nil
                 compressedValues = nil
+                cacheLifecycle = .degradedDecodedFallback(reason: "restored raw fallback state")
             }
             packedKeys = nil
             packedValues = nil
@@ -1428,6 +1880,7 @@ public final class RotatingTurboQuantKVCache: BaseKVCache, QuantizedKVCacheProto
     public func recordCompressedAttentionFailure(_ message: String) {
         lastAttentionPath = .mlxPackedFallback
         lastUnsupportedShape = "compressed attention failed: \(message)"
+        cacheLifecycle = .failed(reason: message)
     }
 
     public override func copy() -> any KVCache {
@@ -1470,7 +1923,10 @@ public final class RotatingTurboQuantKVCache: BaseKVCache, QuantizedKVCacheProto
             bits: bits,
             valueBits: valueBits,
             maxSize: maxSize,
-            rawFallbackAllocated: rawFallbackCache != nil
+            rawFallbackAllocated: rawFallbackCache != nil,
+            cacheLifecycle: cacheLifecycle,
+            lastFallback: fallbackResults.last,
+            footprint: cacheFootprint
         )
     }
 
@@ -1481,6 +1937,7 @@ public final class RotatingTurboQuantKVCache: BaseKVCache, QuantizedKVCacheProto
     private func placeholderCode(for array: MLXArray, role: TurboQuantTensorRole) throws
         -> TurboQuantAttentionCode
     {
+        let logicalLength = min(offset + array.dim(2), maxCacheSize)
         let layout = try MLX.turboQuantAttentionLayout(
             for: array,
             preset: preset,
@@ -1488,9 +1945,9 @@ public final class RotatingTurboQuantKVCache: BaseKVCache, QuantizedKVCacheProto
             groupSize: groupSize,
             valueBits: valueBits,
             capacity: maxCacheSize,
-            logicalLength: min(offset + array.dim(2), maxCacheSize),
+            logicalLength: logicalLength,
             ringOffset: ringOffset(forOffset: offset + array.dim(2)),
-            pinnedPrefixLength: min(keep, maxCacheSize)
+            pinnedPrefixLength: pinnedPrefixLength(forLogicalLength: logicalLength)
         )
         return try MLX.turboQuantEmptyAttentionCode(
             layout: layout,
@@ -1510,6 +1967,7 @@ public final class RotatingTurboQuantKVCache: BaseKVCache, QuantizedKVCacheProto
             )
         }
         let logicalLength = min(offset, maxCacheSize)
+        let pinnedPrefixLength = pinnedPrefixLength(forLogicalLength: logicalLength)
         let keyLayout = try MLX.turboQuantAttentionLayout(
             for: keys,
             preset: preset,
@@ -1517,7 +1975,7 @@ public final class RotatingTurboQuantKVCache: BaseKVCache, QuantizedKVCacheProto
             capacity: maxCacheSize,
             logicalLength: logicalLength,
             ringOffset: ringOffset(forOffset: offset),
-            pinnedPrefixLength: min(keep, maxCacheSize)
+            pinnedPrefixLength: pinnedPrefixLength
         )
         let valueLayout = try MLX.turboQuantAttentionLayout(
             for: values,
@@ -1528,7 +1986,7 @@ public final class RotatingTurboQuantKVCache: BaseKVCache, QuantizedKVCacheProto
             capacity: maxCacheSize,
             logicalLength: logicalLength,
             ringOffset: ringOffset(forOffset: offset),
-            pinnedPrefixLength: min(keep, maxCacheSize)
+            pinnedPrefixLength: pinnedPrefixLength
         )
         compressedKeys = try MLX.turboQuantEmptyAttentionCode(
             layout: keyLayout,
@@ -1553,12 +2011,13 @@ public final class RotatingTurboQuantKVCache: BaseKVCache, QuantizedKVCacheProto
     ) {
         let logicalLength = min(offset, maxCacheSize)
         let ringOffset = ringOffset(forOffset: offset)
+        let pinnedPrefixLength = pinnedPrefixLength(forLogicalLength: logicalLength)
         keys.layout.logicalLength = logicalLength
         keys.layout.ringOffset = ringOffset
-        keys.layout.pinnedPrefixLength = min(keep, maxCacheSize)
+        keys.layout.pinnedPrefixLength = pinnedPrefixLength
         values.layout.logicalLength = logicalLength
         values.layout.ringOffset = ringOffset
-        values.layout.pinnedPrefixLength = min(keep, maxCacheSize)
+        values.layout.pinnedPrefixLength = pinnedPrefixLength
     }
 
     private func physicalSlot(forAbsoluteToken absolute: Int) -> Int {
@@ -1752,7 +2211,7 @@ extension RotatingKVCache {
                 let keys = turboQuantPhysicalizedState(currentState[0], maxSize: capacity)
                 let values = turboQuantPhysicalizedState(currentState[1], maxSize: capacity)
                 let logicalLength = min(offset, capacity)
-                let pinnedPrefixLength = min(rotatingKeep, capacity)
+                let pinnedPrefixLength = min(rotatingKeep, capacity, max(0, logicalLength))
                 let keyCode = try MLX.turboQuantMetalEncodeAttention(
                     keys,
                     configuration: keyConfiguration,
