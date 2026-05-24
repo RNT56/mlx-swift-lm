@@ -367,15 +367,8 @@ public func attentionWithKVState(
             sinks: sinks
         )
     } catch {
-        if case .turboQuant(_, let values, let cache) = state {
+        if case .turboQuant(_, _, let cache) = state {
             cache.recordCompressedAttentionFailure(String(describing: error))
-            if ProcessInfo.processInfo.environment["TURBOQUANT_FATAL_FALLBACK"] == "1" {
-                fatalError(String(describing: error))
-            }
-            return MLXArray.zeros(
-                [queries.dim(0), queries.dim(1), queries.dim(2), values.layout.headDimension],
-                dtype: queries.dtype
-            )
         }
         fatalError(String(describing: error))
     }

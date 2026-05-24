@@ -582,15 +582,21 @@ public final class TurboQuantKVCache: QuantizedKVCache, TurboQuantCompressedKVCa
         currentKeys.packedMagnitudes[.ellipsis, range, 0..., 0...] = encodedKeys.packedMagnitudes
         currentKeys.signs[.ellipsis, range, 0..., 0...] = encodedKeys.signs
         currentKeys.highPrecisionMask[.ellipsis, range, 0..., 0...] = encodedKeys.highPrecisionMask
-        currentKeys.residualSigns[.ellipsis, range, 0..., 0...] = encodedKeys.residualSigns
+        if currentKeys.residualSigns.ndim == 5 {
+            currentKeys.residualSigns[.ellipsis, range, 0..., 0...] = encodedKeys.residualSigns
+        }
         currentKeys.scales[.ellipsis, range, 0..., 0...] = encodedKeys.scales
 
         currentValues.packedMagnitudes[.ellipsis, range, 0..., 0...] =
             encodedValues.packedMagnitudes
         if currentValues.signs.ndim == 5 {
             currentValues.signs[.ellipsis, range, 0..., 0...] = encodedValues.signs
+        }
+        if currentValues.highPrecisionMask.ndim == 5 {
             currentValues.highPrecisionMask[.ellipsis, range, 0..., 0...] =
                 encodedValues.highPrecisionMask
+        }
+        if currentValues.residualSigns.ndim == 5 {
             currentValues.residualSigns[.ellipsis, range, 0..., 0...] =
                 encodedValues.residualSigns
         }
@@ -782,6 +788,14 @@ public final class TurboQuantKVCache: QuantizedKVCache, TurboQuantCompressedKVCa
             seed: code.seed,
             valueBits: code.valueBits
         )
+        let expandedSigns =
+            code.role == .value
+            ? zeros.signs
+            : concatenated([code.signs, zeros.signs], axis: 2)
+        let expandedHighPrecisionMask =
+            code.role == .value
+            ? zeros.highPrecisionMask
+            : concatenated([code.highPrecisionMask, zeros.highPrecisionMask], axis: 2)
         let expanded = TurboQuantAttentionCode(
             layout: newLayout,
             preset: code.preset,
@@ -792,10 +806,9 @@ public final class TurboQuantKVCache: QuantizedKVCache, TurboQuantCompressedKVCa
             scalesPerGroup: code.scalesPerGroup,
             packedMagnitudes: concatenated(
                 [code.packedMagnitudes, zeros.packedMagnitudes], axis: 2),
-            signs: concatenated([code.signs, zeros.signs], axis: 2),
-            highPrecisionMask: concatenated(
-                [code.highPrecisionMask, zeros.highPrecisionMask], axis: 2),
-            residualSigns: concatenated([code.residualSigns, zeros.residualSigns], axis: 2),
+            signs: expandedSigns,
+            highPrecisionMask: expandedHighPrecisionMask,
+            residualSigns: zeros.residualSigns,
             scales: concatenated([code.scales, zeros.scales], axis: 2)
         )
         try validateExpandedCompressedCode(expanded)
@@ -804,10 +817,21 @@ public final class TurboQuantKVCache: QuantizedKVCache, TurboQuantCompressedKVCa
 
     private func validateExpandedCompressedCode(_ code: TurboQuantAttentionCode) throws {
         let capacity = code.layout.capacity
+        func matchesBitsetCapacity(_ array: MLXArray) -> Bool {
+            array.shape == [1] || (array.ndim == 5 && array.dim(2) == capacity)
+        }
+        let signsValid =
+            code.role == .key
+            ? (code.signs.ndim == 5 && code.signs.dim(2) == capacity)
+            : matchesBitsetCapacity(code.signs)
+        let highMaskValid =
+            code.role == .key
+            ? (code.highPrecisionMask.ndim == 5 && code.highPrecisionMask.dim(2) == capacity)
+            : matchesBitsetCapacity(code.highPrecisionMask)
         guard code.packedMagnitudes.ndim == 5, code.packedMagnitudes.dim(2) == capacity,
-            code.signs.ndim == 5, code.signs.dim(2) == capacity,
-            code.highPrecisionMask.ndim == 5, code.highPrecisionMask.dim(2) == capacity,
-            code.residualSigns.ndim == 5, code.residualSigns.dim(2) == capacity,
+            signsValid,
+            highMaskValid,
+            matchesBitsetCapacity(code.residualSigns),
             code.scales.ndim == 5, code.scales.dim(2) == capacity
         else {
             throw TurboQuantCacheError.compressedStorageInvalid(
@@ -1064,15 +1088,22 @@ public final class RotatingTurboQuantKVCache: BaseKVCache, QuantizedKVCacheProto
             currentKeys.signs[.ellipsis, target, 0..., 0...] = encodedKeys.signs
             currentKeys.highPrecisionMask[.ellipsis, target, 0..., 0...] =
                 encodedKeys.highPrecisionMask
-            currentKeys.residualSigns[.ellipsis, target, 0..., 0...] = encodedKeys.residualSigns
+            if currentKeys.residualSigns.ndim == 5 {
+                currentKeys.residualSigns[.ellipsis, target, 0..., 0...] =
+                    encodedKeys.residualSigns
+            }
             currentKeys.scales[.ellipsis, target, 0..., 0...] = encodedKeys.scales
 
             currentValues.packedMagnitudes[.ellipsis, target, 0..., 0...] =
                 encodedValues.packedMagnitudes
             if currentValues.signs.ndim == 5 {
                 currentValues.signs[.ellipsis, target, 0..., 0...] = encodedValues.signs
+            }
+            if currentValues.highPrecisionMask.ndim == 5 {
                 currentValues.highPrecisionMask[.ellipsis, target, 0..., 0...] =
                     encodedValues.highPrecisionMask
+            }
+            if currentValues.residualSigns.ndim == 5 {
                 currentValues.residualSigns[.ellipsis, target, 0..., 0...] =
                     encodedValues.residualSigns
             }
@@ -1088,8 +1119,10 @@ public final class RotatingTurboQuantKVCache: BaseKVCache, QuantizedKVCacheProto
                     encodedKeys.signs[.ellipsis, source, 0..., 0...]
                 currentKeys.highPrecisionMask[.ellipsis, target, 0..., 0...] =
                     encodedKeys.highPrecisionMask[.ellipsis, source, 0..., 0...]
-                currentKeys.residualSigns[.ellipsis, target, 0..., 0...] =
-                    encodedKeys.residualSigns[.ellipsis, source, 0..., 0...]
+                if currentKeys.residualSigns.ndim == 5 {
+                    currentKeys.residualSigns[.ellipsis, target, 0..., 0...] =
+                        encodedKeys.residualSigns[.ellipsis, source, 0..., 0...]
+                }
                 currentKeys.scales[.ellipsis, target, 0..., 0...] =
                     encodedKeys.scales[.ellipsis, source, 0..., 0...]
 
@@ -1098,8 +1131,12 @@ public final class RotatingTurboQuantKVCache: BaseKVCache, QuantizedKVCacheProto
                 if currentValues.signs.ndim == 5 {
                     currentValues.signs[.ellipsis, target, 0..., 0...] =
                         encodedValues.signs[.ellipsis, source, 0..., 0...]
+                }
+                if currentValues.highPrecisionMask.ndim == 5 {
                     currentValues.highPrecisionMask[.ellipsis, target, 0..., 0...] =
                         encodedValues.highPrecisionMask[.ellipsis, source, 0..., 0...]
+                }
+                if currentValues.residualSigns.ndim == 5 {
                     currentValues.residualSigns[.ellipsis, target, 0..., 0...] =
                         encodedValues.residualSigns[.ellipsis, source, 0..., 0...]
                 }
