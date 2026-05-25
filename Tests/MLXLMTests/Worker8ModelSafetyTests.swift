@@ -75,45 +75,41 @@ struct Worker8ModelSafetyTests {
     }
 
     @Test func deepseekV4SanitizePreservesCanonicalRuntimeWeights() throws {
-        let previous = MTPConfig.retainMTPWeights
-        MTPConfig.retainMTPWeights = false
-        defer { MTPConfig.retainMTPWeights = previous }
+        try MTPConfigTestSupport.withRetainedMTPWeights(false) {
+            let model = DeepseekV4Model(try makeDeepseekV4Config())
+            let weights: [String: MLXArray] = [
+                "model.layers.0.attn.compressor.wkv.weight": MLXArray.zeros([8, 8]),
+                "model.layers.0.attn.compressor.indexer.wq_b.weight": MLXArray.zeros([8, 8]),
+                "model.layers.0.ffn.gate.tid2eid": MLXArray.zeros([8, 1], dtype: .int32),
+                "model.layers.0.rotary_emb.inv_freq": MLXArray.zeros([2]),
+                "model.layers.2.attn.compressor.wkv.weight": MLXArray.zeros([8, 8]),
+            ]
 
-        let model = DeepseekV4Model(try makeDeepseekV4Config())
-        let weights: [String: MLXArray] = [
-            "model.layers.0.attn.compressor.wkv.weight": MLXArray.zeros([8, 8]),
-            "model.layers.0.attn.compressor.indexer.wq_b.weight": MLXArray.zeros([8, 8]),
-            "model.layers.0.ffn.gate.tid2eid": MLXArray.zeros([8, 1], dtype: .int32),
-            "model.layers.0.rotary_emb.inv_freq": MLXArray.zeros([2]),
-            "model.layers.2.attn.compressor.wkv.weight": MLXArray.zeros([8, 8]),
-        ]
+            let sanitized = model.sanitize(weights: weights)
 
-        let sanitized = model.sanitize(weights: weights)
-
-        #expect(sanitized["model.layers.0.attn.compressor.wkv.weight"] != nil)
-        #expect(sanitized["model.layers.0.attn.compressor.indexer.wq_b.weight"] != nil)
-        #expect(sanitized["model.layers.0.ffn.gate.tid2eid"] != nil)
-        #expect(sanitized["model.layers.0.rotary_emb.inv_freq"] == nil)
-        #expect(sanitized["model.layers.2.attn.compressor.wkv.weight"] == nil)
+            #expect(sanitized["model.layers.0.attn.compressor.wkv.weight"] != nil)
+            #expect(sanitized["model.layers.0.attn.compressor.indexer.wq_b.weight"] != nil)
+            #expect(sanitized["model.layers.0.ffn.gate.tid2eid"] != nil)
+            #expect(sanitized["model.layers.0.rotary_emb.inv_freq"] == nil)
+            #expect(sanitized["model.layers.2.attn.compressor.wkv.weight"] == nil)
+        }
     }
 
     @Test func deepseekV4CacheAndMTPCacheUseLayerSemantics() throws {
-        let previous = MTPConfig.retainMTPWeights
-        MTPConfig.retainMTPWeights = true
-        defer { MTPConfig.retainMTPWeights = previous }
+        try MTPConfigTestSupport.withRetainedMTPWeights(true) {
+            let model = DeepseekV4Model(try makeDeepseekV4Config())
+            let caches = model.newCache(parameters: nil)
+            let mtpCaches = model.makeMTPCaches(parameters: nil)
 
-        let model = DeepseekV4Model(try makeDeepseekV4Config())
-        let caches = model.newCache(parameters: nil)
-        let mtpCaches = model.makeMTPCaches(parameters: nil)
-
-        #expect(caches.count == 2)
-        #expect(caches[0] is DeepseekV4KVCache)
-        #expect(caches[1] is DeepseekV4KVCache)
-        #expect(String(reflecting: caches[0]).contains("sliding_attention"))
-        #expect(String(reflecting: caches[1]).contains("compressed_sparse_attention"))
-        #expect(mtpCaches.count == 1)
-        #expect(mtpCaches[0].count == 1)
-        #expect(String(reflecting: mtpCaches[0][0]).contains("heavily_compressed_attention"))
+            #expect(caches.count == 2)
+            #expect(caches[0] is DeepseekV4KVCache)
+            #expect(caches[1] is DeepseekV4KVCache)
+            #expect(String(reflecting: caches[0]).contains("sliding_attention"))
+            #expect(String(reflecting: caches[1]).contains("compressed_sparse_attention"))
+            #expect(mtpCaches.count == 1)
+            #expect(mtpCaches[0].count == 1)
+            #expect(String(reflecting: mtpCaches[0][0]).contains("heavily_compressed_attention"))
+        }
     }
 
     @Test func deepseekV4HashRoutingUsesTid2Eid() throws {

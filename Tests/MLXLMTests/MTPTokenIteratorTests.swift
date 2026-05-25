@@ -6,6 +6,24 @@ import Testing
 
 @testable import MLXLLM
 
+enum MTPConfigTestSupport {
+    private static let lock = NSLock()
+
+    static func withRetainedMTPWeights<T>(
+        _ retained: Bool,
+        _ body: () throws -> T
+    ) rethrows -> T {
+        lock.lock()
+        let previous = MTPConfig.retainMTPWeights
+        MTPConfig.retainMTPWeights = retained
+        defer {
+            MTPConfig.retainMTPWeights = previous
+            lock.unlock()
+        }
+        return try body()
+    }
+}
+
 @Suite(.serialized)
 struct MTPTokenIteratorTests {
     @Test func deterministicMTPFullyAcceptsDraftAndEmitsVerifierToken() throws {
@@ -26,48 +44,42 @@ struct MTPTokenIteratorTests {
     }
 
     @Test func qwen35DecodesAndAllocatesMTPHeadsWhenRetained() throws {
-        let previous = MTPConfig.retainMTPWeights
-        MTPConfig.retainMTPWeights = true
-        defer { MTPConfig.retainMTPWeights = previous }
+        try MTPConfigTestSupport.withRetainedMTPWeights(true) {
+            let config = try makeQwen35TextConfig(numMTPLayers: 2)
+            let model = Qwen35TextModel(config)
 
-        let config = try makeQwen35TextConfig(numMTPLayers: 2)
-        let model = Qwen35TextModel(config)
-
-        #expect(config.numNextnPredictLayers == 2)
-        #expect(model.mtp.count == 2)
-        #expect((model as any LanguageModel) is any MTPLanguageModel)
+            #expect(config.numNextnPredictLayers == 2)
+            #expect(model.mtp.count == 2)
+            #expect((model as any LanguageModel) is any MTPLanguageModel)
+        }
     }
 
     @Test func qwen35DropsMTPHeadsAndWeightsByDefault() throws {
-        let previous = MTPConfig.retainMTPWeights
-        MTPConfig.retainMTPWeights = false
-        defer { MTPConfig.retainMTPWeights = previous }
+        try MTPConfigTestSupport.withRetainedMTPWeights(false) {
+            let config = try makeQwen35TextConfig(numMTPLayers: 1)
+            let model = Qwen35TextModel(config)
+            let weights = [
+                "model.embed_tokens.weight": MLXArray.zeros([16, 8]),
+                "mtp.fc.weight": MLXArray.zeros([8, 16]),
+            ]
+            let sanitized = model.sanitize(weights: weights)
 
-        let config = try makeQwen35TextConfig(numMTPLayers: 1)
-        let model = Qwen35TextModel(config)
-        let weights = [
-            "model.embed_tokens.weight": MLXArray.zeros([16, 8]),
-            "mtp.fc.weight": MLXArray.zeros([8, 16]),
-        ]
-        let sanitized = model.sanitize(weights: weights)
-
-        #expect(model.mtp.isEmpty)
-        #expect(sanitized.keys.contains { $0.contains("mtp.") } == false)
+            #expect(model.mtp.isEmpty)
+            #expect(sanitized.keys.contains { $0.contains("mtp.") } == false)
+        }
     }
 
     @Test func qwen35RetainedMTPWeightsAreIndexedForModuleLoading() throws {
-        let previous = MTPConfig.retainMTPWeights
-        MTPConfig.retainMTPWeights = true
-        defer { MTPConfig.retainMTPWeights = previous }
+        try MTPConfigTestSupport.withRetainedMTPWeights(true) {
+            let config = try makeQwen35TextConfig(numMTPLayers: 1)
+            let model = Qwen35TextModel(config)
+            let weights = [
+                "mtp.fc.weight": MLXArray.zeros([8, 16])
+            ]
+            let sanitized = model.sanitize(weights: weights)
 
-        let config = try makeQwen35TextConfig(numMTPLayers: 1)
-        let model = Qwen35TextModel(config)
-        let weights = [
-            "mtp.fc.weight": MLXArray.zeros([8, 16])
-        ]
-        let sanitized = model.sanitize(weights: weights)
-
-        #expect(sanitized["mtp.0.fc.weight"] != nil)
+            #expect(sanitized["mtp.0.fc.weight"] != nil)
+        }
     }
 
     @Test func deterministicMTPRejectsDraftAndFallsBackToVerifierToken() throws {
