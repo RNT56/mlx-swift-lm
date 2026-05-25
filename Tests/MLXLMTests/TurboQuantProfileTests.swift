@@ -69,6 +69,18 @@ extension MLXRuntimeSwiftTests {
             #expect(qwen35.safeContextLength == 262144)
             #expect(qwen35.optimizationPolicy == TurboQuantOptimizationPolicy.preferMemory)
 
+            let qwen35OptiQ2B = try #require(
+                registry.profile(
+                    for: "mlx-community/Qwen3.5-2B-OptiQ-4bit",
+                    modelType: "qwen3_5",
+                    parameterCountB: 2,
+                    keyHeadDimension: 256,
+                    valueHeadDimension: 256,
+                    contextLength: 24576
+                )
+            )
+            #expect(qwen35OptiQ2B.id == "qwen3.5-2b")
+
             let gemma3Small = try #require(
                 registry.profile(
                     for: "mlx-community/gemma-3-270m-it-4bit",
@@ -84,6 +96,17 @@ extension MLXRuntimeSwiftTests {
             #expect(
                 gemma3Small.optimizationPolicy == TurboQuantOptimizationPolicy.preferThroughput
             )
+            let gemma31B = try #require(
+                registry.profile(
+                    for: "mlx-community/gemma-3-1b-it-4bit",
+                    modelType: "gemma3_text",
+                    parameterCountB: 1,
+                    keyHeadDimension: 256,
+                    valueHeadDimension: 256,
+                    contextLength: 24576
+                )
+            )
+            #expect(gemma31B.id == "gemma-3-1b")
             #expect(
                 registry.profile(
                     for: "mlx-community/gemma-3-270m-it-4bit",

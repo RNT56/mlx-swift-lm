@@ -105,6 +105,30 @@ public class BaseConfigurationTests: XCTestCase {
         XCTAssertEqual(quantization.mode, .affine)
     }
 
+    func testModelMemoryProfileDetectsWeightBitsWithoutConfusingParameterSize() throws {
+        XCTAssertEqual(
+            ModelMemoryProfile.detectQuantizationBits(
+                modelID: "mlx-community/Qwen3.5-2B-OptiQ-4bit"),
+            4)
+        XCTAssertEqual(
+            ModelMemoryProfile.detectQuantizationBits(
+                modelID: "mlx-community/Llama-3.2-3B-Instruct-4bit"),
+            4)
+        XCTAssertEqual(
+            ModelMemoryProfile.detectQuantizationBits(modelID: "mlx-community/gemma-3-1b-it-4bit"),
+            4)
+        XCTAssertEqual(
+            ModelMemoryProfile.detectQuantizationBits(
+                modelID: "mlx-community/Qwen3.5-0.8B-MLX-4bit"),
+            4)
+        XCTAssertEqual(
+            ModelMemoryProfile.detectQuantizationBits(modelID: "mlx-community/some-model-2bit"),
+            2)
+        XCTAssertEqual(
+            ModelMemoryProfile.detectQuantizationBits(modelID: "mlx-community/some-model-2-bit"),
+            2)
+    }
+
     func testLoadWeightsUsesTurboQuantLinearForConvertedCheckpoints() throws {
         let temporaryPath = FileManager.default.temporaryDirectory.appending(
             path: UUID().uuidString, directoryHint: .isDirectory)

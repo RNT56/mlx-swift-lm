@@ -253,7 +253,12 @@ extension LanguageModel where Self: KVCacheDimensionProvider {
     public func newCache(parameters: GenerateParameters?) -> [KVCache] {
         let parameters: GenerateParameters? =
             if let original = parameters {
-                (try? original.resolvedForTurboQuantRuntime(layerCount: kvHeads.count)) ?? original
+                {
+                    let attentionLayerCount = kvHeads.filter { $0 > 0 }.count
+                    let layerCount = attentionLayerCount > 0 ? attentionLayerCount : kvHeads.count
+                    return (try? original.resolvedForTurboQuantRuntime(layerCount: layerCount))
+                        ?? original
+                }()
             } else {
                 nil
             }

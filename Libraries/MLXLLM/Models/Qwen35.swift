@@ -650,7 +650,10 @@ public class Qwen35TextModel: Module, LLMModel, KVCacheDimensionProvider, Throwi
     public init(_ args: Qwen35TextConfiguration) {
         self.configuration = args
         self.vocabularySize = args.vocabularySize
-        self.kvHeads = (0 ..< args.hiddenLayers).map { _ in args.kvHeads }
+        let fullAttentionInterval = max(1, args.fullAttentionInterval)
+        self.kvHeads = (0 ..< args.hiddenLayers).map { layerIdx in
+            (layerIdx + 1).isMultiple(of: fullAttentionInterval) ? args.kvHeads : 0
+        }
         self.model = Qwen35TextModelInner(args)
 
         if !args.tieWordEmbeddings {

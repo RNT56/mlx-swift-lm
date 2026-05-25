@@ -146,10 +146,16 @@ public struct ModelMemoryProfile: Codable, Equatable, Sendable {
 
     public static func detectQuantizationBits(modelID: String) -> Int {
         let lower = modelID.lowercased()
-        if lower.contains("2bit") || lower.contains("q2") || lower.contains("-2b-") { return 2 }
-        if lower.contains("3bit") || lower.contains("q3") { return 3 }
-        if lower.contains("4bit") || lower.contains("q4") || lower.contains("int4") { return 4 }
-        if lower.contains("8bit") || lower.contains("q8") || lower.contains("int8") { return 8 }
+        if lower.contains("4bit") || lower.contains("4-bit") || lower.contains("q4")
+            || lower.contains("int4") || lower.contains("mxfp4") || lower.contains("nf4")
+        { return 4 }
+        if lower.contains("8bit") || lower.contains("8-bit") || lower.contains("q8")
+            || lower.contains("int8") || lower.contains("mxfp8")
+        { return 8 }
+        if lower.contains("3bit") || lower.contains("3-bit") || lower.contains("q3") { return 3 }
+        if lower.contains("2bit") || lower.contains("2-bit") || lower.contains("q2")
+            || lower.contains("int2")
+        { return 2 }
         if lower.contains("bf16") || lower.contains("fp16") { return 16 }
         if lower.contains("fp32") || lower.contains("f32") { return 32 }
         return 16

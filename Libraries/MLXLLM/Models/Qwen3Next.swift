@@ -508,7 +508,10 @@ public class Qwen3NextModel: Module, LLMModel, KVCacheDimensionProvider {
     public init(_ args: Qwen3NextConfiguration) {
         self.configuration = args
         self.vocabularySize = args.vocabularySize
-        self.kvHeads = (0 ..< args.hiddenLayers).map { _ in args.kvHeads }
+        let fullAttentionInterval = max(1, args.fullAttentionInterval)
+        self.kvHeads = (0 ..< args.hiddenLayers).map { layerIdx in
+            (layerIdx + 1).isMultiple(of: fullAttentionInterval) ? args.kvHeads : 0
+        }
         self.model = Qwen3NextModelInner(args)
 
         if !args.tieWordEmbeddings {

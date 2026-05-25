@@ -400,7 +400,10 @@ private func resolvedGenerationParameters(
     for model: any LanguageModel,
     parameters: GenerateParameters
 ) throws -> GenerateParameters {
-    let layerCount = (model as? any KVCacheDimensionProvider)?.kvHeads.count
+    let layerCount = (model as? any KVCacheDimensionProvider).map { provider in
+        let attentionLayerCount = provider.kvHeads.filter { $0 > 0 }.count
+        return attentionLayerCount > 0 ? attentionLayerCount : provider.kvHeads.count
+    }
     let resolved = try parameters.resolvedForTurboQuantRuntime(layerCount: layerCount)
     if resolved.kvCacheStrategy == .turboQuant, !(model is any ThrowingLanguageModel) {
         throw TurboQuantGenerationError.modelRequiresThrowingAttention(

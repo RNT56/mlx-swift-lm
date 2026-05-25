@@ -148,6 +148,24 @@ struct TurboQuantRuntimeFailureTests {
         try Self.assertTurboQuantRuntimeReady(GLM4MoELiteModel(Self.glm4MoELiteConfiguration()))
     }
 
+    @Test func qwen35HybridBudgetLayersExcludeLinearNativeStateCaches() throws {
+        let model = Qwen35TextModel(try Self.qwen35TextConfiguration())
+        #expect(model.kvHeads == [0, 2])
+
+        let parameters = GenerateParameters(
+            maxTokens: 1,
+            maxKVSize: 8,
+            kvCacheStrategy: .turboQuant,
+            turboQuantAdmissionPolicy: .automatic
+        )
+        let resolved = try parameters.resolvedForTurboQuantRuntime(layerCount: 1)
+        let caches = model.newCache(parameters: resolved)
+
+        #expect(caches.count == 2)
+        #expect(caches[0] is MambaCache)
+        #expect(caches[1] is TurboQuantCompressedKVCacheProtocol)
+    }
+
     @Test func exportedCapabilityRegistryMatchesThrowingRuntimeCoverage() async throws {
         let registeredModelTypes = Set(await LLMTypeRegistry.shared.registeredModelTypes)
         let textConfigOnlyModelTypes: Set<String> = [
