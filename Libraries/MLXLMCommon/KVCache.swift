@@ -2256,6 +2256,13 @@ public func makeAttentionKVCache(
     maxKVSize: Int? = nil,
     keep: Int = 4
 ) -> KVCache {
+    let resolvedMaxKVSize: Int? =
+        if let requested = parameters?.maxKVSize, let local = maxKVSize {
+            min(requested, local)
+        } else {
+            parameters?.maxKVSize ?? maxKVSize
+        }
+
     if parameters?.kvCacheStrategy == .turboQuant {
         let preset = parameters?.turboQuantPreset ?? .turbo3_5
         let backend = parameters?.turboQuantBackend ?? .metalPolarQJL
@@ -2263,7 +2270,7 @@ public func makeAttentionKVCache(
         let policy = parameters?.turboQuantOptimizationPolicy ?? .auto
         let seed = parameters?.turboQuantSeed ?? defaultTurboQuantSeed
         let valueBits = parameters?.turboQuantValueBits
-        if let maxKVSize = parameters?.maxKVSize ?? maxKVSize {
+        if let maxKVSize = resolvedMaxKVSize {
             return RotatingTurboQuantKVCache(
                 maxSize: maxKVSize,
                 keep: keep,
@@ -2287,7 +2294,7 @@ public func makeAttentionKVCache(
         )
     }
 
-    if let maxKVSize = parameters?.maxKVSize ?? maxKVSize {
+    if let maxKVSize = resolvedMaxKVSize {
         return RotatingKVCache(maxSize: maxKVSize, keep: keep)
     }
     return KVCacheSimple()

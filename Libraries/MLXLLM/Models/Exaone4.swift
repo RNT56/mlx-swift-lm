@@ -61,6 +61,16 @@ class Exaone4Attention: Module {
     public func callAsFunction(
         _ x: MLXArray, mask: MLXFast.ScaledDotProductAttentionMaskMode, cache: KVCache?
     ) -> MLXArray {
+        do {
+            return try callThrowing(x, mask: mask, cache: cache)
+        } catch {
+            fatalError(String(describing: error))
+        }
+    }
+
+    func callThrowing(
+        _ x: MLXArray, mask: MLXFast.ScaledDotProductAttentionMaskMode, cache: KVCache?
+    ) throws -> MLXArray {
         let (B, L) = (x.dim(0), x.dim(1))
 
         var queries = qProj(x)
@@ -77,7 +87,7 @@ class Exaone4Attention: Module {
             keys = applyRotaryPosition(rope, to: keys, offset: offset)
         }
 
-        let output = attentionWithCacheUpdate(
+        let output = try attentionWithCacheUpdateReturningStateThrowing(
             queries: queries,
             keys: keys,
             values: values,
@@ -85,6 +95,7 @@ class Exaone4Attention: Module {
             scale: scale,
             mask: mask
         )
+        .output
         .transposed(0, 2, 1, 3)
         .reshaped(B, L, -1)
 
@@ -127,7 +138,17 @@ class Exaone4TransformerBlock: Module {
     public func callAsFunction(
         _ x: MLXArray, mask: MLXFast.ScaledDotProductAttentionMaskMode, cache: KVCache?
     ) -> MLXArray {
-        var r = attention(x, mask: mask, cache: cache)
+        do {
+            return try callThrowing(x, mask: mask, cache: cache)
+        } catch {
+            fatalError(String(describing: error))
+        }
+    }
+
+    func callThrowing(
+        _ x: MLXArray, mask: MLXFast.ScaledDotProductAttentionMaskMode, cache: KVCache?
+    ) throws -> MLXArray {
+        var r = try attention.callThrowing(x, mask: mask, cache: cache)
         let h = x + postAttentionLayerNorm(r)
         r = mlp(h)
         let out = h + postFeedforwardLayerNorm(r)
@@ -164,19 +185,27 @@ public class Exaone4ModelInner: Module {
     }
 
     public func callAsFunction(_ inputs: MLXArray, cache: [KVCache]? = nil) -> MLXArray {
+        do {
+            return try callThrowing(inputs, cache: cache)
+        } catch {
+            fatalError(String(describing: error))
+        }
+    }
+
+    public func callThrowing(_ inputs: MLXArray, cache: [KVCache]? = nil) throws -> MLXArray {
         var h = embedTokens(inputs)
 
         let mask = createAttentionMask(h: h, cache: cache?.first)
 
         for (i, layer) in layers.enumerated() {
-            h = layer(h, mask: mask, cache: cache?[i])
+            h = try layer.callThrowing(h, mask: mask, cache: cache?[i])
         }
 
         return norm(h)
     }
 }
 
-public class Exaone4Model: Module, LLMModel, KVCacheDimensionProvider {
+public class Exaone4Model: Module, LLMModel, KVCacheDimensionProvider, ThrowingLanguageModel {
     public let vocabularySize: Int
     public let kvHeads: [Int]
 
@@ -197,7 +226,15 @@ public class Exaone4Model: Module, LLMModel, KVCacheDimensionProvider {
     }
 
     public func callAsFunction(_ inputs: MLXArray, cache: [KVCache]?) -> MLXArray {
-        var out = model(inputs, cache: cache)
+        do {
+            return try callAsFunctionThrowing(inputs, cache: cache)
+        } catch {
+            fatalError(String(describing: error))
+        }
+    }
+
+    public func callAsFunctionThrowing(_ inputs: MLXArray, cache: [KVCache]?) throws -> MLXArray {
+        var out = try model.callThrowing(inputs, cache: cache)
         if let lmHead {
             out = lmHead(out)
         } else {

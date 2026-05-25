@@ -45,6 +45,16 @@ class PhiAttention: Module {
     public func callAsFunction(
         _ x: MLXArray, mask: MLXFast.ScaledDotProductAttentionMaskMode, cache: KVCache?
     ) -> MLXArray {
+        do {
+            return try callThrowing(x, mask: mask, cache: cache)
+        } catch {
+            fatalError(String(describing: error))
+        }
+    }
+
+    func callThrowing(
+        _ x: MLXArray, mask: MLXFast.ScaledDotProductAttentionMaskMode, cache: KVCache?
+    ) throws -> MLXArray {
         let (B, L) = (x.dim(0), x.dim(1))
 
         var queries = wq(x)
@@ -63,7 +73,7 @@ class PhiAttention: Module {
 
         // Finally perform the attention computation
         let scale = sqrt(1 / Float(queries.dim(-1)))
-        let output = attentionWithCacheUpdate(
+        let output = try attentionWithCacheUpdateReturningStateThrowing(
             queries: queries.asType(.float32),
             keys: keys,
             values: values,
@@ -71,6 +81,7 @@ class PhiAttention: Module {
             scale: scale,
             mask: mask
         )
+        .output
         .asType(values.dtype)
         .transposed(0, 2, 1, 3)
         .reshaped(B, L, -1)
@@ -112,8 +123,18 @@ class PhiDecoderLayer: Module {
     public func callAsFunction(
         _ x: MLXArray, mask: MLXFast.ScaledDotProductAttentionMaskMode, cache: KVCache?
     ) -> MLXArray {
+        do {
+            return try callThrowing(x, mask: mask, cache: cache)
+        } catch {
+            fatalError(String(describing: error))
+        }
+    }
+
+    func callThrowing(
+        _ x: MLXArray, mask: MLXFast.ScaledDotProductAttentionMaskMode, cache: KVCache?
+    ) throws -> MLXArray {
         let h = inputLayerNorm(x)
-        let attentionH = selfAttention(h, mask: mask, cache: cache)
+        let attentionH = try selfAttention.callThrowing(h, mask: mask, cache: cache)
         let ffH = mlp(h)
         return attentionH + ffH + x
     }
@@ -141,17 +162,27 @@ public class PhiModelInner: Module {
     public func callAsFunction(
         _ x: MLXArray, mask: MLXFast.ScaledDotProductAttentionMaskMode, cache: [KVCache]? = nil
     ) -> MLXArray {
+        do {
+            return try callThrowing(x, mask: mask, cache: cache)
+        } catch {
+            fatalError(String(describing: error))
+        }
+    }
+
+    func callThrowing(
+        _ x: MLXArray, mask: MLXFast.ScaledDotProductAttentionMaskMode, cache: [KVCache]? = nil
+    ) throws -> MLXArray {
         var x = embedTokens(x)
 
         for (i, layer) in layers.enumerated() {
-            x = layer(x, mask: mask, cache: cache?[i])
+            x = try layer.callThrowing(x, mask: mask, cache: cache?[i])
         }
 
         return finalLayerNorm(x)
     }
 }
 
-public class PhiModel: Module, LLMModel, KVCacheDimensionProvider {
+public class PhiModel: Module, LLMModel, KVCacheDimensionProvider, ThrowingLanguageModel {
 
     public let vocabularySize: Int
     public let kvHeads: [Int]
@@ -168,9 +199,16 @@ public class PhiModel: Module, LLMModel, KVCacheDimensionProvider {
     }
 
     public func callAsFunction(_ x: MLXArray, cache: [KVCache]?) -> MLXArray {
-        let mask = createAttentionMask(h: x, cache: cache?.first)
+        do {
+            return try callAsFunctionThrowing(x, cache: cache)
+        } catch {
+            fatalError(String(describing: error))
+        }
+    }
 
-        let y = model(x, mask: mask, cache: cache)
+    public func callAsFunctionThrowing(_ x: MLXArray, cache: [KVCache]?) throws -> MLXArray {
+        let mask = createAttentionMask(h: x, cache: cache?.first)
+        let y = try model.callThrowing(x, mask: mask, cache: cache)
         return lmHead(y)
     }
 }

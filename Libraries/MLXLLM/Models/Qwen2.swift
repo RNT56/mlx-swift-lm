@@ -48,6 +48,16 @@ class Qwen2Attention: Module {
     public func callAsFunction(
         _ x: MLXArray, mask: MLXFast.ScaledDotProductAttentionMaskMode, cache: KVCache?
     ) -> MLXArray {
+        do {
+            return try callThrowing(x, mask: mask, cache: cache)
+        } catch {
+            fatalError(String(describing: error))
+        }
+    }
+
+    func callThrowing(
+        _ x: MLXArray, mask: MLXFast.ScaledDotProductAttentionMaskMode, cache: KVCache?
+    ) throws -> MLXArray {
         let (B, L) = (x.dim(0), x.dim(1))
 
         var queries = wq(x)
@@ -63,7 +73,7 @@ class Qwen2Attention: Module {
         queries = applyRotaryPosition(rope, to: queries, offset: offset)
         keys = applyRotaryPosition(rope, to: keys, offset: offset)
 
-        let output = attentionWithCacheUpdate(
+        let output = try attentionWithCacheUpdateReturningStateThrowing(
             queries: queries,
             keys: keys,
             values: values,
@@ -71,6 +81,7 @@ class Qwen2Attention: Module {
             scale: scale,
             mask: mask
         )
+        .output
         .transposed(0, 2, 1, 3)
         .reshaped(B, L, -1)
 
@@ -113,7 +124,17 @@ class Qwen2TransformerBlock: Module {
     public func callAsFunction(
         _ x: MLXArray, mask: MLXFast.ScaledDotProductAttentionMaskMode, cache: KVCache?
     ) -> MLXArray {
-        var r = attention(inputLayerNorm(x), mask: mask, cache: cache)
+        do {
+            return try callThrowing(x, mask: mask, cache: cache)
+        } catch {
+            fatalError(String(describing: error))
+        }
+    }
+
+    func callThrowing(
+        _ x: MLXArray, mask: MLXFast.ScaledDotProductAttentionMaskMode, cache: KVCache?
+    ) throws -> MLXArray {
+        var r = try attention.callThrowing(inputLayerNorm(x), mask: mask, cache: cache)
         let h = x + r
         r = mlp(postAttentionLayerNorm(h))
         let out = h + r
@@ -141,19 +162,27 @@ public class Qwen2ModelInner: Module {
     }
 
     public func callAsFunction(_ inputs: MLXArray, cache: [KVCache]? = nil) -> MLXArray {
+        do {
+            return try callThrowing(inputs, cache: cache)
+        } catch {
+            fatalError(String(describing: error))
+        }
+    }
+
+    public func callThrowing(_ inputs: MLXArray, cache: [KVCache]? = nil) throws -> MLXArray {
         var h = embedTokens(inputs)
 
         let mask = createAttentionMask(h: h, cache: cache?.first)
 
         for (i, layer) in layers.enumerated() {
-            h = layer(h, mask: mask, cache: cache?[i])
+            h = try layer.callThrowing(h, mask: mask, cache: cache?[i])
         }
 
         return norm(h)
     }
 }
 
-public class Qwen2Model: Module, LLMModel, KVCacheDimensionProvider {
+public class Qwen2Model: Module, LLMModel, KVCacheDimensionProvider, ThrowingLanguageModel {
     public let vocabularySize: Int
     public let kvHeads: [Int]
 
@@ -174,7 +203,15 @@ public class Qwen2Model: Module, LLMModel, KVCacheDimensionProvider {
     }
 
     public func callAsFunction(_ inputs: MLXArray, cache: [KVCache]?) -> MLXArray {
-        var out = model(inputs, cache: cache)
+        do {
+            return try callAsFunctionThrowing(inputs, cache: cache)
+        } catch {
+            fatalError(String(describing: error))
+        }
+    }
+
+    public func callAsFunctionThrowing(_ inputs: MLXArray, cache: [KVCache]?) throws -> MLXArray {
+        var out = try model.callThrowing(inputs, cache: cache)
         if let lmHead {
             out = lmHead(out)
         } else {

@@ -171,6 +171,16 @@ class Mistral4Attention: Module {
     func callAsFunction(
         _ x: MLXArray, mask: MLXFast.ScaledDotProductAttentionMaskMode, cache: KVCache?
     ) -> MLXArray {
+        do {
+            return try callThrowing(x, mask: mask, cache: cache)
+        } catch {
+            fatalError(String(describing: error))
+        }
+    }
+
+    func callThrowing(
+        _ x: MLXArray, mask: MLXFast.ScaledDotProductAttentionMaskMode, cache: KVCache?
+    ) throws -> MLXArray {
         let (B, L, _) = (x.dim(0), x.dim(1), x.dim(2))
 
         // Low-rank Q decomposition
@@ -199,10 +209,11 @@ class Mistral4Attention: Module {
         let keys = concatenated([kNope, kPeExpanded], axis: -1)
         let queries = concatenated([qNope, rotQPe], axis: -1)
 
-        let output = attentionWithCacheUpdate(
+        let output = try attentionWithCacheUpdateReturningStateThrowing(
             queries: queries, keys: keys, values: values,
             cache: cache, scale: scale, mask: mask
         )
+        .output
         .transposed(0, 2, 1, 3)
         .reshaped(B, L, -1)
 
@@ -317,7 +328,17 @@ class Mistral4DecoderLayer: Module {
     func callAsFunction(
         _ x: MLXArray, mask: MLXFast.ScaledDotProductAttentionMaskMode, cache: KVCache?
     ) -> MLXArray {
-        let r = selfAttn(inputLayerNorm(x), mask: mask, cache: cache)
+        do {
+            return try callThrowing(x, mask: mask, cache: cache)
+        } catch {
+            fatalError(String(describing: error))
+        }
+    }
+
+    func callThrowing(
+        _ x: MLXArray, mask: MLXFast.ScaledDotProductAttentionMaskMode, cache: KVCache?
+    ) throws -> MLXArray {
+        let r = try selfAttn.callThrowing(inputLayerNorm(x), mask: mask, cache: cache)
         let h = x + r
         return h + mlp(postAttentionLayerNorm(h))
     }
@@ -342,10 +363,18 @@ public class Mistral4ModelInner: Module {
     }
 
     public func callAsFunction(_ x: MLXArray, cache: [KVCache]?) -> MLXArray {
+        do {
+            return try callThrowing(x, cache: cache)
+        } catch {
+            fatalError(String(describing: error))
+        }
+    }
+
+    public func callThrowing(_ x: MLXArray, cache: [KVCache]?) throws -> MLXArray {
         var h = embedTokens(x)
         let mask = createAttentionMask(h: h, cache: cache?.first)
         for (i, layer) in layers.enumerated() {
-            h = layer(h, mask: mask, cache: cache?[i])
+            h = try layer.callThrowing(h, mask: mask, cache: cache?[i])
         }
         return norm(h)
     }
@@ -353,7 +382,9 @@ public class Mistral4ModelInner: Module {
 
 // MARK: - Top-Level Model
 
-public class Mistral4Model: Module, LLMModel, KVCacheDimensionProvider, LoRAModel {
+public class Mistral4Model: Module, LLMModel, KVCacheDimensionProvider, LoRAModel,
+    ThrowingLanguageModel
+{
     /// One entry per layer: each layer uses full MHA (numAttentionHeads heads).
     /// Keys store qHeadDim per head; values store vHeadDim per head.
     /// Must match numHiddenLayers or the server will create a wrong-sized cache array,
@@ -375,7 +406,15 @@ public class Mistral4Model: Module, LLMModel, KVCacheDimensionProvider, LoRAMode
     }
 
     public func callAsFunction(_ inputs: MLXArray, cache: [KVCache]?) -> MLXArray {
-        let out = model(inputs, cache: cache)
+        do {
+            return try callAsFunctionThrowing(inputs, cache: cache)
+        } catch {
+            fatalError(String(describing: error))
+        }
+    }
+
+    public func callAsFunctionThrowing(_ inputs: MLXArray, cache: [KVCache]?) throws -> MLXArray {
+        let out = try model.callThrowing(inputs, cache: cache)
         if let lmHead { return lmHead(out) }
         return model.embedTokens.asLinear(out)
     }

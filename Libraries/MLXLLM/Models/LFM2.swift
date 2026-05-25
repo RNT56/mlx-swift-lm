@@ -147,6 +147,16 @@ class LFM2Attention: Module {
     public func callAsFunction(
         _ x: MLXArray, mask: MLXFast.ScaledDotProductAttentionMaskMode, cache: KVCache?
     ) -> MLXArray {
+        do {
+            return try callThrowing(x, mask: mask, cache: cache)
+        } catch {
+            fatalError(String(describing: error))
+        }
+    }
+
+    func callThrowing(
+        _ x: MLXArray, mask: MLXFast.ScaledDotProductAttentionMaskMode, cache: KVCache?
+    ) throws -> MLXArray {
         let (B, L) = (x.dim(0), x.dim(1))
 
         var queries = qProj(x)
@@ -161,7 +171,7 @@ class LFM2Attention: Module {
         queries = applyRotaryPosition(rope, to: queries, offset: offset)
         keys = applyRotaryPosition(rope, to: keys, offset: offset)
 
-        let output = attentionWithCacheUpdate(
+        let output = try attentionWithCacheUpdateReturningStateThrowing(
             queries: queries,
             keys: keys,
             values: values,
@@ -169,6 +179,7 @@ class LFM2Attention: Module {
             scale: scale,
             mask: mask
         )
+        .output
         .transposed(0, 2, 1, 3)
         .reshaped(B, L, -1)
 
@@ -295,9 +306,19 @@ class LFM2DecoderLayer: Module {
     public func callAsFunction(
         _ x: MLXArray, mask: MLXFast.ScaledDotProductAttentionMaskMode, cache: KVCache?
     ) -> MLXArray {
+        do {
+            return try callThrowing(x, mask: mask, cache: cache)
+        } catch {
+            fatalError(String(describing: error))
+        }
+    }
+
+    func callThrowing(
+        _ x: MLXArray, mask: MLXFast.ScaledDotProductAttentionMaskMode, cache: KVCache?
+    ) throws -> MLXArray {
         let r: MLXArray
         if isAttentionLayer {
-            r = attention!(operatorNorm(x), mask: mask, cache: cache)
+            r = try attention!.callThrowing(operatorNorm(x), mask: mask, cache: cache)
         } else {
             r = conv!(operatorNorm(x), cache: cache as? MambaCache)
         }
@@ -338,6 +359,18 @@ public class LFM2ModelInner: Module {
         _ inputs: MLXArray, mask: MLXFast.ScaledDotProductAttentionMaskMode? = nil,
         cache: [KVCache]? = nil, inputEmbeddings: MLXArray? = nil
     ) -> MLXArray {
+        do {
+            return try callThrowing(
+                inputs, mask: mask, cache: cache, inputEmbeddings: inputEmbeddings)
+        } catch {
+            fatalError(String(describing: error))
+        }
+    }
+
+    public func callThrowing(
+        _ inputs: MLXArray, mask: MLXFast.ScaledDotProductAttentionMaskMode? = nil,
+        cache: [KVCache]? = nil, inputEmbeddings: MLXArray? = nil
+    ) throws -> MLXArray {
         var h = inputEmbeddings ?? embedTokens(inputs)
 
         let mask =
@@ -349,14 +382,14 @@ public class LFM2ModelInner: Module {
             }()
 
         for (i, layer) in layers.enumerated() {
-            h = layer(h, mask: mask, cache: cache?[i])
+            h = try layer.callThrowing(h, mask: mask, cache: cache?[i])
         }
 
         return embeddingNorm(h)
     }
 }
 
-public class LFM2Model: Module, LLMModel, KVCacheDimensionProvider {
+public class LFM2Model: Module, LLMModel, KVCacheDimensionProvider, ThrowingLanguageModel {
     public let vocabularySize: Int
     public let kvHeads: [Int]
 
@@ -375,7 +408,15 @@ public class LFM2Model: Module, LLMModel, KVCacheDimensionProvider {
     }
 
     public func callAsFunction(_ inputs: MLXArray, cache: [KVCache]?) -> MLXArray {
-        let out = model(inputs, cache: cache)
+        do {
+            return try callAsFunctionThrowing(inputs, cache: cache)
+        } catch {
+            fatalError(String(describing: error))
+        }
+    }
+
+    public func callAsFunctionThrowing(_ inputs: MLXArray, cache: [KVCache]?) throws -> MLXArray {
+        let out = try model.callThrowing(inputs, cache: cache)
         return model.embedTokens.asLinear(out)
     }
 

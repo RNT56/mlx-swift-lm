@@ -429,7 +429,7 @@ extension MLXRuntimeSwiftTests {
                 makeAttentionKVCache(parameters: parameters, maxKVSize: 16, keep: 2)
                     as? RotatingTurboQuantKVCache)
 
-            #expect(cache.maxSize == 48)
+            #expect(cache.maxSize == 16)
             #expect(cache.metaState.first == "2")
             #expect(cache.preset == .turbo2_5)
             #expect(cache.requestedBackend == .metalPolarQJL)
