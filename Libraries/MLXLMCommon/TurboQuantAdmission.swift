@@ -390,6 +390,42 @@ public struct TurboQuantMemoryPlan: Codable, Equatable, Sendable {
     public var fitsRuntimeBudget: Bool {
         runtimeZones.fitsAvailableMemory
     }
+
+    public init(
+        requestedContextLength: Int,
+        admittedContextLength: Int,
+        requestedMode: TurboQuantUserMode,
+        effectiveMode: TurboQuantUserMode,
+        preset: TurboQuantPreset,
+        valueBits: Int,
+        groupSize: Int,
+        fallbackPolicy: TurboQuantFallbackPolicy,
+        rawBytesPerToken: Int,
+        packedFallbackBytesPerToken: Int,
+        compressedBytesPerToken: Int,
+        layerFootprint: TurboQuantLayerCacheFootprint,
+        usesRawShadow: Bool,
+        packedFallbackEnabled: Bool,
+        usesRollingSummaryMemory: Bool,
+        runtimeZones: TurboQuantRuntimeMemoryZones
+    ) {
+        self.requestedContextLength = max(1, requestedContextLength)
+        self.admittedContextLength = max(0, admittedContextLength)
+        self.requestedMode = requestedMode
+        self.effectiveMode = effectiveMode
+        self.preset = preset
+        self.valueBits = min(8, max(2, valueBits))
+        self.groupSize = max(1, groupSize)
+        self.fallbackPolicy = fallbackPolicy
+        self.rawBytesPerToken = max(0, rawBytesPerToken)
+        self.packedFallbackBytesPerToken = max(0, packedFallbackBytesPerToken)
+        self.compressedBytesPerToken = max(0, compressedBytesPerToken)
+        self.layerFootprint = layerFootprint
+        self.usesRawShadow = usesRawShadow
+        self.packedFallbackEnabled = packedFallbackEnabled
+        self.usesRollingSummaryMemory = usesRollingSummaryMemory
+        self.runtimeZones = runtimeZones
+    }
 }
 
 public struct TurboQuantAdmission: Codable, Equatable, Sendable {
@@ -405,6 +441,28 @@ public struct TurboQuantAdmission: Codable, Equatable, Sendable {
 
     public var primaryDowngradeReason: TurboQuantAdmissionDowngradeReason? {
         downgradeReasons.first?.reason
+    }
+
+    public init(
+        admitted: Bool,
+        requestedContextLength: Int,
+        admittedContextLength: Int,
+        requestedMode: TurboQuantUserMode,
+        selectedMode: TurboQuantUserMode,
+        memoryPlan: TurboQuantMemoryPlan,
+        downgradeReasons: [TurboQuantAdmissionDowngrade] = [],
+        rejectedPaths: [RejectedPath] = [],
+        userMessage: String
+    ) {
+        self.admitted = admitted
+        self.requestedContextLength = max(1, requestedContextLength)
+        self.admittedContextLength = max(0, admittedContextLength)
+        self.requestedMode = requestedMode
+        self.selectedMode = selectedMode
+        self.memoryPlan = memoryPlan
+        self.downgradeReasons = downgradeReasons
+        self.rejectedPaths = rejectedPaths
+        self.userMessage = userMessage
     }
 }
 

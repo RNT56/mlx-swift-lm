@@ -84,3 +84,42 @@ public func partitionedLayerCall<T>(
 
     return result
 }
+
+/// Throwing variant of ``partitionedLayerCall`` for model paths that need
+/// recoverable TurboQuant attention failures instead of process-fatal fallbacks.
+public func partitionedLayerCallThrowing<T>(
+    index: Int,
+    gpuLayerCount: Int?,
+    stream: Bool = false,
+    cacheToEval: KVCache? = nil,
+    body: () throws -> T
+) throws -> T {
+    let isExpertStreaming = ExpertStreamingConfig.shared.isEnabled
+
+    let result: T
+    if let gpuLayerCount, index >= gpuLayerCount, !isExpertStreaming {
+        var outcome: Result<T, Error>!
+        Device.withDefaultDevice(.cpu) {
+            outcome = Result { try body() }
+        }
+        result = try outcome.get()
+    } else {
+        result = try body()
+    }
+
+    if isExpertStreaming {
+        return result
+    }
+
+    if stream, let array = result as? MLXArray {
+        if let cacheToEval {
+            eval(cacheToEval.state + [array])
+        } else {
+            eval(array)
+        }
+        Stream.gpu.synchronize()
+        Memory.clearCache()
+    }
+
+    return result
+}

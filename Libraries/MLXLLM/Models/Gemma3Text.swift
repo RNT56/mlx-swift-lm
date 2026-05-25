@@ -184,6 +184,18 @@ class Gemma3Attention: Module {
         mask: MLXFast.ScaledDotProductAttentionMaskMode,
         cache: KVCache? = nil
     ) -> MLXArray {
+        do {
+            return try callThrowing(x, mask: mask, cache: cache)
+        } catch {
+            fatalError(String(describing: error))
+        }
+    }
+
+    func callThrowing(
+        _ x: MLXArray,
+        mask: MLXFast.ScaledDotProductAttentionMaskMode,
+        cache: KVCache? = nil
+    ) throws -> MLXArray {
         let (B, L, _) = (x.dim(0), x.dim(1), x.dim(2))
 
         var queries = queryProj(x)
@@ -201,14 +213,14 @@ class Gemma3Attention: Module {
         queries = applyRotaryPosition(rope, to: queries, offset: offset)
         keys = applyRotaryPosition(rope, to: keys, offset: offset)
 
-        let output = attentionWithCacheUpdate(
+        let output = try attentionWithCacheUpdateReturningStateThrowing(
             queries: queries,
             keys: keys,
             values: values,
             cache: cache,
             scale: scale,
             mask: mask
-        )
+        ).output
         .transposed(0, 2, 1, 3)
         .reshaped(B, L, -1)
         return outputProj(output)
@@ -270,8 +282,20 @@ class Gemma3TransformerBlock: Module {
         mask: MLXFast.ScaledDotProductAttentionMaskMode,
         cache: KVCache? = nil
     ) -> MLXArray {
+        do {
+            return try callThrowing(x, mask: mask, cache: cache)
+        } catch {
+            fatalError(String(describing: error))
+        }
+    }
+
+    func callThrowing(
+        _ x: MLXArray,
+        mask: MLXFast.ScaledDotProductAttentionMaskMode,
+        cache: KVCache? = nil
+    ) throws -> MLXArray {
         let inputNorm = inputLayerNorm(x)
-        let r = selfAttention(inputNorm, mask: mask, cache: cache)
+        let r = try selfAttention.callThrowing(inputNorm, mask: mask, cache: cache)
         let attnNorm = postAttentionLayerNorm(r)
         let h = Gemma.clipResidual(x, attnNorm)
         let preMLPNorm = preFeedforwardLayerNorm(h)
@@ -312,6 +336,17 @@ public class Gemma3Model: Module {
     )
         -> MLXArray
     {
+        do {
+            return try callThrowing(inputs, mask: mask, cache: cache)
+        } catch {
+            fatalError(String(describing: error))
+        }
+    }
+
+    func callThrowing(
+        _ inputs: MLXArray, mask: MLXFast.ScaledDotProductAttentionMaskMode? = nil,
+        cache: [KVCache?]? = nil
+    ) throws -> MLXArray {
         var h: MLXArray
         h = embedTokens(inputs)
         let scale = MLXArray(sqrt(Float(config.hiddenSize)), dtype: .bfloat16)
@@ -332,13 +367,13 @@ public class Gemma3Model: Module {
         for (i, layer) in layers.enumerated() {
             let isGlobal = (i % config.slidingWindowPattern == config.slidingWindowPattern - 1)
             let mask = isGlobal ? globalMask : slidingWindowMask
-            h = layer(h, mask: mask, cache: layerCache?[i])
+            h = try layer.callThrowing(h, mask: mask, cache: layerCache?[i])
         }
         return norm(h)
     }
 }
 
-public class Gemma3TextModel: Module, LLMModel {
+public class Gemma3TextModel: Module, LLMModel, ThrowingLanguageModel {
 
     @ModuleInfo public var model: Gemma3Model
     @ModuleInfo(key: "lm_head") var lmHead: Linear
@@ -354,7 +389,15 @@ public class Gemma3TextModel: Module, LLMModel {
     }
 
     public func callAsFunction(_ inputs: MLXArray, cache: [KVCache]? = nil) -> MLXArray {
-        var out = model(inputs, mask: nil, cache: cache)
+        do {
+            return try callAsFunctionThrowing(inputs, cache: cache)
+        } catch {
+            fatalError(String(describing: error))
+        }
+    }
+
+    public func callAsFunctionThrowing(_ inputs: MLXArray, cache: [KVCache]?) throws -> MLXArray {
+        var out = try model.callThrowing(inputs, mask: nil, cache: cache)
         out = lmHead(out)
         return out
     }
