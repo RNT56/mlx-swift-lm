@@ -20,6 +20,17 @@ The PR and merge train is owned by:
 /Users/mt/Programming/Schtack/pines/docs/turboquant-implementation/15-pr-merge-plan.md
 ```
 
+Current status:
+
+- The Pines local compatibility pair is green with this branch at
+  `6d2d791a12e60dc1bd7534d6c95454a2284edf8c`.
+- This branch pins `mlx-swift`
+  `21a897c5d1ae1930bd7c7a47bb3ed6c9fe8c8772`, the release-green core branch.
+- Full `swift test` and `swift build --target MLXLMCommon` pass for this branch.
+- Snapshot and speculative contracts are implemented, but product activation
+  remains controlled by Pines admission, compatibility, and real-device evidence
+  gates.
+
 For this repo, the launch order is:
 
 1. Wave 0: W4 runtime failures/no zero/no fatal.
@@ -30,13 +41,14 @@ For this repo, the launch order is:
 
 W4 can start immediately in parallel with MLX Swift W1 and Pines W7/W24. W14A and W15A must not product-activate before lifecycle, evidence, and rollback prerequisites are proven.
 
-Worker PRs in this repo target:
+Worker PRs for the completed train targeted:
 
 ```text
-codex/turboquant-completion-hardening
+tq/wave7-lm-platform
 ```
 
-Final merge to the repo default branch waits for the cross-repo compatibility pair and Pines production pin gate.
+Final merge to the repo default branch should preserve the cross-repo
+compatibility pair and Pines production pin gate recorded in the Pines packet.
 
 ## LM responsibilities
 

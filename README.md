@@ -2,6 +2,18 @@
 
 MLX Swift LM is a Swift package to build tools and applications with large language models (LLMs) and vision language models (VLMs) in [MLX Swift](https://github.com/ml-explore/mlx-swift).
 
+> [!NOTE]
+> This branch is the RNT56 TurboQuant integration branch used by Pines. It keeps
+> the upstream package shape while adding app-safe TurboQuant runtime failures,
+> budgeted fallback policy, cache lifecycle snapshots, profile v2 validation,
+> benchmark quality outputs, encrypted-snapshot export/import contracts, and
+> rollback-safe speculative verification. The branch currently forms the Pines
+> green local compatibility pair at commit
+> `6d2d791a12e60dc1bd7534d6c95454a2284edf8c`, pinned against `mlx-swift`
+> `21a897c5d1ae1930bd7c7a47bb3ed6c9fe8c8772`. See
+> [docs/turboquant-implementation](docs/turboquant-implementation/README.md)
+> for the implementation packet and release constraints.
+
 > [!IMPORTANT]
 > The `main` branch is a _new_ major version number: 3.x.  In order
 > to decouple from tokenizer and downloader packages some breaking

@@ -14,10 +14,10 @@ Use the Pines [Worker Launch Schedule](/Users/mt/Programming/Schtack/pines/docs/
 
 W4 is the first LM implementation branch. W14A and W15A may be designed earlier, but activation waits for their wave gates.
 
-PR target for worker branches:
+Final branch for the completed train:
 
 ```text
-codex/turboquant-completion-hardening
+tq/wave7-lm-platform
 ```
 
 PR sequencing and final default-branch merge gates are defined in the Pines [PR and Merge Plan](/Users/mt/Programming/Schtack/pines/docs/turboquant-implementation/15-pr-merge-plan.md).
