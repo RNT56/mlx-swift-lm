@@ -24,9 +24,11 @@ Do not touch:
 - profile registry;
 - benchmark executable.
 
-## Current observed state
+## Current resolved state
 
-The local branch already has a throwing attention path and no obvious all-zero fallback in the inspected path. Deprecated non-throwing wrappers still contain `fatalError` paths. The P0 target is therefore:
+The branch has a throwing attention path and no all-zero fallback in the inspected TurboQuant path. Deprecated non-throwing wrappers remain only as compatibility/debug surface; they are not product generation paths. The product guarantee is enforced before cache creation: TurboQuant generation requires `ThrowingLanguageModel`, and non-throwing models are rejected with `TurboQuantGenerationError.modelRequiresThrowingAttention`.
+
+The P0 target is therefore:
 
 - product call sites must use throwing APIs;
 - non-throwing wrappers must be debug-only/deprecated and not Pines-facing;
@@ -99,6 +101,14 @@ Test cases:
 - fallback budget exceeded -> typed error;
 - non-throwing wrapper is not used by product call path;
 - no failure path returns all-zero tensor.
+
+Implemented Wave 0 regression:
+
+```text
+TurboQuantRuntimeFailureTests.turboQuantGenerationRejectsNonThrowingModelsBeforeRuntimeAttention
+```
+
+This test verifies that a non-throwing model with `kvCacheStrategy == .turboQuant` is rejected before `prepare`, `newCache`, or runtime attention can run.
 
 ## Pines mapping requirements
 

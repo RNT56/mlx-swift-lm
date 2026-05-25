@@ -1,4 +1,6 @@
 import Foundation
+import MLX
+import MLXNN
 import Testing
 
 @testable import MLXLMCommon
@@ -69,6 +71,28 @@ struct TurboQuantRuntimeFailureTests {
         #expect(decoded.pinesFailureKind == .turboQuantFallbackUnavailable)
     }
 
+    @Test func turboQuantGenerationRejectsNonThrowingModelsBeforeRuntimeAttention() throws {
+        let model = NonThrowingTinyLanguageModel()
+        let input = LMInput(text: .init(tokens: MLXArray([1, 2] as [Int32]).reshaped([1, 2])))
+        let parameters = GenerateParameters(
+            maxTokens: 1,
+            kvCacheStrategy: .turboQuant,
+            turboQuantAdmissionPolicy: .automatic
+        )
+
+        do {
+            _ = try TokenIterator(input: input, model: model, parameters: parameters)
+            Issue.record("TurboQuant generation should reject non-throwing models before runtime attention")
+        } catch let error as TurboQuantGenerationError {
+            guard case .modelRequiresThrowingAttention(let modelName) = error else {
+                Issue.record("Unexpected TurboQuant generation error: \(error)")
+                return
+            }
+            #expect(modelName.contains("NonThrowingTinyLanguageModel"))
+            #expect(!model.wasCalled)
+        }
+    }
+
     private enum TestError: Error, CustomStringConvertible {
         case message(String)
 
@@ -77,6 +101,25 @@ struct TurboQuantRuntimeFailureTests {
             case .message(let message):
                 message
             }
+        }
+    }
+
+    private final class NonThrowingTinyLanguageModel: Module, LanguageModel {
+        private(set) var wasCalled = false
+
+        func prepare(_ input: LMInput, cache: [KVCache], windowSize: Int?) throws -> PrepareResult {
+            wasCalled = true
+            return .tokens(input.text)
+        }
+
+        func callAsFunction(_ inputs: MLXArray, cache: [KVCache]?) -> MLXArray {
+            wasCalled = true
+            return MLXArray.zeros([1, inputs.dim(-1), 8])
+        }
+
+        func newCache(parameters: GenerateParameters?) -> [KVCache] {
+            wasCalled = true
+            return []
         }
     }
 }
