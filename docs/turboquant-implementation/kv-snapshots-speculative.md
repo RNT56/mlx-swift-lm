@@ -57,6 +57,24 @@ Import:
 - ring offset and pinned prefix survive roundtrip;
 - no raw KV required.
 
+## W14A library support
+
+`mlx-swift-lm` now exposes compressed in-memory snapshot payloads for `TurboQuantKVCache`
+and `RotatingTurboQuantKVCache` through `exportSnapshot(...)` and `importSnapshot(...)`.
+The payload manifest carries the `KVSnapshotManifest.v1` identity and byte-count fields,
+plus LM-local layout metadata required to rebuild compressed attention codes: cache kind,
+preset/backend, group size, value bits, seed, mode, capacity, ring offset, head metadata,
+and tensor descriptors.
+
+Import is fail-closed and requires an expected `TurboQuantKVSnapshotIdentity`. The cache
+validates schema, model/tokenizer/profile/RoPE/prefix/fallback identity, layout version,
+cache kind, compression parameters, byte counts, tensor names, shapes, dtypes, capacity,
+logical length, ring offset, and pinned prefix before mutating the target cache. Restore
+rebuilds compressed state directly and does not require raw KV.
+
+Pines remains responsible for encrypted local storage, atomic writes, quarantine, quota,
+key rotation, and product activation.
+
 ## Speculative worker
 
 | Worker | Branch | Phase | Priority |

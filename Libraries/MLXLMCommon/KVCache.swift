@@ -1044,6 +1044,10 @@ public class QuantizedKVCache: BaseKVCache, QuantizedKVCacheProtocol {
         }
         set {
             switch newValue.count {
+            case 0:
+                keys = nil
+                values = nil
+                offset = 0
             case 4:
                 // nil biases case
                 keys = (newValue[0], newValue[1], nil)

@@ -124,6 +124,17 @@ public protocol TurboQuantCompressedKVCacheProtocol: KVCache, AnyObject {
     var cacheFootprint: TurboQuantRuntimeCacheFootprint { get }
 
     func runtimeSnapshot() -> TurboQuantCacheRuntimeSnapshot
+    func exportSnapshot(
+        identity: TurboQuantKVSnapshotIdentity,
+        conversationID: UUID,
+        snapshotID: UUID,
+        encryptionKeyID: String,
+        createdAt: Date
+    ) throws -> TurboQuantKVSnapshotPayload
+    func importSnapshot(
+        _ payload: TurboQuantKVSnapshotPayload,
+        expectedIdentity: TurboQuantKVSnapshotIdentity
+    ) throws
 
     func supportsCompressedAttention(
         queries: MLXArray,
@@ -157,6 +168,22 @@ extension TurboQuantCompressedKVCacheProtocol {
             false
         }
     }
+
+    public func exportSnapshot(
+        identity: TurboQuantKVSnapshotIdentity,
+        conversationID: UUID,
+        encryptionKeyID: String = "lm-local-unencrypted",
+        createdAt: Date = Date()
+    ) throws -> TurboQuantKVSnapshotPayload {
+        try exportSnapshot(
+            identity: identity,
+            conversationID: conversationID,
+            snapshotID: UUID(),
+            encryptionKeyID: encryptionKeyID,
+            createdAt: createdAt
+        )
+    }
+
 }
 
 public func turboQuantCacheFootprints(
@@ -472,6 +499,279 @@ private func validateTurboQuantPair(
     }
 }
 
+private func turboQuantSnapshotArrays(from state: [MLXArray]) throws -> [String: MLXArray] {
+    guard state.count == TurboQuantKVSnapshotArrayName.ordered.count else {
+        throw TurboQuantRuntimeFailure.cacheLayoutInvalid(
+            "TurboQuant snapshot requires \(TurboQuantKVSnapshotArrayName.ordered.count) compressed arrays, found \(state.count)"
+        )
+    }
+    return Dictionary(
+        uniqueKeysWithValues: zip(TurboQuantKVSnapshotArrayName.ordered, state.map { $0[.ellipsis] })
+    )
+}
+
+private func turboQuantSnapshotOrderedArrays(
+    _ arrays: [String: MLXArray]
+) throws -> [MLXArray] {
+    let required = Set(TurboQuantKVSnapshotArrayName.ordered)
+    let actual = Set(arrays.keys)
+    guard actual == required else {
+        let missing = required.subtracting(actual).sorted().joined(separator: ",")
+        let extra = actual.subtracting(required).sorted().joined(separator: ",")
+        throw TurboQuantRuntimeFailure.cacheLayoutInvalid(
+            "TurboQuant snapshot payload arrays mismatch; missing [\(missing)] extra [\(extra)]"
+        )
+    }
+    return try TurboQuantKVSnapshotArrayName.ordered.map { name in
+        guard let array = arrays[name] else {
+            throw TurboQuantRuntimeFailure.cacheLayoutInvalid(
+                "TurboQuant snapshot is missing compressed array \(name)"
+            )
+        }
+        return array
+    }
+}
+
+private func turboQuantSnapshotArrayDescriptors(
+    _ arrays: [String: MLXArray]
+) -> [TurboQuantKVSnapshotArrayDescriptor] {
+    TurboQuantKVSnapshotArrayName.ordered.compactMap { name in
+        arrays[name].map { TurboQuantKVSnapshotArrayDescriptor(name: name, array: $0) }
+    }
+}
+
+private func turboQuantValidateSnapshotManifest(
+    _ manifest: TurboQuantKVSnapshotManifest,
+    expectedIdentity: TurboQuantKVSnapshotIdentity,
+    expectedCacheKind: String,
+    expectedPreset: TurboQuantPreset,
+    expectedRequestedBackend: TurboQuantBackend,
+    expectedActiveBackend: TurboQuantBackend,
+    expectedGroupSize: Int,
+    expectedValueBits: Int,
+    expectedSeed: UInt64,
+    expectedMode: QuantizationMode,
+    arrays: [String: MLXArray]
+) throws -> [MLXArray] {
+    guard manifest.schemaVersion == TurboQuantKVSnapshotManifest.currentSchemaVersion else {
+        throw TurboQuantRuntimeFailure.cacheLayoutInvalid(
+            "Unsupported TurboQuant snapshot schema \(manifest.schemaVersion)"
+        )
+    }
+    guard manifest.cacheKind == expectedCacheKind else {
+        throw TurboQuantRuntimeFailure.cacheLayoutInvalid(
+            "Snapshot cache kind \(manifest.cacheKind) cannot restore into \(expectedCacheKind)"
+        )
+    }
+    guard manifest.preset == expectedPreset.rawValue,
+        manifest.requestedBackend == expectedRequestedBackend.rawValue,
+        manifest.activeBackend == expectedActiveBackend.rawValue,
+        manifest.groupSize == expectedGroupSize,
+        manifest.valueBits == expectedValueBits,
+        manifest.seed == expectedSeed,
+        manifest.mode == expectedMode.rawValue
+    else {
+        throw TurboQuantRuntimeFailure.cacheLayoutInvalid(
+            "TurboQuant snapshot cache parameters do not match restore target"
+        )
+    }
+    guard manifest.modelID == expectedIdentity.modelID,
+        manifest.modelRevision == expectedIdentity.modelRevision,
+        manifest.tokenizerHash == expectedIdentity.tokenizerHash,
+        manifest.profileHash == expectedIdentity.profileHash,
+        manifest.ropeConfigHash == expectedIdentity.ropeConfigHash,
+        manifest.tokenPrefixHash == expectedIdentity.tokenPrefixHash,
+        manifest.fallbackContractHash == expectedIdentity.fallbackContractHash
+    else {
+        throw TurboQuantRuntimeFailure.cacheLayoutInvalid(
+            "TurboQuant snapshot identity mismatch"
+        )
+    }
+    guard manifest.turboQuantLayoutVersion == TurboQuantAttentionLayout.currentVersion else {
+        throw TurboQuantRuntimeFailure.cacheLayoutInvalid(
+            "Unsupported TurboQuant snapshot layout \(manifest.turboQuantLayoutVersion)"
+        )
+    }
+    guard manifest.capacity > 0,
+        manifest.logicalLength >= 0,
+        manifest.logicalLength <= manifest.capacity,
+        manifest.pinnedPrefixLength >= 0,
+        manifest.pinnedPrefixLength <= manifest.logicalLength,
+        manifest.ringOffset >= 0,
+        manifest.batchSize > 0,
+        manifest.kvHeadCount > 0,
+        manifest.keyHeadDimension > 0,
+        manifest.valueHeadDimension > 0
+    else {
+        throw TurboQuantRuntimeFailure.cacheLayoutInvalid(
+            "TurboQuant snapshot manifest has invalid length, capacity, or shape metadata"
+        )
+    }
+    let ringCapacity = manifest.capacity - manifest.pinnedPrefixLength
+    if ringCapacity == 0 {
+        guard manifest.ringOffset == 0 else {
+            throw TurboQuantRuntimeFailure.cacheLayoutInvalid(
+                "TurboQuant snapshot ring offset must be zero when pinned prefix consumes capacity"
+            )
+        }
+    } else {
+        guard manifest.ringOffset < ringCapacity else {
+            throw TurboQuantRuntimeFailure.cacheLayoutInvalid(
+                "TurboQuant snapshot ring offset \(manifest.ringOffset) exceeds rotating region \(ringCapacity)"
+            )
+        }
+    }
+
+    let ordered = try turboQuantSnapshotOrderedArrays(arrays)
+    guard Int64(turboQuantArrayBytes(Array(ordered.prefix(5)))) == manifest.compressedKeyBytes,
+        Int64(turboQuantArrayBytes(Array(ordered.suffix(5)))) == manifest.compressedValueBytes,
+        manifest.blobByteCount >= manifest.compressedKeyBytes + manifest.compressedValueBytes
+    else {
+        throw TurboQuantRuntimeFailure.cacheLayoutInvalid(
+            "TurboQuant snapshot byte counts do not match compressed arrays"
+        )
+    }
+    var descriptors: [String: TurboQuantKVSnapshotArrayDescriptor] = [:]
+    for descriptor in manifest.arrays {
+        guard descriptors[descriptor.name] == nil else {
+            throw TurboQuantRuntimeFailure.cacheLayoutInvalid(
+                "TurboQuant snapshot manifest has duplicate descriptor \(descriptor.name)"
+            )
+        }
+        descriptors[descriptor.name] = descriptor
+    }
+    guard descriptors.count == TurboQuantKVSnapshotArrayName.ordered.count else {
+        throw TurboQuantRuntimeFailure.cacheLayoutInvalid(
+            "TurboQuant snapshot manifest must describe exactly the compressed key/value arrays"
+        )
+    }
+    for (name, array) in zip(TurboQuantKVSnapshotArrayName.ordered, ordered) {
+        guard let descriptor = descriptors[name] else {
+            throw TurboQuantRuntimeFailure.cacheLayoutInvalid(
+                "TurboQuant snapshot manifest is missing descriptor for \(name)"
+            )
+        }
+        guard descriptor.shape == array.shape,
+            descriptor.dtype == String(describing: array.dtype),
+            descriptor.byteCount == Int64(array.nbytes)
+        else {
+            throw TurboQuantRuntimeFailure.cacheLayoutInvalid(
+                "TurboQuant snapshot descriptor mismatch for \(name)"
+            )
+        }
+    }
+    return ordered
+}
+
+private struct TurboQuantSnapshotImportedCodes {
+    var keys: TurboQuantAttentionCode
+    var values: TurboQuantAttentionCode
+}
+
+private func turboQuantRequireSnapshotRank(
+    _ array: MLXArray,
+    name: String,
+    rank: Int
+) throws {
+    guard array.ndim == rank else {
+        throw TurboQuantRuntimeFailure.cacheLayoutInvalid(
+            "TurboQuant snapshot \(name) must be rank \(rank), found \(array.ndim)"
+        )
+    }
+}
+
+private func turboQuantSnapshotImportedCodes(
+    manifest: TurboQuantKVSnapshotManifest,
+    ordered: [MLXArray],
+    preset: TurboQuantPreset,
+    groupSize: Int,
+    seed: UInt64,
+    valueBits: Int
+) throws -> TurboQuantSnapshotImportedCodes {
+    guard ordered.count == TurboQuantKVSnapshotArrayName.ordered.count else {
+        throw TurboQuantRuntimeFailure.cacheLayoutInvalid(
+            "TurboQuant snapshot import requires exactly \(TurboQuantKVSnapshotArrayName.ordered.count) arrays"
+        )
+    }
+    let keyPacked = ordered[0]
+    let keySigns = ordered[1]
+    let keyHighMask = ordered[2]
+    let keyResidualSigns = ordered[3]
+    let keyScales = ordered[4]
+    let valuePacked = ordered[5]
+    let valueSigns = ordered[6]
+    let valueHighMask = ordered[7]
+    let valueResidualSigns = ordered[8]
+    let valueScales = ordered[9]
+
+    try turboQuantRequireSnapshotRank(keyPacked, name: "key.packedMagnitudes", rank: 5)
+    try turboQuantRequireSnapshotRank(keySigns, name: "key.signs", rank: 5)
+    try turboQuantRequireSnapshotRank(keyHighMask, name: "key.highPrecisionMask", rank: 5)
+    try turboQuantRequireSnapshotRank(keyScales, name: "key.scales", rank: 5)
+    try turboQuantRequireSnapshotRank(valuePacked, name: "value.packedMagnitudes", rank: 5)
+    try turboQuantRequireSnapshotRank(valueScales, name: "value.scales", rank: 5)
+
+    let keyLayout = MLX.TurboQuantAttentionLayout(
+        layoutVersion: manifest.turboQuantLayoutVersion,
+        batchSize: manifest.batchSize,
+        kvHeadCount: manifest.kvHeadCount,
+        capacity: manifest.capacity,
+        logicalLength: manifest.logicalLength,
+        ringOffset: manifest.ringOffset,
+        pinnedPrefixLength: manifest.pinnedPrefixLength,
+        headDimension: manifest.keyHeadDimension,
+        groupsPerVector: keyPacked.dim(3),
+        magnitudeWordsPerGroup: keyPacked.dim(4),
+        bitsetWordsPerGroup: keySigns.dim(4)
+    )
+    let valueLayout = MLX.TurboQuantAttentionLayout(
+        layoutVersion: manifest.turboQuantLayoutVersion,
+        batchSize: manifest.batchSize,
+        kvHeadCount: manifest.kvHeadCount,
+        capacity: manifest.capacity,
+        logicalLength: manifest.logicalLength,
+        ringOffset: manifest.ringOffset,
+        pinnedPrefixLength: manifest.pinnedPrefixLength,
+        headDimension: manifest.valueHeadDimension,
+        groupsPerVector: valuePacked.dim(3),
+        magnitudeWordsPerGroup: valuePacked.dim(4),
+        bitsetWordsPerGroup: keySigns.dim(4)
+    )
+    let keys = TurboQuantAttentionCode(
+        layout: keyLayout,
+        preset: preset,
+        role: .key,
+        groupSize: groupSize,
+        seed: seed,
+        scalesPerGroup: keyScales.dim(4),
+        packedMagnitudes: keyPacked,
+        signs: keySigns,
+        highPrecisionMask: keyHighMask,
+        residualSigns: keyResidualSigns,
+        scales: keyScales
+    )
+    let values = TurboQuantAttentionCode(
+        layout: valueLayout,
+        preset: preset,
+        role: .value,
+        groupSize: groupSize,
+        seed: seed ^ turboQuantValueSeedSalt,
+        valueBits: valueBits,
+        scalesPerGroup: valueScales.dim(4),
+        packedMagnitudes: valuePacked,
+        signs: valueSigns,
+        highPrecisionMask: valueHighMask,
+        residualSigns: valueResidualSigns,
+        scales: valueScales
+    )
+    do {
+        try validateTurboQuantPair(keys: keys, values: values, context: "snapshot import")
+    } catch {
+        throw TurboQuantRuntimeFailure(error)
+    }
+    return TurboQuantSnapshotImportedCodes(keys: keys, values: values)
+}
+
 public final class TurboQuantKVCache: QuantizedKVCache, TurboQuantCompressedKVCacheProtocol {
     private var compressedKeys: TurboQuantAttentionCode?
     private var compressedValues: TurboQuantAttentionCode?
@@ -769,6 +1069,120 @@ public final class TurboQuantKVCache: QuantizedKVCache, TurboQuantCompressedKVCa
             packedFallbackAllocated: turboQuantArrayBytes(super.state) > 0,
             lastAttentionPath: lastAttentionPath.rawValue,
             lastFailure: cacheLifecycle.turboQuantRuntimeFailureReason ?? lastUnsupportedShape
+        )
+    }
+
+    public func exportSnapshot(
+        identity: TurboQuantKVSnapshotIdentity,
+        conversationID: UUID,
+        snapshotID: UUID = UUID(),
+        encryptionKeyID: String = "lm-local-unencrypted",
+        createdAt: Date = Date()
+    ) throws -> TurboQuantKVSnapshotPayload {
+        guard case .compressedCommitted = cacheLifecycle else {
+            throw TurboQuantRuntimeFailure.cacheLifecycleInvalid(
+                "TurboQuant snapshot export requires committed compressed state; current lifecycle is \(cacheLifecycle)"
+            )
+        }
+        guard activeBackend == .metalPolarQJL else {
+            throw TurboQuantRuntimeFailure.cacheLayoutInvalid(
+                "TurboQuant snapshot export requires active Metal compressed backend"
+            )
+        }
+        try validateCompressedState(context: "snapshot export")
+        guard let compressedKeys, let compressedValues else {
+            throw TurboQuantRuntimeFailure.cacheLayoutInvalid(
+                "TurboQuant snapshot export missing compressed key/value state"
+            )
+        }
+        let arrays = try turboQuantSnapshotArrays(from: state)
+        let descriptors = turboQuantSnapshotArrayDescriptors(arrays)
+        let manifest = TurboQuantKVSnapshotManifest(
+            snapshotID: snapshotID,
+            conversationID: conversationID,
+            identity: identity,
+            turboQuantLayoutVersion: compressedKeys.layout.layoutVersion,
+            logicalLength: compressedKeys.layout.logicalLength,
+            pinnedPrefixLength: compressedKeys.layout.pinnedPrefixLength,
+            compressedKeyBytes: Int64(turboQuantCodeBytes(compressedKeys)),
+            compressedValueBytes: Int64(turboQuantCodeBytes(compressedValues)),
+            blobByteCount: Int64(turboQuantArrayBytes(state)),
+            encryptionKeyID: encryptionKeyID,
+            createdAt: createdAt,
+            cacheKind: "TurboQuantKVCache",
+            preset: preset.rawValue,
+            requestedBackend: requestedBackend.rawValue,
+            activeBackend: activeBackend.rawValue,
+            groupSize: groupSize,
+            valueBits: valueBits,
+            seed: seed,
+            mode: mode.rawValue,
+            capacity: compressedKeys.layout.capacity,
+            ringOffset: compressedKeys.layout.ringOffset,
+            batchSize: compressedKeys.layout.batchSize,
+            kvHeadCount: compressedKeys.layout.kvHeadCount,
+            keyHeadDimension: compressedKeys.layout.headDimension,
+            valueHeadDimension: compressedValues.layout.headDimension,
+            arrays: descriptors
+        )
+        return TurboQuantKVSnapshotPayload(manifest: manifest, compressedArrays: arrays)
+    }
+
+    public func importSnapshot(
+        _ payload: TurboQuantKVSnapshotPayload,
+        expectedIdentity: TurboQuantKVSnapshotIdentity
+    ) throws {
+        guard activeBackend == .metalPolarQJL else {
+            throw TurboQuantRuntimeFailure.cacheLayoutInvalid(
+                "TurboQuant snapshot import requires active Metal compressed backend"
+            )
+        }
+        let manifest = payload.manifest
+        let ordered = try turboQuantValidateSnapshotManifest(
+            manifest,
+            expectedIdentity: expectedIdentity,
+            expectedCacheKind: "TurboQuantKVCache",
+            expectedPreset: preset,
+            expectedRequestedBackend: requestedBackend,
+            expectedActiveBackend: activeBackend,
+            expectedGroupSize: groupSize,
+            expectedValueBits: valueBits,
+            expectedSeed: seed,
+            expectedMode: mode,
+            arrays: payload.compressedArrays
+        )
+        let imported = try turboQuantSnapshotImportedCodes(
+            manifest: manifest,
+            ordered: ordered,
+            preset: preset,
+            groupSize: groupSize,
+            seed: seed,
+            valueBits: valueBits
+        )
+        let residentBytes = turboQuantCodeBytes(imported.keys) + turboQuantCodeBytes(imported.values)
+        if let residentBudgetBytes, residentBytes > residentBudgetBytes {
+            throw TurboQuantRuntimeFailure.fallbackBudgetExceeded(
+                "TurboQuant snapshot resident bytes \(residentBytes) exceed admitted budget \(residentBudgetBytes)"
+            )
+        }
+        super.state = []
+        restoredLayoutMetadata = RestoredAttentionLayoutMetadata(
+            capacity: manifest.capacity,
+            logicalLength: manifest.logicalLength,
+            ringOffset: manifest.ringOffset,
+            pinnedPrefixLength: manifest.pinnedPrefixLength,
+            headDimension: manifest.keyHeadDimension,
+            valueHeadDimension: manifest.valueHeadDimension,
+            kvHeadCount: manifest.kvHeadCount
+        )
+        offset = manifest.logicalLength
+        compressedKeys = imported.keys
+        compressedValues = imported.values
+        lastDecodedTransientBytes = 0
+        lastUnsupportedShape = nil
+        cacheLifecycle = .compressedCommitted(
+            logicalLength: manifest.logicalLength,
+            capacity: manifest.capacity
         )
     }
 
@@ -1506,6 +1920,142 @@ public final class RotatingTurboQuantKVCache: BaseKVCache, QuantizedKVCacheProto
                 || packedValues != nil,
             lastAttentionPath: lastAttentionPath.rawValue,
             lastFailure: cacheLifecycle.turboQuantRuntimeFailureReason ?? lastUnsupportedShape
+        )
+    }
+
+    public func exportSnapshot(
+        identity: TurboQuantKVSnapshotIdentity,
+        conversationID: UUID,
+        snapshotID: UUID = UUID(),
+        encryptionKeyID: String = "lm-local-unencrypted",
+        createdAt: Date = Date()
+    ) throws -> TurboQuantKVSnapshotPayload {
+        guard case .compressedCommitted = cacheLifecycle else {
+            throw TurboQuantRuntimeFailure.cacheLifecycleInvalid(
+                "TurboQuant rotating snapshot export requires committed compressed state; current lifecycle is \(cacheLifecycle)"
+            )
+        }
+        guard activeBackend == .metalPolarQJL else {
+            throw TurboQuantRuntimeFailure.cacheLayoutInvalid(
+                "TurboQuant rotating snapshot export requires active Metal compressed backend"
+            )
+        }
+        try validateCompressedState(context: "rotating snapshot export")
+        guard let compressedKeys, let compressedValues else {
+            throw TurboQuantRuntimeFailure.cacheLayoutInvalid(
+                "TurboQuant rotating snapshot export missing compressed key/value state"
+            )
+        }
+        let arrays = try turboQuantSnapshotArrays(from: state)
+        let descriptors = turboQuantSnapshotArrayDescriptors(arrays)
+        let manifest = TurboQuantKVSnapshotManifest(
+            snapshotID: snapshotID,
+            conversationID: conversationID,
+            identity: identity,
+            turboQuantLayoutVersion: compressedKeys.layout.layoutVersion,
+            logicalLength: compressedKeys.layout.logicalLength,
+            pinnedPrefixLength: compressedKeys.layout.pinnedPrefixLength,
+            compressedKeyBytes: Int64(turboQuantCodeBytes(compressedKeys)),
+            compressedValueBytes: Int64(turboQuantCodeBytes(compressedValues)),
+            blobByteCount: Int64(turboQuantArrayBytes(state)),
+            encryptionKeyID: encryptionKeyID,
+            createdAt: createdAt,
+            cacheKind: "RotatingTurboQuantKVCache",
+            preset: preset.rawValue,
+            requestedBackend: requestedBackend.rawValue,
+            activeBackend: activeBackend.rawValue,
+            groupSize: groupSize,
+            valueBits: valueBits,
+            seed: seed,
+            mode: mode.rawValue,
+            capacity: compressedKeys.layout.capacity,
+            ringOffset: compressedKeys.layout.ringOffset,
+            batchSize: compressedKeys.layout.batchSize,
+            kvHeadCount: compressedKeys.layout.kvHeadCount,
+            keyHeadDimension: compressedKeys.layout.headDimension,
+            valueHeadDimension: compressedValues.layout.headDimension,
+            rotatingKeep: keep,
+            rotatingStep: step,
+            arrays: descriptors
+        )
+        return TurboQuantKVSnapshotPayload(manifest: manifest, compressedArrays: arrays)
+    }
+
+    public func importSnapshot(
+        _ payload: TurboQuantKVSnapshotPayload,
+        expectedIdentity: TurboQuantKVSnapshotIdentity
+    ) throws {
+        guard activeBackend == .metalPolarQJL else {
+            throw TurboQuantRuntimeFailure.cacheLayoutInvalid(
+                "TurboQuant rotating snapshot import requires active Metal compressed backend"
+            )
+        }
+        let manifest = payload.manifest
+        let ordered = try turboQuantValidateSnapshotManifest(
+            manifest,
+            expectedIdentity: expectedIdentity,
+            expectedCacheKind: "RotatingTurboQuantKVCache",
+            expectedPreset: preset,
+            expectedRequestedBackend: requestedBackend,
+            expectedActiveBackend: activeBackend,
+            expectedGroupSize: groupSize,
+            expectedValueBits: valueBits,
+            expectedSeed: seed,
+            expectedMode: mode,
+            arrays: payload.compressedArrays
+        )
+        guard manifest.capacity == maxCacheSize else {
+            throw TurboQuantRuntimeFailure.cacheLayoutInvalid(
+                "TurboQuant rotating snapshot capacity \(manifest.capacity) does not match cache maxSize \(maxCacheSize)"
+            )
+        }
+        guard pinnedPrefixLength(forLogicalLength: manifest.logicalLength)
+            == manifest.pinnedPrefixLength
+        else {
+            throw TurboQuantRuntimeFailure.cacheLayoutInvalid(
+                "TurboQuant rotating snapshot pinned prefix \(manifest.pinnedPrefixLength) does not match cache keep \(keep)"
+            )
+        }
+        let imported = try turboQuantSnapshotImportedCodes(
+            manifest: manifest,
+            ordered: ordered,
+            preset: preset,
+            groupSize: groupSize,
+            seed: seed,
+            valueBits: valueBits
+        )
+        let residentBytes = turboQuantCodeBytes(imported.keys) + turboQuantCodeBytes(imported.values)
+        if let residentBudgetBytes, residentBytes > residentBudgetBytes {
+            throw TurboQuantRuntimeFailure.fallbackBudgetExceeded(
+                "TurboQuant rotating snapshot resident bytes \(residentBytes) exceed admitted budget \(residentBudgetBytes)"
+            )
+        }
+        restoredLayoutMetadata = RestoredAttentionLayoutMetadata(
+            capacity: manifest.capacity,
+            logicalLength: manifest.logicalLength,
+            ringOffset: manifest.ringOffset,
+            pinnedPrefixLength: manifest.pinnedPrefixLength,
+            headDimension: manifest.keyHeadDimension,
+            valueHeadDimension: manifest.valueHeadDimension,
+            kvHeadCount: manifest.kvHeadCount
+        )
+        let ringCapacity = manifest.capacity - manifest.pinnedPrefixLength
+        offset =
+            manifest.logicalLength == manifest.capacity && ringCapacity > 0
+            ? manifest.capacity + manifest.ringOffset
+            : manifest.logicalLength
+        writeIndex = nextWriteIndex(afterOffset: offset)
+        rawFallbackCache = nil
+        packedFallbackCache = nil
+        packedKeys = nil
+        packedValues = nil
+        compressedKeys = imported.keys
+        compressedValues = imported.values
+        lastDecodedTransientBytes = 0
+        lastUnsupportedShape = nil
+        cacheLifecycle = .compressedCommitted(
+            logicalLength: manifest.logicalLength,
+            capacity: manifest.capacity
         )
     }
 
