@@ -35,7 +35,7 @@ The expected `Package.swift` dependency is:
 ```swift
 .package(
     url: "https://github.com/RNT56/mlx-swift",
-    revision: "c88d18c62b699927602b0eff76648d846fca297d"
+    revision: "cbea339ac81d701ea24df1bdc8b3008bcb99945a"
 )
 ```
 

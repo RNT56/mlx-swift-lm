@@ -6,5 +6,15 @@ import Foundation
 /// their current memory behavior. Apps that want MTP should set
 /// ``retainMTPWeights`` before loading an MTP-capable model.
 public enum MTPConfig {
-    public nonisolated(unsafe) static var retainMTPWeights = false
+    private static let lock = NSLock()
+    private nonisolated(unsafe) static var retainedMTPWeights = false
+
+    public static var retainMTPWeights: Bool {
+        get {
+            lock.withLock { retainedMTPWeights }
+        }
+        set {
+            lock.withLock { retainedMTPWeights = newValue }
+        }
+    }
 }
