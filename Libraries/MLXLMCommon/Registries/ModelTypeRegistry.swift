@@ -23,6 +23,11 @@ public actor ModelTypeRegistry<T> {
         creators[type] = creator
     }
 
+    /// Registered `model_type` values currently known to this registry.
+    public var registeredModelTypes: [String] {
+        creators.keys.sorted()
+    }
+
     /// Given a `modelType` and configuration data instantiate a new `LanguageModel`.
     public func createModel(configuration: Data, modelType: String) throws -> sending T {
         guard let creator = creators[modelType] else {
