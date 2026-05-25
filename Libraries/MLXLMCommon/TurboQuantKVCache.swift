@@ -123,6 +123,8 @@ public protocol TurboQuantCompressedKVCacheProtocol: KVCache, AnyObject {
     var fallbackResults: [TurboQuantFallbackResult] { get }
     var cacheFootprint: TurboQuantRuntimeCacheFootprint { get }
 
+    func runtimeSnapshot() -> TurboQuantCacheRuntimeSnapshot
+
     func supportsCompressedAttention(
         queries: MLXArray,
         keys: MLXArray,
@@ -247,6 +249,7 @@ private func turboQuantSupportsPackedFallback(
 private enum TurboQuantCacheError: Error, CustomStringConvertible {
     case compressedBackfillUnavailable(String)
     case compressedStorageInvalid(String)
+    case cacheLifecycleInvalid(String)
     case residentBudgetExceeded(residentBytes: Int, budgetBytes: Int)
 
     var description: String {
@@ -255,6 +258,8 @@ private enum TurboQuantCacheError: Error, CustomStringConvertible {
             "TurboQuant compressed cache backfill unavailable: \(message)"
         case .compressedStorageInvalid(let message):
             "TurboQuant compressed cache storage invalid: \(message)"
+        case .cacheLifecycleInvalid(let message):
+            "TurboQuant cache lifecycle invalid: \(message)"
         case .residentBudgetExceeded(let residentBytes, let budgetBytes):
             "TurboQuant compressed cache resident bytes \(residentBytes) exceed admitted budget \(budgetBytes)"
         }
@@ -273,6 +278,60 @@ private func turboQuantCodeBytes(_ code: TurboQuantAttentionCode) -> Int {
         code.residualSigns,
         code.scales,
     ])
+}
+
+private func turboQuantKeyValueBytes(_ arrays: [MLXArray]) -> (keyBytes: Int, valueBytes: Int) {
+    switch arrays.count {
+    case 0:
+        return (0, 0)
+    case 1:
+        return (arrays[0].nbytes, 0)
+    case 2:
+        return (arrays[0].nbytes, arrays[1].nbytes)
+    case 4:
+        return (
+            turboQuantArrayBytes(Array(arrays.prefix(2))),
+            turboQuantArrayBytes(Array(arrays.dropFirst(2)))
+        )
+    case 6:
+        return (
+            turboQuantArrayBytes(Array(arrays.prefix(3))),
+            turboQuantArrayBytes(Array(arrays.dropFirst(3)))
+        )
+    default:
+        let midpoint = arrays.count / 2
+        return (
+            turboQuantArrayBytes(Array(arrays.prefix(midpoint))),
+            turboQuantArrayBytes(Array(arrays.dropFirst(midpoint)))
+        )
+    }
+}
+
+private func turboQuantStorageTokenCapacity(_ arrays: [MLXArray]) -> Int {
+    guard let firstTemporalArray = arrays.first(where: { $0.ndim >= 3 }) else { return 0 }
+    return max(0, firstTemporalArray.dim(2))
+}
+
+private func validateTurboQuantUpdateInputs(
+    keys: MLXArray,
+    values: MLXArray,
+    context: String
+) throws {
+    guard keys.ndim == 4, values.ndim == 4 else {
+        throw TurboQuantCacheError.compressedStorageInvalid(
+            "\(context): keys and values must be rank 4"
+        )
+    }
+    guard keys.dim(0) == values.dim(0), keys.dim(1) == values.dim(1) else {
+        throw TurboQuantCacheError.compressedStorageInvalid(
+            "\(context): key/value batch or head counts differ"
+        )
+    }
+    guard keys.dim(2) == values.dim(2) else {
+        throw TurboQuantCacheError.compressedStorageInvalid(
+            "\(context): key/value token counts differ"
+        )
+    }
 }
 
 private func turboQuantStorageShape(
@@ -670,6 +729,46 @@ public final class TurboQuantKVCache: QuantizedKVCache, TurboQuantCompressedKVCa
             packedFallbackBytes: turboQuantArrayBytes(super.state),
             decodedTransientBytes: lastDecodedTransientBytes,
             lifecycle: cacheLifecycle
+        )
+    }
+
+    public func runtimeSnapshot() -> TurboQuantCacheRuntimeSnapshot {
+        let keyBytes: Int
+        let valueBytes: Int
+        let logicalLength: Int
+        let capacity: Int
+        let pinnedPrefixLength: Int
+        let ringOffset: Int
+
+        if let compressedKeys, let compressedValues {
+            keyBytes = turboQuantCodeBytes(compressedKeys)
+            valueBytes = turboQuantCodeBytes(compressedValues)
+            logicalLength = compressedKeys.layout.logicalLength
+            capacity = compressedKeys.layout.capacity
+            pinnedPrefixLength = compressedKeys.layout.pinnedPrefixLength
+            ringOffset = compressedKeys.layout.ringOffset
+        } else {
+            let packedBytes = turboQuantKeyValueBytes(super.state)
+            keyBytes = packedBytes.keyBytes
+            valueBytes = packedBytes.valueBytes
+            logicalLength = offset
+            capacity = turboQuantStorageTokenCapacity(super.state)
+            pinnedPrefixLength = 0
+            ringOffset = 0
+        }
+
+        return TurboQuantCacheRuntimeSnapshot(
+            lifecycleDescription: cacheLifecycle.turboQuantRuntimeDescription,
+            logicalLength: logicalLength,
+            capacity: capacity,
+            pinnedPrefixLength: pinnedPrefixLength,
+            ringOffset: ringOffset,
+            keyBytes: keyBytes,
+            valueBytes: valueBytes,
+            rawShadowAllocated: false,
+            packedFallbackAllocated: turboQuantArrayBytes(super.state) > 0,
+            lastAttentionPath: lastAttentionPath.rawValue,
+            lastFailure: cacheLifecycle.turboQuantRuntimeFailureReason ?? lastUnsupportedShape
         )
     }
 
@@ -1364,6 +1463,49 @@ public final class RotatingTurboQuantKVCache: BaseKVCache, QuantizedKVCacheProto
             rawShadowBytes: turboQuantArrayBytes(rawFallbackCache?.state ?? []),
             decodedTransientBytes: lastDecodedTransientBytes,
             lifecycle: cacheLifecycle
+        )
+    }
+
+    public func runtimeSnapshot() -> TurboQuantCacheRuntimeSnapshot {
+        let keyBytes: Int
+        let valueBytes: Int
+        let logicalLength: Int
+        let capacity: Int
+        let pinnedPrefixLength: Int
+        let ringOffset: Int
+
+        if let compressedKeys, let compressedValues {
+            keyBytes = turboQuantCodeBytes(compressedKeys)
+            valueBytes = turboQuantCodeBytes(compressedValues)
+            logicalLength = compressedKeys.layout.logicalLength
+            capacity = compressedKeys.layout.capacity
+            pinnedPrefixLength = compressedKeys.layout.pinnedPrefixLength
+            ringOffset = compressedKeys.layout.ringOffset
+        } else {
+            let rawBytes = turboQuantKeyValueBytes(rawFallbackCache?.state ?? [])
+            let packedBytes = turboQuantKeyValueBytes(packedFallbackCache?.state ?? [])
+            keyBytes = rawBytes.keyBytes + packedBytes.keyBytes
+            valueBytes = rawBytes.valueBytes + packedBytes.valueBytes
+            logicalLength = min(offset, maxCacheSize)
+            capacity = maxCacheSize
+            pinnedPrefixLength = self.pinnedPrefixLength(forLogicalLength: logicalLength)
+            ringOffset = self.ringOffset(forOffset: offset)
+        }
+
+        return TurboQuantCacheRuntimeSnapshot(
+            lifecycleDescription: cacheLifecycle.turboQuantRuntimeDescription,
+            logicalLength: logicalLength,
+            capacity: capacity,
+            pinnedPrefixLength: pinnedPrefixLength,
+            ringOffset: ringOffset,
+            keyBytes: keyBytes,
+            valueBytes: valueBytes,
+            rawShadowAllocated: turboQuantArrayBytes(rawFallbackCache?.state ?? []) > 0,
+            packedFallbackAllocated: turboQuantArrayBytes(packedFallbackCache?.state ?? []) > 0
+                || packedKeys != nil
+                || packedValues != nil,
+            lastAttentionPath: lastAttentionPath.rawValue,
+            lastFailure: cacheLifecycle.turboQuantRuntimeFailureReason ?? lastUnsupportedShape
         )
     }
 
