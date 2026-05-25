@@ -4,6 +4,8 @@ W6 owns model profile schema v2. W22 owns quality gate output. Together they ens
 
 Launch wave: Wave 3. Profile v2 and quality output become product-relevant once bridge integration and evidence schemas exist.
 
+Status: implemented on the LM side for W6 and W22 quality-output support. This does not activate Verified product claims, snapshots, speculative decode, Pines bridge wiring, project pins, or generated project changes.
+
 ## W6 worker
 
 | Worker | Branch | Phase | Priority |
@@ -71,6 +73,8 @@ public struct TurboQuantProfileMismatch: Codable, Sendable {
 }
 ```
 
+LM now exposes `TurboQuantProfileMismatch` with these fields. Manifest validation exposes `mismatches`, and profile selection diagnostics also carry structured mismatches while preserving existing human-readable rejection reasons.
+
 ## Quality output
 
 LM benchmark output should include:
@@ -84,6 +88,25 @@ LM benchmark output should include:
 - snapshot roundtrip equivalence when applicable.
 
 Quality object is defined by Pines `QualityGate.v1`, but LM benchmark output should be able to populate it.
+
+`TurboQuantModelBenchmark` now emits:
+
+- top-level `qualityGate`;
+- per-result `quality`;
+- `schemaVersion = 1` and `gateVersion = 1`;
+- `benchmarkSuiteID`;
+- `deterministicTop1MatchRate`;
+- `logitKLDivergenceMean`;
+- `logitMaxAbsErrorP95`;
+- optional `attentionOutputCosineMean`;
+- `noNaNOrInf`;
+- `fallbackEquivalent`;
+- `prefillExact`;
+- optional `snapshotRoundtripEquivalent`;
+- `gateReason`;
+- `passed`.
+
+The benchmark computes the synthetic reference by decoding the compressed cache state and running exact SDPA over that decoded state, then compares compressed attention output against that reference. Snapshot roundtrip remains optional and unpopulated here because W14 snapshot activation is out of scope.
 
 ## Tests
 
@@ -103,6 +126,25 @@ Quality tests:
 - no NaN/Inf;
 - quality block appears in benchmark JSON.
 
+Implemented coverage:
+
+- schema v1 and future schema profiles fail closed during selection;
+- unsupported layout version fails closed during selection;
+- manifest mismatch DTO exports stable `field`, `expected`, `actual`, and `disablesTurboQuant`;
+- golden QualityGate-shaped benchmark JSON decodes with aggregate `qualityGate` and per-result `quality`;
+- quality gate fails closed when NaN/Inf is reported.
+
 ## Acceptance
 
 W6/W22 are complete when model profile activation fails closed on mismatch and benchmark reports can produce quality data consumed by Pines evidence import.
+
+Current validation:
+
+```sh
+swift build --target MLXLMCommon
+swift build --target TurboQuantModelBenchmark
+swift test --filter TurboQuantProfileTests
+swift run TurboQuantModelBenchmark --iterations 1 --head-dims 64 --contexts 1 --query-lengths 1
+```
+
+All four commands passed locally on 2026-05-25. The benchmark run emitted aggregate and per-result quality blocks; it is still evidence input, not a product compatibility claim.

@@ -475,6 +475,34 @@ public struct TurboQuantProfileManifestIssue: Codable, Equatable, Sendable {
     }
 }
 
+public struct TurboQuantProfileMismatch: Codable, Equatable, Sendable {
+    public var field: String
+    public var expected: String
+    public var actual: String
+    public var disablesTurboQuant: Bool
+
+    public init(
+        field: String,
+        expected: String,
+        actual: String,
+        disablesTurboQuant: Bool = true
+    ) {
+        self.field = field
+        self.expected = expected
+        self.actual = actual
+        self.disablesTurboQuant = disablesTurboQuant
+    }
+
+    public init(manifestIssue issue: TurboQuantProfileManifestIssue) {
+        self.init(
+            field: issue.field,
+            expected: issue.expected ?? "present",
+            actual: issue.actual ?? "missing",
+            disablesTurboQuant: true
+        )
+    }
+}
+
 public struct TurboQuantProfileManifestValidation: Codable, Equatable, Sendable {
     public var profileID: String
     public var issues: [TurboQuantProfileManifestIssue]
@@ -485,6 +513,10 @@ public struct TurboQuantProfileManifestValidation: Codable, Equatable, Sendable 
     }
 
     public var isValid: Bool { issues.isEmpty }
+
+    public var mismatches: [TurboQuantProfileMismatch] {
+        issues.map(TurboQuantProfileMismatch.init(manifestIssue:))
+    }
 }
 
 public struct TurboQuantProfileMeasurements: Codable, Equatable, Sendable {
@@ -591,6 +623,8 @@ public struct TurboQuantModelDescriptor: Equatable, Sendable {
 }
 
 public struct TurboQuantProfile: Codable, Equatable, Identifiable, Sendable {
+    public static let currentSchemaVersion = 2
+
     public var schemaVersion: Int
     public var id: String
     public var exactModelIDs: [String]
@@ -927,13 +961,13 @@ public struct TurboQuantProfile: Codable, Equatable, Identifiable, Sendable {
         requireMeasuredOutcomes: Bool = true
     ) -> TurboQuantProfileManifestValidation {
         var issues = [TurboQuantProfileManifestIssue]()
-        if schemaVersion != 2 {
+        if schemaVersion != Self.currentSchemaVersion {
             issues.append(
                 TurboQuantProfileManifestIssue(
                     profileID: id,
                     field: "schema_version",
                     kind: .unsupportedSchemaVersion,
-                    expected: "2",
+                    expected: String(Self.currentSchemaVersion),
                     actual: String(schemaVersion),
                     reason: "TurboQuant product manifests require schema version 2"
                 )
@@ -1136,11 +1170,19 @@ public struct TurboQuantProfileRegistry: Sendable {
                 maskMode: maskMode,
                 contextLength: contextLength,
                 requireFingerprint: requireFingerprint)
+            let mismatches = profile.rejectionMismatches(
+                descriptor: descriptor,
+                keyHeadDimension: keyHeadDimension,
+                valueHeadDimension: valueHeadDimension,
+                maskMode: maskMode,
+                contextLength: contextLength,
+                requireFingerprint: requireFingerprint)
             diagnostics.append(
                 TurboQuantProfileDiagnostic(
                     profileID: profile.id,
                     accepted: reasons.isEmpty,
-                    reasons: reasons))
+                    reasons: reasons,
+                    mismatches: mismatches))
             if reasons.isEmpty {
                 return TurboQuantProfileSelection(
                     descriptor: descriptor,
@@ -1177,6 +1219,19 @@ public struct TurboQuantProfileDiagnostic: Equatable, Sendable {
     public var profileID: String
     public var accepted: Bool
     public var reasons: [String]
+    public var mismatches: [TurboQuantProfileMismatch]
+
+    public init(
+        profileID: String,
+        accepted: Bool,
+        reasons: [String],
+        mismatches: [TurboQuantProfileMismatch] = []
+    ) {
+        self.profileID = profileID
+        self.accepted = accepted
+        self.reasons = reasons
+        self.mismatches = mismatches
+    }
 }
 
 public struct TurboQuantProfileSelection: Equatable, Sendable {
@@ -1188,6 +1243,10 @@ public struct TurboQuantProfileSelection: Equatable, Sendable {
         diagnostics.flatMap { diagnostic in
             diagnostic.reasons.map { "\(diagnostic.profileID): \($0)" }
         }
+    }
+
+    public var mismatches: [TurboQuantProfileMismatch] {
+        diagnostics.flatMap(\.mismatches)
     }
 }
 
@@ -1252,6 +1311,34 @@ extension TurboQuantProfile {
         requireFingerprint: Bool = false
     ) -> [String] {
         var reasons = [String]()
+        if schemaVersion != Self.currentSchemaVersion {
+            reasons.append(
+                "schema version \(schemaVersion) is unsupported; expected \(Self.currentSchemaVersion)"
+            )
+        }
+        if turboQuant.layoutVersion != TurboQuantAttentionLayout.currentVersion {
+            reasons.append(
+                "TurboQuant layout version \(turboQuant.layoutVersion) is unsupported; expected \(TurboQuantAttentionLayout.currentVersion)"
+            )
+        }
+        if turboQuant.keyPreset != recommendedScheme {
+            reasons.append(
+                "TurboQuant key preset '\(turboQuant.keyPreset.rawValue)' does not match recommended scheme '\(recommendedScheme.rawValue)'"
+            )
+        }
+        if turboQuant.valueBits != valueBits {
+            reasons.append(
+                "TurboQuant value bits \(turboQuant.valueBits) do not match profile value bits \(valueBits)"
+            )
+        }
+        if turboQuant.groupSize != groupSize {
+            reasons.append(
+                "TurboQuant group size \(turboQuant.groupSize) does not match profile group size \(groupSize)"
+            )
+        }
+        if turboQuant.preferredPaths.isEmpty {
+            reasons.append("TurboQuant preferred paths are required")
+        }
         if status == .deprecated {
             reasons.append("profile is deprecated")
         }
@@ -1394,6 +1481,281 @@ extension TurboQuantProfile {
         }
 
         return reasons
+    }
+
+    fileprivate func rejectionMismatches(
+        descriptor: TurboQuantModelDescriptor,
+        keyHeadDimension: Int? = nil,
+        valueHeadDimension: Int? = nil,
+        maskMode: TurboQuantMaskMode = .causal,
+        contextLength: Int? = nil,
+        requireFingerprint: Bool = false
+    ) -> [TurboQuantProfileMismatch] {
+        var mismatches = [TurboQuantProfileMismatch]()
+        func append(_ field: String, expected: String, actual: String?) {
+            mismatches.append(
+                TurboQuantProfileMismatch(
+                    field: field,
+                    expected: expected,
+                    actual: actual ?? "missing"
+                )
+            )
+        }
+
+        if schemaVersion != Self.currentSchemaVersion {
+            append(
+                "schema_version",
+                expected: String(Self.currentSchemaVersion),
+                actual: String(schemaVersion)
+            )
+        }
+        if turboQuant.layoutVersion != TurboQuantAttentionLayout.currentVersion {
+            append(
+                "turbo_quant.layout_version",
+                expected: String(TurboQuantAttentionLayout.currentVersion),
+                actual: String(turboQuant.layoutVersion)
+            )
+        }
+        if turboQuant.keyPreset != recommendedScheme {
+            append(
+                "turbo_quant.key_preset",
+                expected: recommendedScheme.rawValue,
+                actual: turboQuant.keyPreset.rawValue
+            )
+        }
+        if turboQuant.valueBits != valueBits {
+            append(
+                "turbo_quant.value_bits",
+                expected: String(valueBits),
+                actual: String(turboQuant.valueBits)
+            )
+        }
+        if turboQuant.groupSize != groupSize {
+            append(
+                "turbo_quant.group_size",
+                expected: String(groupSize),
+                actual: String(turboQuant.groupSize)
+            )
+        }
+        if turboQuant.preferredPaths.isEmpty {
+            append(
+                "turbo_quant.preferred_paths",
+                expected: "non-empty",
+                actual: "empty"
+            )
+        }
+        if status == .deprecated {
+            append("status", expected: "active", actual: status.rawValue)
+        }
+        if requireFingerprint, modelFingerprint == nil {
+            append("model_fingerprint", expected: "present", actual: nil)
+        }
+        if requireFingerprint, let modelFingerprint {
+            for field in modelFingerprint.missingRequiredFields {
+                append(field, expected: "present", actual: nil)
+            }
+        }
+        if let actualFingerprint = descriptor.fingerprint, let modelFingerprint {
+            mismatches.append(
+                contentsOf: modelFingerprint.mismatchIssues(
+                    comparedTo: actualFingerprint,
+                    profileID: id
+                ).map(TurboQuantProfileMismatch.init(manifestIssue:))
+            )
+        }
+
+        if requiresModelType, descriptor.modelType == nil {
+            append("model_type", expected: expectedModelTypesDescription, actual: nil)
+        } else if let modelType = descriptor.modelType {
+            let normalizedModelType = Self.normalizedModelType(modelType)
+            let allowedTypes = Set(
+                (modelTypes.isEmpty ? [architecture].compactMap { $0 } : modelTypes)
+                    .map(Self.normalizedModelType))
+            if !allowedTypes.isEmpty, !allowedTypes.contains(normalizedModelType) {
+                append(
+                    "model_type",
+                    expected: expectedModelTypesDescription,
+                    actual: modelType
+                )
+            }
+        }
+        if requiresTextConfigModelType, descriptor.textConfigModelType == nil {
+            append(
+                "text_config.model_type",
+                expected: expectedTextConfigModelTypesDescription,
+                actual: nil
+            )
+        } else if let textConfigModelType = descriptor.textConfigModelType {
+            let normalizedTextConfigModelType = Self.normalizedModelType(textConfigModelType)
+            let allowedTextTypes = Set(textConfigModelTypes.map(Self.normalizedModelType))
+            if !allowedTextTypes.isEmpty, !allowedTextTypes.contains(normalizedTextConfigModelType)
+            {
+                append(
+                    "text_config.model_type",
+                    expected: expectedTextConfigModelTypesDescription,
+                    actual: textConfigModelType
+                )
+            }
+        }
+        if let modality = descriptor.modality, !modalities.contains(modality) {
+            append(
+                "modality",
+                expected: modalities.map(\.rawValue).joined(separator: ","),
+                actual: modality.rawValue
+            )
+        }
+
+        let implicitProfileSizeB = TurboQuantModelDescriptor.inferParameterCountB(from: id)
+        let effectiveMinParametersB =
+            minParametersB ?? implicitProfileSizeB.map { max($0 - 0.05, 0) }
+        let effectiveMaxParametersB = maxParametersB ?? implicitProfileSizeB.map { $0 + 0.05 }
+        if (effectiveMinParametersB != nil || effectiveMaxParametersB != nil)
+            && descriptor.parameterCountB == nil
+        {
+            append("parameter_count_b", expected: expectedParameterRangeDescription, actual: nil)
+        }
+        if let effectiveMinParametersB, let parameterCountB = descriptor.parameterCountB,
+            parameterCountB < effectiveMinParametersB
+        {
+            append(
+                "parameter_count_b",
+                expected: expectedParameterRangeDescription,
+                actual: String(parameterCountB)
+            )
+        }
+        if let effectiveMaxParametersB, let parameterCountB = descriptor.parameterCountB,
+            parameterCountB > effectiveMaxParametersB
+        {
+            append(
+                "parameter_count_b",
+                expected: expectedParameterRangeDescription,
+                actual: String(parameterCountB)
+            )
+        }
+        if minRoutedExperts != nil || maxRoutedExperts != nil, descriptor.routedExperts == nil {
+            append("routed_experts", expected: expectedRoutedExpertsDescription, actual: nil)
+        }
+        if let minRoutedExperts, let routedExperts = descriptor.routedExperts,
+            routedExperts < minRoutedExperts
+        {
+            append(
+                "routed_experts",
+                expected: expectedRoutedExpertsDescription,
+                actual: String(routedExperts)
+            )
+        }
+        if let maxRoutedExperts, let routedExperts = descriptor.routedExperts,
+            routedExperts > maxRoutedExperts
+        {
+            append(
+                "routed_experts",
+                expected: expectedRoutedExpertsDescription,
+                actual: String(routedExperts)
+            )
+        }
+        if !supportedExpertsPerToken.isEmpty, descriptor.expertsPerToken == nil {
+            append(
+                "experts_per_token",
+                expected: supportedExpertsPerToken.map(String.init).joined(separator: ","),
+                actual: nil
+            )
+        }
+        if let expertsPerToken = descriptor.expertsPerToken,
+            !supportedExpertsPerToken.isEmpty,
+            !supportedExpertsPerToken.contains(expertsPerToken)
+        {
+            append(
+                "experts_per_token",
+                expected: supportedExpertsPerToken.map(String.init).joined(separator: ","),
+                actual: String(expertsPerToken)
+            )
+        }
+
+        if requiresHeadDimensions, keyHeadDimension == nil {
+            append(
+                "head_dim.key",
+                expected: supportedKeyHeadDimensions.map(String.init).joined(separator: ","),
+                actual: nil
+            )
+        } else if let keyHeadDimension,
+            !supportedKeyHeadDimensions.contains(keyHeadDimension)
+        {
+            append(
+                "head_dim.key",
+                expected: supportedKeyHeadDimensions.map(String.init).joined(separator: ","),
+                actual: String(keyHeadDimension)
+            )
+        }
+        if requiresHeadDimensions, valueHeadDimension == nil {
+            append(
+                "head_dim.value",
+                expected: supportedValueHeadDimensions.map(String.init).joined(separator: ","),
+                actual: nil
+            )
+        } else if let valueHeadDimension,
+            !supportedValueHeadDimensions.contains(valueHeadDimension)
+        {
+            append(
+                "head_dim.value",
+                expected: supportedValueHeadDimensions.map(String.init).joined(separator: ","),
+                actual: String(valueHeadDimension)
+            )
+        }
+        if !safeMaskModes.contains(maskMode) {
+            append(
+                "mask_mode",
+                expected: safeMaskModes.map(\.rawValue).joined(separator: ","),
+                actual: maskMode.rawValue
+            )
+        }
+        if let contextLength, let safeContextLength, contextLength > safeContextLength {
+            append(
+                "context_length",
+                expected: "<= \(safeContextLength)",
+                actual: String(contextLength)
+            )
+        }
+
+        return mismatches
+    }
+
+    private var expectedModelTypesDescription: String {
+        (modelTypes.isEmpty ? [architecture].compactMap { $0 } : modelTypes)
+            .joined(separator: ",")
+    }
+
+    private var expectedTextConfigModelTypesDescription: String {
+        textConfigModelTypes.joined(separator: ",")
+    }
+
+    private var expectedParameterRangeDescription: String {
+        let implicitProfileSizeB = TurboQuantModelDescriptor.inferParameterCountB(from: id)
+        let effectiveMinParametersB =
+            minParametersB ?? implicitProfileSizeB.map { max($0 - 0.05, 0) }
+        let effectiveMaxParametersB = maxParametersB ?? implicitProfileSizeB.map { $0 + 0.05 }
+        switch (effectiveMinParametersB, effectiveMaxParametersB) {
+        case (.some(let min), .some(let max)):
+            return "\(min)...\(max)"
+        case (.some(let min), .none):
+            return ">= \(min)"
+        case (.none, .some(let max)):
+            return "<= \(max)"
+        case (.none, .none):
+            return "any"
+        }
+    }
+
+    private var expectedRoutedExpertsDescription: String {
+        switch (minRoutedExperts, maxRoutedExperts) {
+        case (.some(let min), .some(let max)):
+            return "\(min)...\(max)"
+        case (.some(let min), .none):
+            return ">= \(min)"
+        case (.none, .some(let max)):
+            return "<= \(max)"
+        case (.none, .none):
+            return "any"
+        }
     }
 
     fileprivate static func normalized(_ value: String) -> String {

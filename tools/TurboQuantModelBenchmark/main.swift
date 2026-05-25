@@ -39,13 +39,6 @@ struct BenchmarkThroughputMetrics: Codable {
     var firstTokenLatencySeconds: Double? = nil
 }
 
-struct BenchmarkQualityMetrics: Codable {
-    var logitKL: Double? = nil
-    var top1MatchRate: Double? = nil
-    var longContextRetrievalScore: Double? = nil
-    var goldenTokenMismatch: Bool? = nil
-}
-
 struct BenchmarkCase: Codable {
     var id: String
     var headDim: Int
@@ -64,7 +57,7 @@ struct BenchmarkResult: Codable {
     var latencySeconds: Double?
     var memory: BenchmarkMemoryMetrics
     var throughput: BenchmarkThroughputMetrics
-    var quality: BenchmarkQualityMetrics
+    var quality: TurboQuantQualityGateReport
     var selectedPath: TurboQuantAttentionPath?
     var fallbackReason: String?
     var error: String?
@@ -86,6 +79,7 @@ struct BenchmarkReport: Codable {
     var supportsMetalAttention: Bool
     var modelConfig: BenchmarkModelConfig
     var turboQuant: BenchmarkTurboQuantConfig
+    var qualityGate: TurboQuantQualityGateReport
     var coverageMatrix: [BenchmarkCase]
     var results: [BenchmarkResult]
     var summary: BenchmarkSummary
@@ -210,7 +204,7 @@ func skipped(_ benchmarkCase: BenchmarkCase, reason: String) -> BenchmarkResult 
         latencySeconds: nil,
         memory: BenchmarkMemoryMetrics(),
         throughput: BenchmarkThroughputMetrics(),
-        quality: BenchmarkQualityMetrics(),
+        quality: .failed(reason: reason),
         selectedPath: nil,
         fallbackReason: reason,
         error: nil
@@ -226,7 +220,7 @@ func failed(_ benchmarkCase: BenchmarkCase, error: String) -> BenchmarkResult {
         latencySeconds: nil,
         memory: BenchmarkMemoryMetrics(),
         throughput: BenchmarkThroughputMetrics(),
-        quality: BenchmarkQualityMetrics(),
+        quality: .failed(reason: error),
         selectedPath: nil,
         fallbackReason: nil,
         error: error
@@ -240,6 +234,210 @@ func attentionMask(_ name: String) -> MLXFast.ScaledDotProductAttentionMaskMode 
     default:
         .causal
     }
+}
+
+func qualityGate(candidate: MLXArray, reference: MLXArray) -> TurboQuantQualityGateReport {
+    eval(candidate, reference)
+    let candidateValues = candidate.asArray(Float.self)
+    let referenceValues = reference.asArray(Float.self)
+    guard candidateValues.count == referenceValues.count,
+        let rowWidth = candidate.shape.last,
+        rowWidth > 0,
+        !candidateValues.isEmpty
+    else {
+        return .failed(reason: "candidate and reference quality shapes do not match")
+    }
+
+    let noNaNOrInf =
+        candidateValues.allSatisfy(\.isFinite) && referenceValues.allSatisfy(\.isFinite)
+    let top1MatchRate = rowTop1MatchRate(
+        candidate: candidateValues,
+        reference: referenceValues,
+        rowWidth: rowWidth
+    )
+    let klDivergenceMean = meanKLDivergence(
+        candidate: candidateValues,
+        reference: referenceValues,
+        rowWidth: rowWidth
+    )
+    let p95MaxAbsError = percentile(
+        rowMaxAbsErrors(
+            candidate: candidateValues,
+            reference: referenceValues,
+            rowWidth: rowWidth
+        ),
+        percentile: 0.95
+    )
+    let cosineMean = meanCosineSimilarity(
+        candidate: candidateValues,
+        reference: referenceValues,
+        rowWidth: rowWidth
+    )
+    let fallbackEquivalent =
+        noNaNOrInf
+        && top1MatchRate >= 0.95
+        && klDivergenceMean <= 0.05
+        && p95MaxAbsError <= 0.5
+    let prefillExact = noNaNOrInf && candidate.shape == reference.shape
+
+    return .evaluated(
+        benchmarkSuiteID: .tinyDeterministicLogitsV1,
+        deterministicTop1MatchRate: top1MatchRate,
+        logitKLDivergenceMean: klDivergenceMean,
+        logitMaxAbsErrorP95: p95MaxAbsError,
+        attentionOutputCosineMean: cosineMean,
+        noNaNOrInf: noNaNOrInf,
+        fallbackEquivalent: fallbackEquivalent,
+        prefillExact: prefillExact,
+        snapshotRoundtripEquivalent: nil
+    )
+}
+
+func rowTop1MatchRate(candidate: [Float], reference: [Float], rowWidth: Int) -> Double {
+    let rowCount = min(candidate.count, reference.count) / rowWidth
+    guard rowCount > 0 else { return 0 }
+    var matches = 0
+    for row in 0 ..< rowCount {
+        let start = row * rowWidth
+        let end = start + rowWidth
+        if argmax(Array(candidate[start ..< end])) == argmax(Array(reference[start ..< end])) {
+            matches += 1
+        }
+    }
+    return Double(matches) / Double(rowCount)
+}
+
+func meanKLDivergence(candidate: [Float], reference: [Float], rowWidth: Int) -> Double {
+    let rowCount = min(candidate.count, reference.count) / rowWidth
+    guard rowCount > 0 else { return Double.greatestFiniteMagnitude }
+    var total = 0.0
+    for row in 0 ..< rowCount {
+        let start = row * rowWidth
+        let end = start + rowWidth
+        let candidateRow = Array(candidate[start ..< end]).map(Double.init)
+        let referenceRow = Array(reference[start ..< end]).map(Double.init)
+        total += klDivergence(candidateLogits: candidateRow, referenceLogits: referenceRow)
+    }
+    return total / Double(rowCount)
+}
+
+func rowMaxAbsErrors(candidate: [Float], reference: [Float], rowWidth: Int) -> [Double] {
+    let rowCount = min(candidate.count, reference.count) / rowWidth
+    guard rowCount > 0 else { return [] }
+    var errors = [Double]()
+    errors.reserveCapacity(rowCount)
+    for row in 0 ..< rowCount {
+        let start = row * rowWidth
+        let end = start + rowWidth
+        let rowError = zip(candidate[start ..< end], reference[start ..< end])
+            .reduce(Double(0)) { partial, pair in
+                max(partial, Double(abs(pair.0 - pair.1)))
+            }
+        errors.append(rowError)
+    }
+    return errors
+}
+
+func meanCosineSimilarity(candidate: [Float], reference: [Float], rowWidth: Int) -> Double {
+    let rowCount = min(candidate.count, reference.count) / rowWidth
+    guard rowCount > 0 else { return 0 }
+    var total = 0.0
+    for row in 0 ..< rowCount {
+        let start = row * rowWidth
+        let end = start + rowWidth
+        var dot = 0.0
+        var candidateNorm = 0.0
+        var referenceNorm = 0.0
+        for (candidateValue, referenceValue) in zip(candidate[start ..< end], reference[start ..< end]) {
+            let c = Double(candidateValue)
+            let r = Double(referenceValue)
+            dot += c * r
+            candidateNorm += c * c
+            referenceNorm += r * r
+        }
+        let denominator = sqrt(candidateNorm) * sqrt(referenceNorm)
+        total += denominator > 0 ? dot / denominator : 0
+    }
+    return total / Double(rowCount)
+}
+
+func klDivergence(candidateLogits: [Double], referenceLogits: [Double]) -> Double {
+    guard candidateLogits.allSatisfy(\.isFinite), referenceLogits.allSatisfy(\.isFinite) else {
+        return Double.greatestFiniteMagnitude
+    }
+    let candidateLogProbs = logSoftmax(candidateLogits)
+    let referenceLogProbs = logSoftmax(referenceLogits)
+    return zip(referenceLogProbs, candidateLogProbs).reduce(0.0) { partial, pair in
+        let referenceProbability = exp(pair.0)
+        return partial + referenceProbability * (pair.0 - pair.1)
+    }
+}
+
+func logSoftmax(_ values: [Double]) -> [Double] {
+    guard let maxValue = values.max(), maxValue.isFinite else {
+        return Array(repeating: -Double.greatestFiniteMagnitude, count: values.count)
+    }
+    let shiftedExpSum = values.reduce(0.0) { partial, value in
+        partial + exp(value - maxValue)
+    }
+    let logDenominator = maxValue + log(max(shiftedExpSum, Double.leastNonzeroMagnitude))
+    return values.map { $0 - logDenominator }
+}
+
+func argmax(_ values: [Float]) -> Int {
+    guard var bestValue = values.first else { return -1 }
+    var bestIndex = 0
+    for index in values.indices.dropFirst() where values[index] > bestValue {
+        bestValue = values[index]
+        bestIndex = index
+    }
+    return bestIndex
+}
+
+func percentile(_ values: [Double], percentile: Double) -> Double {
+    guard !values.isEmpty else { return Double.greatestFiniteMagnitude }
+    let sorted = values.sorted()
+    let clamped = min(max(percentile, 0), 1)
+    let index = min(
+        sorted.count - 1,
+        max(0, Int(ceil(clamped * Double(sorted.count))) - 1)
+    )
+    return sorted[index]
+}
+
+func aggregateQualityGate(_ results: [BenchmarkResult]) -> TurboQuantQualityGateReport {
+    let successfulQuality = results
+        .filter { $0.status == "ok" }
+        .map(\.quality)
+    guard !successfulQuality.isEmpty else {
+        return .failed(reason: "no successful benchmark cases")
+    }
+    let count = Double(successfulQuality.count)
+    let top1 = successfulQuality.reduce(0.0) {
+        $0 + $1.deterministicTop1MatchRate
+    } / count
+    let kl = successfulQuality.reduce(0.0) {
+        $0 + $1.logitKLDivergenceMean
+    } / count
+    let p95 = percentile(
+        successfulQuality.map(\.logitMaxAbsErrorP95),
+        percentile: 0.95
+    )
+    let finiteCosines = successfulQuality.compactMap(\.attentionOutputCosineMean)
+    let cosineMean =
+        finiteCosines.isEmpty ? nil : finiteCosines.reduce(0, +) / Double(finiteCosines.count)
+
+    return .evaluated(
+        benchmarkSuiteID: .tinyDeterministicLogitsV1,
+        deterministicTop1MatchRate: top1,
+        logitKLDivergenceMean: kl,
+        logitMaxAbsErrorP95: p95,
+        attentionOutputCosineMean: cosineMean,
+        noNaNOrInf: successfulQuality.allSatisfy(\.noNaNOrInf),
+        fallbackEquivalent: successfulQuality.allSatisfy(\.fallbackEquivalent),
+        prefillExact: successfulQuality.allSatisfy(\.prefillExact),
+        snapshotRoundtripEquivalent: nil
+    )
 }
 
 func runCase(
@@ -320,6 +518,15 @@ func runCase(
             kernelProfile: cache.attentionDiagnostics.selectedKernelProfile
         )
     }
+    let (decodedKeys, decodedValues) = try cache.decodedCompressedState(outputDType: .float32)
+    let reference = MLXFast.scaledDotProductAttention(
+        queries: queries,
+        keys: decodedKeys,
+        values: decodedValues,
+        scale: scale,
+        mask: attentionMask(benchmarkCase.mask)
+    )
+    let quality = qualityGate(candidate: output, reference: reference)
 
     return BenchmarkResult(
         id: benchmarkCase.id,
@@ -336,7 +543,7 @@ func runCase(
             prefillTokensPerSecond: Double(context) / max(prefillLatency, .leastNonzeroMagnitude),
             firstTokenLatencySeconds: queryLength == 1 ? decodeLatency : nil
         ),
-        quality: BenchmarkQualityMetrics(goldenTokenMismatch: nil),
+        quality: quality,
         selectedPath: cache.attentionDiagnostics.activeAttentionPath,
         fallbackReason: cache.attentionDiagnostics.fallbackReason,
         error: nil
@@ -373,6 +580,7 @@ for benchmarkCase in cases {
 let okCount = results.filter { $0.status == "ok" }.count
 let skippedCount = results.filter { $0.status == "skipped" }.count
 let failedCount = results.filter { $0.status == "failed" }.count
+let aggregateQuality = aggregateQualityGate(results)
 let firstSelectedPath = results.compactMap(\.selectedPath).first
 let firstActualBytesPerToken =
     results.first(where: { $0.status == "ok" }).flatMap { result -> Double? in
@@ -435,6 +643,7 @@ let report = BenchmarkReport(
         kernelProfile: availability.selectedKernelProfile.rawValue,
         actualBytesPerToken: firstActualBytesPerToken
     ),
+    qualityGate: aggregateQuality,
     coverageMatrix: cases,
     results: results,
     summary: BenchmarkSummary(ok: okCount, skipped: skippedCount, failed: failedCount)

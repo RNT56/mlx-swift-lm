@@ -1260,6 +1260,150 @@ extension MLXRuntimeSwiftTests {
             )
         }
 
+        @Test func testProfileSchemaVersionFailsClosedDuringSelection() {
+            let profiles = [
+                TurboQuantProfile(
+                    schemaVersion: 1,
+                    id: "legacy-schema",
+                    modelPatterns: ["*schema-test*"],
+                    architecture: "qwen3",
+                    modelTypes: ["qwen3"],
+                    requiresModelType: true,
+                    requiresHeadDimensions: true,
+                    supportedKeyHeadDimensions: [128]
+                ),
+                TurboQuantProfile(
+                    schemaVersion: TurboQuantProfile.currentSchemaVersion + 1,
+                    id: "future-schema",
+                    modelPatterns: ["*schema-test*"],
+                    architecture: "qwen3",
+                    modelTypes: ["qwen3"],
+                    requiresModelType: true,
+                    requiresHeadDimensions: true,
+                    supportedKeyHeadDimensions: [128]
+                ),
+            ]
+            let selection = TurboQuantProfileRegistry(profiles: profiles).selection(
+                for: TurboQuantModelDescriptor(
+                    modelID: "mlx-community/schema-test-4B-4bit",
+                    modelType: "qwen3",
+                    parameterCountB: 4
+                ),
+                keyHeadDimension: 128,
+                valueHeadDimension: 128
+            )
+
+            #expect(selection.profile == nil)
+            #expect(
+                selection.rejectionReasons.contains {
+                    $0.contains("schema version 1 is unsupported; expected 2")
+                }
+            )
+            #expect(
+                selection.rejectionReasons.contains {
+                    $0.contains("schema version 3 is unsupported; expected 2")
+                }
+            )
+            #expect(
+                selection.mismatches.contains {
+                    $0.field == "schema_version"
+                        && $0.expected == "2"
+                        && $0.actual == "1"
+                        && $0.disablesTurboQuant
+                }
+            )
+        }
+
+        @Test func testUnsupportedLayoutVersionFailsClosedDuringSelection() {
+            let unsupportedLayoutVersion = 9999
+            let profile = TurboQuantProfile(
+                id: "unsupported-layout",
+                modelPatterns: ["*layout-test*"],
+                architecture: "qwen3",
+                modelTypes: ["qwen3"],
+                requiresModelType: true,
+                requiresHeadDimensions: true,
+                supportedKeyHeadDimensions: [128],
+                turboQuant: TurboQuantProfileTurboQuantManifest(
+                    layoutVersion: unsupportedLayoutVersion,
+                    keyPreset: .turbo4v2,
+                    valueBits: 4,
+                    groupSize: 64
+                )
+            )
+            let selection = TurboQuantProfileRegistry(profiles: [profile]).selection(
+                for: TurboQuantModelDescriptor(
+                    modelID: "mlx-community/layout-test-4B-4bit",
+                    modelType: "qwen3",
+                    parameterCountB: 4
+                ),
+                keyHeadDimension: 128,
+                valueHeadDimension: 128
+            )
+
+            #expect(selection.profile == nil)
+            #expect(
+                selection.rejectionReasons.contains {
+                    $0.contains("TurboQuant layout version")
+                }
+            )
+            #expect(
+                selection.mismatches.contains {
+                    $0.field == "turbo_quant.layout_version"
+                        && $0.actual == String(unsupportedLayoutVersion)
+                }
+            )
+        }
+
+        @Test func testManifestMismatchDTOExportsStableFields() {
+            let expectedFingerprint = TurboQuantModelFingerprint(
+                family: "qwen3",
+                hiddenSize: 4096,
+                layerCount: 36,
+                attentionHeads: 32,
+                kvHeads: 8,
+                headDim: 128,
+                rope: TurboQuantRoPEFingerprint(type: "llama", theta: 1_000_000),
+                slidingWindow: TurboQuantSlidingWindowFingerprint(enabled: false),
+                cacheType: "standard"
+            )
+            let actualFingerprint = TurboQuantModelFingerprint(
+                family: "qwen3",
+                hiddenSize: 5120,
+                layerCount: 36,
+                attentionHeads: 32,
+                kvHeads: 8,
+                headDim: 128,
+                rope: TurboQuantRoPEFingerprint(type: "llama", theta: 1_000_000),
+                slidingWindow: TurboQuantSlidingWindowFingerprint(enabled: false),
+                cacheType: "standard"
+            )
+            let profile = TurboQuantProfile(
+                id: "strict-qwen3",
+                modelPatterns: ["*qwen3*"],
+                architecture: "qwen3",
+                modelTypes: ["qwen3"],
+                requiresModelType: true,
+                requiresHeadDimensions: true,
+                supportedKeyHeadDimensions: [128],
+                modelFingerprint: expectedFingerprint
+            )
+
+            let validation = profile.productManifestValidation(
+                actualFingerprint: actualFingerprint,
+                requireMeasuredOutcomes: false
+            )
+            #expect(!validation.isValid)
+            #expect(
+                validation.mismatches.contains {
+                    $0.field == "model_fingerprint.hidden_size"
+                        && $0.expected == "4096"
+                        && $0.actual == "5120"
+                        && $0.disablesTurboQuant
+                }
+            )
+        }
+
         @Test func testFingerprintMismatchFailsClosedWithExactField() throws {
             let expectedFingerprint = TurboQuantModelFingerprint(
                 family: "qwen3",
@@ -1332,6 +1476,84 @@ extension MLXRuntimeSwiftTests {
                     $0.contains("model_fingerprint.hidden_size expected 4096, got 5120")
                 }
             )
+        }
+
+        @Test func testQualityGateGoldenJSONProvidesPinesFields() throws {
+            struct GoldenBenchmarkResult: Codable {
+                var id: String
+                var quality: TurboQuantQualityGateReport
+            }
+            struct GoldenBenchmarkEnvelope: Codable {
+                var schemaVersion: Int
+                var qualityGate: TurboQuantQualityGateReport
+                var results: [GoldenBenchmarkResult]
+            }
+
+            let golden = """
+                {
+                  "schemaVersion": 2,
+                  "qualityGate": {
+                    "schemaVersion": 1,
+                    "gateVersion": 1,
+                    "benchmarkSuiteID": "tiny-deterministic-logits-v1",
+                    "deterministicTop1MatchRate": 1.0,
+                    "logitKLDivergenceMean": 0.0,
+                    "logitMaxAbsErrorP95": 0.0,
+                    "attentionOutputCosineMean": 1.0,
+                    "noNaNOrInf": true,
+                    "fallbackEquivalent": true,
+                    "prefillExact": true,
+                    "passed": true
+                  },
+                  "results": [
+                    {
+                      "id": "hd64_ctx1_q1_fp16_causal_contiguous",
+                      "quality": {
+                        "schemaVersion": 1,
+                        "gateVersion": 1,
+                        "benchmarkSuiteID": "tiny-deterministic-logits-v1",
+                        "deterministicTop1MatchRate": 1.0,
+                        "logitKLDivergenceMean": 0.0,
+                        "logitMaxAbsErrorP95": 0.0,
+                        "attentionOutputCosineMean": 1.0,
+                        "noNaNOrInf": true,
+                        "fallbackEquivalent": true,
+                        "prefillExact": true,
+                        "snapshotRoundtripEquivalent": null,
+                        "passed": true
+                      }
+                    }
+                  ]
+                }
+                """
+            let envelope = try JSONDecoder().decode(
+                GoldenBenchmarkEnvelope.self,
+                from: Data(golden.utf8)
+            )
+
+            #expect(envelope.qualityGate.schemaVersion == 1)
+            #expect(envelope.qualityGate.gateVersion == 1)
+            #expect(envelope.qualityGate.benchmarkSuiteID == "tiny-deterministic-logits-v1")
+            #expect(envelope.qualityGate.noNaNOrInf)
+            #expect(envelope.qualityGate.fallbackEquivalent)
+            #expect(envelope.qualityGate.prefillExact)
+            #expect(envelope.qualityGate.snapshotRoundtripEquivalent == nil)
+            #expect(envelope.qualityGate.passed)
+            #expect(envelope.results.first?.quality.logitMaxAbsErrorP95 == 0)
+        }
+
+        @Test func testQualityGateFailsClosedForNaNOrInfFlag() {
+            let gate = TurboQuantQualityGateReport.evaluated(
+                deterministicTop1MatchRate: 1,
+                logitKLDivergenceMean: 0,
+                logitMaxAbsErrorP95: 0,
+                noNaNOrInf: false,
+                fallbackEquivalent: true,
+                prefillExact: true
+            )
+
+            #expect(!gate.passed)
+            #expect(gate.gateReason?.contains("NaN or Inf detected") == true)
         }
 
         @Test func testRootJSONProfilesDecodeAndMatchBundledIDs() throws {
