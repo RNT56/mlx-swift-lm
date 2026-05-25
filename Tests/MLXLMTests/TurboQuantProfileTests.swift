@@ -1495,15 +1495,16 @@ extension MLXRuntimeSwiftTests {
                   "qualityGate": {
                     "schemaVersion": 1,
                     "gateVersion": 1,
-                    "benchmarkSuiteID": "tiny-deterministic-logits-v1",
+                    "benchmarkSuiteID": "fallback-equivalence-v1",
                     "deterministicTop1MatchRate": 1.0,
                     "logitKLDivergenceMean": 0.0,
                     "logitMaxAbsErrorP95": 0.0,
                     "attentionOutputCosineMean": 1.0,
                     "noNaNOrInf": true,
                     "fallbackEquivalent": true,
-                    "prefillExact": true,
-                    "passed": true
+                    "prefillExact": false,
+                    "gateReason": "prefill exactness failed",
+                    "passed": false
                   },
                   "results": [
                     {
@@ -1511,16 +1512,17 @@ extension MLXRuntimeSwiftTests {
                       "quality": {
                         "schemaVersion": 1,
                         "gateVersion": 1,
-                        "benchmarkSuiteID": "tiny-deterministic-logits-v1",
+                        "benchmarkSuiteID": "fallback-equivalence-v1",
                         "deterministicTop1MatchRate": 1.0,
                         "logitKLDivergenceMean": 0.0,
                         "logitMaxAbsErrorP95": 0.0,
                         "attentionOutputCosineMean": 1.0,
                         "noNaNOrInf": true,
                         "fallbackEquivalent": true,
-                        "prefillExact": true,
+                        "prefillExact": false,
                         "snapshotRoundtripEquivalent": null,
-                        "passed": true
+                        "gateReason": "prefill exactness failed",
+                        "passed": false
                       }
                     }
                   ]
@@ -1533,12 +1535,13 @@ extension MLXRuntimeSwiftTests {
 
             #expect(envelope.qualityGate.schemaVersion == 1)
             #expect(envelope.qualityGate.gateVersion == 1)
-            #expect(envelope.qualityGate.benchmarkSuiteID == "tiny-deterministic-logits-v1")
+            #expect(envelope.qualityGate.benchmarkSuiteID == "fallback-equivalence-v1")
             #expect(envelope.qualityGate.noNaNOrInf)
             #expect(envelope.qualityGate.fallbackEquivalent)
-            #expect(envelope.qualityGate.prefillExact)
+            #expect(!envelope.qualityGate.prefillExact)
             #expect(envelope.qualityGate.snapshotRoundtripEquivalent == nil)
-            #expect(envelope.qualityGate.passed)
+            #expect(!envelope.qualityGate.passed)
+            #expect(envelope.qualityGate.gateReason?.contains("prefill exactness failed") == true)
             #expect(envelope.results.first?.quality.logitMaxAbsErrorP95 == 0)
         }
 
@@ -1554,6 +1557,21 @@ extension MLXRuntimeSwiftTests {
 
             #expect(!gate.passed)
             #expect(gate.gateReason?.contains("NaN or Inf detected") == true)
+        }
+
+        @Test func testQualityGateFailsClosedForUnmeasuredPrefillExactness() {
+            let gate = TurboQuantQualityGateReport.evaluated(
+                benchmarkSuiteID: .fallbackEquivalenceV1,
+                deterministicTop1MatchRate: 1,
+                logitKLDivergenceMean: 0,
+                logitMaxAbsErrorP95: 0,
+                noNaNOrInf: true,
+                fallbackEquivalent: true,
+                prefillExact: false
+            )
+
+            #expect(!gate.passed)
+            #expect(gate.gateReason?.contains("prefill exactness failed") == true)
         }
 
         @Test func testRootJSONProfilesDecodeAndMatchBundledIDs() throws {

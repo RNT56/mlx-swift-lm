@@ -236,7 +236,11 @@ func attentionMask(_ name: String) -> MLXFast.ScaledDotProductAttentionMaskMode 
     }
 }
 
-func qualityGate(candidate: MLXArray, reference: MLXArray) -> TurboQuantQualityGateReport {
+func qualityGate(
+    candidate: MLXArray,
+    reference: MLXArray,
+    prefillExact: Bool
+) -> TurboQuantQualityGateReport {
     eval(candidate, reference)
     let candidateValues = candidate.asArray(Float.self)
     let referenceValues = reference.asArray(Float.self)
@@ -278,10 +282,8 @@ func qualityGate(candidate: MLXArray, reference: MLXArray) -> TurboQuantQualityG
         && top1MatchRate >= 0.95
         && klDivergenceMean <= 0.05
         && p95MaxAbsError <= 0.5
-    let prefillExact = noNaNOrInf && candidate.shape == reference.shape
-
     return .evaluated(
-        benchmarkSuiteID: .tinyDeterministicLogitsV1,
+        benchmarkSuiteID: .fallbackEquivalenceV1,
         deterministicTop1MatchRate: top1MatchRate,
         logitKLDivergenceMean: klDivergenceMean,
         logitMaxAbsErrorP95: p95MaxAbsError,
@@ -428,7 +430,7 @@ func aggregateQualityGate(_ results: [BenchmarkResult]) -> TurboQuantQualityGate
         finiteCosines.isEmpty ? nil : finiteCosines.reduce(0, +) / Double(finiteCosines.count)
 
     return .evaluated(
-        benchmarkSuiteID: .tinyDeterministicLogitsV1,
+        benchmarkSuiteID: .fallbackEquivalenceV1,
         deterministicTop1MatchRate: top1,
         logitKLDivergenceMean: kl,
         logitMaxAbsErrorP95: p95,
@@ -526,7 +528,11 @@ func runCase(
         scale: scale,
         mask: attentionMask(benchmarkCase.mask)
     )
-    let quality = qualityGate(candidate: output, reference: reference)
+    let quality = qualityGate(
+        candidate: output,
+        reference: reference,
+        prefillExact: false
+    )
 
     return BenchmarkResult(
         id: benchmarkCase.id,

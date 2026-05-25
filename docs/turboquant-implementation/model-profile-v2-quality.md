@@ -106,7 +106,7 @@ Quality object is defined by Pines `QualityGate.v1`, but LM benchmark output sho
 - `gateReason`;
 - `passed`.
 
-The benchmark computes the synthetic reference by decoding the compressed cache state and running exact SDPA over that decoded state, then compares compressed attention output against that reference. Snapshot roundtrip remains optional and unpopulated here because W14 snapshot activation is out of scope.
+The benchmark computes the synthetic reference by decoding the compressed cache state and running exact SDPA over that decoded state, then compares compressed attention output against that reference. That populates the fallback-equivalence suite and intentionally reports `prefillExact = false`, so the quality gate fails closed until a real prefill-logit exactness suite is run. Snapshot roundtrip remains optional and unpopulated here because W14 snapshot activation is out of scope.
 
 ## Tests
 
@@ -121,7 +121,7 @@ Profile tests:
 
 Quality tests:
 
-- prefill exactness comparison;
+- prefill exactness comparison fails closed when not measured;
 - fallback equivalence;
 - no NaN/Inf;
 - quality block appears in benchmark JSON.
@@ -132,7 +132,8 @@ Implemented coverage:
 - unsupported layout version fails closed during selection;
 - manifest mismatch DTO exports stable `field`, `expected`, `actual`, and `disablesTurboQuant`;
 - golden QualityGate-shaped benchmark JSON decodes with aggregate `qualityGate` and per-result `quality`;
-- quality gate fails closed when NaN/Inf is reported.
+- quality gate fails closed when NaN/Inf is reported;
+- quality gate fails closed when prefill exactness is unmeasured.
 
 ## Acceptance
 
