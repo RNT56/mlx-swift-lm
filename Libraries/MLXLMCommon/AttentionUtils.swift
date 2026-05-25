@@ -17,6 +17,10 @@ public enum TurboQuantAttentionStateError: Error, CustomStringConvertible, Equat
     }
 }
 
+private func turboQuantRuntimeFailure(_ error: Error) -> TurboQuantRuntimeFailure {
+    TurboQuantRuntimeFailure(error)
+}
+
 /// Cached attention state that can be passed between model layers without assuming raw KV arrays.
 public enum AttentionKVState {
     case raw(keys: MLXArray, values: MLXArray)
@@ -122,7 +126,7 @@ public func withTurboQuantCompressedCacheUpdateThrowing<T>(
     } catch {
         restorePreviousState()
         turboQuantCache.recordCompressedAttentionFailure(String(describing: error))
-        throw error
+        throw turboQuantRuntimeFailure(error)
     }
 }
 
@@ -384,7 +388,7 @@ private func turboQuantAttentionFallbackLadder(
 
     let reason = failures.joined(separator: "; ")
     recordTurboQuantFallback(cache: cache, path: .typedFailure, reason: reason)
-    throw TurboQuantAttentionStateError.compressedAttentionUnavailable(reason)
+    throw TurboQuantRuntimeFailure.decodedFallbackUnavailable(reason)
 }
 
 private func turboQuantAttentionStorageArrays(_ code: TurboQuantAttentionCode) -> [MLXArray] {
@@ -498,7 +502,7 @@ private func turboQuantCompressedPrefillAttentionThrowing(
     } catch {
         restorePreviousState()
         turboQuantCache.recordCompressedAttentionFailure(String(describing: error))
-        throw error
+        throw turboQuantRuntimeFailure(error)
     }
 }
 
@@ -566,7 +570,7 @@ public func attentionWithKVStateThrowing(
             )
         } catch {
             cache.recordCompressedAttentionFailure(String(describing: error))
-            throw TurboQuantAttentionStateError.compressedAttentionUnavailable(
+            throw TurboQuantRuntimeFailure.compressedAttentionUnavailable(
                 "compressed attention failed and compressed state could not be decoded: \(error)"
             )
         }
@@ -600,8 +604,56 @@ public func attentionWithKVState(
         if TurboQuantRuntimeControl.enabled("TURBOQUANT_FATAL_FALLBACK") {
             fatalError(message)
         }
-        fatalError("No semantically correct non-throwing attention fallback: \(message)")
+        fatalError(
+            "Debug-only non-throwing TurboQuant attention wrapper has no recoverable output: \(message)"
+        )
     }
+}
+
+private func legacyTurboQuantPackedFallbackAfterFailure(
+    queries: MLXArray,
+    keys: MLXArray,
+    values: MLXArray,
+    cache: any TurboQuantCompressedKVCacheProtocol,
+    scale: Float,
+    mask: MLXFast.ScaledDotProductAttentionMaskMode,
+    sinks: MLXArray?,
+    failure: Error
+) -> (output: MLXArray, state: AttentionKVState)? {
+    guard let quantizedCache = cache as? any QuantizedKVCacheProtocol else {
+        return nil
+    }
+
+    _ = quantizedCache.getQuantizedState()
+    let (quantizedKeys, quantizedValues) = quantizedCache.updateQuantized(
+        keys: keys,
+        values: values
+    )
+    let reason = "legacy non-throwing TurboQuant wrapper used packed fallback after: \(failure)"
+    cache.recordFallback(
+        TurboQuantFallbackResult(
+            fromPath: cache.attentionDiagnostics.activeAttentionPath,
+            toPath: .mlxPackedFallback,
+            policy: .packedAllowed,
+            reason: reason,
+            isSemanticallyExact: false
+        )
+    )
+    let output = quantizedScaledDotProductAttention(
+        queries: queries,
+        quantizedKeys: quantizedKeys,
+        quantizedValues: quantizedValues,
+        scale: scale,
+        mask: mask,
+        sinks: sinks,
+        groupSize: quantizedCache.groupSize,
+        bits: quantizedCache.bits,
+        mode: quantizedCache.mode
+    )
+    return (
+        output,
+        .quantized(keys: quantizedKeys, values: quantizedValues, cache: quantizedCache)
+    )
 }
 
 /// Attention utilities that match Python mlx-lm's interface
@@ -660,6 +712,23 @@ public func attentionWithCacheUpdate(
             sinks: sinks
         ).output
     } catch {
+        if let turboQuantCache = cache as? TurboQuantCompressedKVCacheProtocol,
+            let fallback = legacyTurboQuantPackedFallbackAfterFailure(
+                queries: queries,
+                keys: keys,
+                values: values,
+                cache: turboQuantCache,
+                scale: scale,
+                mask: mask,
+                sinks: sinks,
+                failure: turboQuantRuntimeFailure(error)
+            )
+        {
+            return fallback.output
+        }
+        if TurboQuantRuntimeControl.enabled("TURBOQUANT_FATAL_FALLBACK") {
+            fatalError(String(describing: error))
+        }
         fatalError("No semantically correct non-throwing attention fallback: \(error)")
     }
 }
@@ -739,7 +808,7 @@ public func attentionWithCacheUpdateReturningStateThrowing(
         } catch {
             restorePreviousState()
             turboQuantCache.recordCompressedAttentionFailure(String(describing: error))
-            throw error
+            throw turboQuantRuntimeFailure(error)
         }
     }
     if let quantizedKVCache = cache as? QuantizedKVCacheProtocol {
@@ -812,6 +881,18 @@ public func attentionWithCacheUpdateReturningState(
                     isSemanticallyExact: false
                 )
             )
+            if let fallback = legacyTurboQuantPackedFallbackAfterFailure(
+                queries: queries,
+                keys: keys,
+                values: values,
+                cache: turboQuantCache,
+                scale: scale,
+                mask: mask,
+                sinks: sinks,
+                failure: turboQuantRuntimeFailure(error)
+            ) {
+                return fallback
+            }
         }
         let message = String(describing: error)
         if TurboQuantRuntimeControl.enabled("TURBOQUANT_FATAL_FALLBACK") {
