@@ -21,6 +21,8 @@ struct MTPTokenIteratorTests {
         #expect(iterator.next() == 21)
         #expect(iterator.acceptedDraftTokens == 1)
         #expect(iterator.totalDraftTokens == 1)
+        #expect(iterator.speculativeAcceptanceMetrics?.acceptanceRate == 1.0)
+        #expect(iterator.speculativeAcceptanceMetrics?.fullyAcceptedRounds == 1)
     }
 
     @Test func qwen35DecodesAndAllocatesMTPHeadsWhenRetained() throws {
@@ -80,6 +82,8 @@ struct MTPTokenIteratorTests {
         #expect(iterator.next() == 22)
         #expect(iterator.acceptedDraftTokens == 0)
         #expect(iterator.totalDraftTokens == 1)
+        #expect(iterator.speculativeAcceptanceMetrics?.acceptanceRate == 0.0)
+        #expect(iterator.speculativeAcceptanceMetrics?.firstTokenRejectedRounds == 1)
     }
 
     @Test func deterministicMTPPartiallyAcceptsMultiTokenDraft() throws {
@@ -95,6 +99,8 @@ struct MTPTokenIteratorTests {
         #expect(iterator.next() == 31)
         #expect(iterator.acceptedDraftTokens == 1)
         #expect(iterator.totalDraftTokens == 2)
+        #expect(iterator.speculativeAcceptanceMetrics?.acceptedDraftTokens == 1)
+        #expect(iterator.speculativeAcceptanceMetrics?.rejectedDraftTokens == 1)
     }
 
     private func makeIterator(

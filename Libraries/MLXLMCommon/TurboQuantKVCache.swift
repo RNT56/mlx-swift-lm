@@ -1488,6 +1488,30 @@ public final class TurboQuantKVCache: QuantizedKVCache, TurboQuantCompressedKVCa
         return (currentKeys, currentValues)
     }
 
+    @discardableResult
+    public override func trim(_ n: Int) -> Int {
+        let trimmed = super.trim(n)
+        guard trimmed > 0 else { return 0 }
+
+        if var compressedKeys, var compressedValues {
+            compressedKeys.layout.logicalLength = offset
+            compressedKeys.layout.ringOffset = 0
+            compressedKeys.layout.pinnedPrefixLength = 0
+            compressedValues.layout.logicalLength = offset
+            compressedValues.layout.ringOffset = 0
+            compressedValues.layout.pinnedPrefixLength = 0
+            self.compressedKeys = compressedKeys
+            self.compressedValues = compressedValues
+            cacheLifecycle = .compressedCommitted(
+                logicalLength: offset,
+                capacity: compressedKeys.layout.capacity
+            )
+            lastDecodedTransientBytes = 0
+        }
+
+        return trimmed
+    }
+
     public func recordCompressedAttentionFailure(_ message: String) {
         lastAttentionPath = .mlxPackedFallback
         lastUnsupportedShape = "compressed attention failed: \(message)"

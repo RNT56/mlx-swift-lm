@@ -709,6 +709,11 @@ public protocol TokenIteratorProtocol: Sequence, IteratorProtocol where Element 
     var maxTokens: Int? { get }
     var tokenCount: Int { get }
     var promptPrefillTime: TimeInterval { get }
+    var speculativeAcceptanceMetrics: TurboQuantSpeculativeAcceptanceMetrics? { get }
+}
+
+extension TokenIteratorProtocol {
+    public var speculativeAcceptanceMetrics: TurboQuantSpeculativeAcceptanceMetrics? { nil }
 }
 
 /// Generator of tokens.
@@ -1029,6 +1034,17 @@ public struct SpeculativeTokenIterator: TokenIteratorProtocol {
 
     // Internal metrics
     public var promptPrefillTime: TimeInterval = 0.0
+    public private(set) var turboQuantSpeculativeMetrics =
+        TurboQuantSpeculativeAcceptanceMetrics()
+    public var speculativeAcceptanceMetrics: TurboQuantSpeculativeAcceptanceMetrics? {
+        turboQuantSpeculativeMetrics
+    }
+    public var acceptedDraftTokens: Int {
+        turboQuantSpeculativeMetrics.acceptedDraftTokens
+    }
+    public var totalDraftTokens: Int {
+        turboQuantSpeculativeMetrics.proposedDraftTokens
+    }
 
     /// Initialize a `SpeculativeTokenIterator` with the given input.
     ///
@@ -1130,106 +1146,145 @@ public struct SpeculativeTokenIterator: TokenIteratorProtocol {
             return
         }
 
+        let draftCheckpoint = try TurboQuantSpeculativeVerifier.checkpointDraftCache(draftCache)
+
         // Draft generation: autoregressive loop with draft model
         var draftProcessor = processor  // Copy to discard later
         var draftTokens = [MLXArray]()
-        for _ in 0 ..< numDraft {
-            let draftResult: LMOutput
-            if let throwingDraftModel = draftModel as? any ThrowingLanguageModel {
-                draftResult = try throwingDraftModel.callAsFunctionThrowing(
-                    draftY[text: .newAxis],
-                    cache: draftCache,
-                    state: nil
-                )
-            } else {
-                draftResult = draftModel(draftY[text: .newAxis], cache: draftCache, state: nil)
+        do {
+            for _ in 0 ..< numDraft {
+                let draftResult: LMOutput
+                if let throwingDraftModel = draftModel as? any ThrowingLanguageModel {
+                    draftResult = try throwingDraftModel.callAsFunctionThrowing(
+                        draftY[text: .newAxis],
+                        cache: draftCache,
+                        state: nil
+                    )
+                } else {
+                    draftResult = draftModel(draftY[text: .newAxis], cache: draftCache, state: nil)
+                }
+                var draftLogits = draftResult.logits[0..., -1, 0...]
+                draftLogits = draftProcessor?.process(logits: draftLogits) ?? draftLogits
+                let draftToken = sampler.sample(logits: draftLogits)
+                draftProcessor?.didSample(token: draftToken)
+                asyncEval(draftToken)
+                draftTokens.append(draftToken)
+                draftY = .init(tokens: draftToken)
             }
-            var draftLogits = draftResult.logits[0..., -1, 0...]
-            draftLogits = draftProcessor?.process(logits: draftLogits) ?? draftLogits
-            let draftToken = sampler.sample(logits: draftLogits)
-            draftProcessor?.didSample(token: draftToken)
-            asyncEval(draftToken)
-            draftTokens.append(draftToken)
-            draftY = .init(tokens: draftToken)
+        } catch {
+            _ = try? TurboQuantSpeculativeVerifier.restore(draftCache, to: draftCheckpoint)
+            throw error
+        }
+
+        let targetCheckpoint: TurboQuantSpeculativeCacheCheckpointSet
+        do {
+            targetCheckpoint = try TurboQuantSpeculativeVerifier.checkpointTargetCache(mainCache)
+        } catch {
+            _ = try? TurboQuantSpeculativeVerifier.restore(draftCache, to: draftCheckpoint)
+            throw error
         }
 
         // Verification: main model processes proposals in one pass
-        let verifyTokens = [y.tokens] + draftTokens
-        let verifyInput = LMInput.Text(tokens: concatenated(verifyTokens))
-        let verifyStart = verifyInput.tokens.dim(0) - (numDraft + 1)
-        let mainResult: LMOutput
-        if let throwingMainModel = mainModel as? any ThrowingLanguageModel {
-            mainResult = try throwingMainModel.callAsFunctionThrowing(
-                verifyInput[text: .newAxis],
-                cache: mainCache,
-                state: mainState
-            )
-        } else {
-            mainResult = mainModel(verifyInput[text: .newAxis], cache: mainCache, state: mainState)
-        }
-        let mainLogits = mainResult.logits
-        mainState = mainResult.state
-
-        let mainTokens: MLXArray
-        if var verifyProcessor = processor {
-            // Process each position sequentially so that the processor sees tokens sampled at earlier positions
-            var sampled = [MLXArray]()
-            for i in 0 ..< (numDraft + 1) {
-                var logits = mainLogits[0..., verifyStart + i, 0...]
-                logits = verifyProcessor.process(logits: logits)
-                let token = sampler.sample(logits: logits)
-                verifyProcessor.didSample(token: token)
-                sampled.append(token)
+        do {
+            let verifyTokens = [y.tokens] + draftTokens
+            let verifyInput = LMInput.Text(tokens: concatenated(verifyTokens))
+            let verifyStart = verifyInput.tokens.dim(0) - (numDraft + 1)
+            let mainResult: LMOutput
+            if let throwingMainModel = mainModel as? any ThrowingLanguageModel {
+                mainResult = try throwingMainModel.callAsFunctionThrowing(
+                    verifyInput[text: .newAxis],
+                    cache: mainCache,
+                    state: mainState
+                )
+            } else {
+                mainResult = mainModel(
+                    verifyInput[text: .newAxis], cache: mainCache, state: mainState)
             }
-            mainTokens = concatenated(sampled)
-        } else {
-            // Batch-sample all verify tokens from main model in one operation
-            let verifyLogits = mainLogits[0..., verifyStart..., 0...].squeezed(axis: 0)
-            mainTokens = sampler.sample(logits: verifyLogits)
-        }
+            let mainLogits = mainResult.logits
+            mainState = mainResult.state
 
-        // Compare and accept proposed tokens
-        eval(mainTokens, draftTokens)
-        let mainTokensList = mainTokens.asArray(Int.self)
-        let draftTokensList = concatenated(draftTokens).asArray(Int.self)
-        var accepted = 0
-        for i in 0 ..< numDraft {
-            guard mainTokensList[i] == draftTokensList[i] else {
-                break
+            let mainTokens: MLXArray
+            if var verifyProcessor = processor {
+                // Process each position sequentially so that the processor sees tokens sampled at earlier positions
+                var sampled = [MLXArray]()
+                for i in 0 ..< (numDraft + 1) {
+                    var logits = mainLogits[0..., verifyStart + i, 0...]
+                    logits = verifyProcessor.process(logits: logits)
+                    let token = sampler.sample(logits: logits)
+                    verifyProcessor.didSample(token: token)
+                    sampled.append(token)
+                }
+                mainTokens = concatenated(sampled)
+            } else {
+                // Batch-sample all verify tokens from main model in one operation
+                let verifyLogits = mainLogits[0..., verifyStart..., 0...].squeezed(axis: 0)
+                mainTokens = sampler.sample(logits: verifyLogits)
             }
 
-            processor?.didSample(token: draftTokens[i])
-            pendingTokens.append(mainTokensList[i])
-            accepted += 1
-        }
-
-        // Always emit the main model's token at position `accepted`
-        // (either the correction token or the bonus token if all drafts matched)
-        let finalToken = mainTokens[accepted ... accepted]
-        processor?.didSample(token: finalToken)
-        pendingTokens.append(mainTokensList[accepted])
-
-        // Rewind caches for rejected tokens
-        trimPromptCache(mainCache, numTokens: numDraft - accepted)
-        trimPromptCache(draftCache, numTokens: Swift.max(numDraft - accepted - 1, 0))
-
-        // Apply dynamic cache quantization after rewind
-        quantizeKVCache(&mainCache)
-        quantizeKVCache(&draftCache)
-
-        // Set y/draftY for the next round
-        y = .init(tokens: finalToken)
-        draftY = .init(tokens: finalToken)
-
-        // If all draft tokens were accepted, the draft model hasn't processed
-        // the last accepted draft token yet. Feed it through to keep caches in sync.
-        if accepted == numDraft {
-            draftY = .init(
-                tokens: concatenated([
-                    draftTokens[numDraft - 1].reshaped([1]),
-                    finalToken,
-                ])
+            // Compare and accept proposed tokens
+            eval(mainTokens, draftTokens)
+            let mainTokensList = mainTokens.asArray(Int.self)
+            let draftTokensList = concatenated(draftTokens).asArray(Int.self)
+            let verification = try TurboQuantSpeculativeTargetVerifier.verifyGreedy(
+                targetTokens: mainTokensList,
+                draftedTokens: draftTokensList
             )
+            let accepted = verification.acceptedDraftTokens
+            for i in 0 ..< accepted {
+                processor?.didSample(token: draftTokens[i])
+                pendingTokens.append(mainTokensList[i])
+            }
+
+            // Always emit the main model's token at position `accepted`
+            // (either the correction token or the bonus token if all drafts matched)
+            let finalToken = mainTokens[accepted ... accepted]
+            processor?.didSample(token: finalToken)
+            pendingTokens.append(verification.correctionToken)
+
+            let targetRollback = try TurboQuantSpeculativeVerifier.trimAfterVerification(
+                mainCache,
+                checkpoint: targetCheckpoint,
+                trimTokenCount: numDraft - accepted,
+                expectedLogicalLengthDelta: accepted + 1
+            )
+            let draftExpectedDelta = accepted == numDraft ? numDraft : accepted + 1
+            let draftRollback = try TurboQuantSpeculativeVerifier.trimAfterVerification(
+                draftCache,
+                checkpoint: draftCheckpoint,
+                trimTokenCount: Swift.max(numDraft - accepted - 1, 0),
+                expectedLogicalLengthDelta: draftExpectedDelta
+            )
+
+            turboQuantSpeculativeMetrics.recordRound(
+                draftedTokens: numDraft,
+                acceptedDraftTokens: accepted,
+                emittedTokens: accepted + 1,
+                targetRollback: targetRollback,
+                draftRollback: draftRollback
+            )
+
+            // Apply dynamic cache quantization after rewind
+            quantizeKVCache(&mainCache)
+            quantizeKVCache(&draftCache)
+
+            // Set y/draftY for the next round
+            y = .init(tokens: finalToken)
+            draftY = .init(tokens: finalToken)
+
+            // If all draft tokens were accepted, the draft model hasn't processed
+            // the last accepted draft token yet. Feed it through to keep caches in sync.
+            if accepted == numDraft {
+                draftY = .init(
+                    tokens: concatenated([
+                        draftTokens[numDraft - 1].reshaped([1]),
+                        finalToken,
+                    ])
+                )
+            }
+        } catch {
+            _ = try? TurboQuantSpeculativeVerifier.restore(mainCache, to: targetCheckpoint)
+            _ = try? TurboQuantSpeculativeVerifier.restore(draftCache, to: draftCheckpoint)
+            throw error
         }
     }
 
@@ -1298,8 +1353,27 @@ public struct MTPTokenIterator: TokenIteratorProtocol {
 
     public var acceptedDraftTokens = 0
     public var totalDraftTokens = 0
+    public var mtpSpeculativeRounds = 0
+    public var mtpFullyAcceptedRounds = 0
+    public var mtpRejectedRounds = 0
+    public var mtpFirstTokenRejectedRounds = 0
     public var promptPrefillTime: TimeInterval = 0.0
     public var lastRuntimeError: Error? { runtimeError }
+    public var speculativeAcceptanceMetrics: TurboQuantSpeculativeAcceptanceMetrics? {
+        guard totalDraftTokens > 0 else { return nil }
+        return TurboQuantSpeculativeAcceptanceMetrics(
+            rounds: mtpSpeculativeRounds,
+            fullyAcceptedRounds: mtpFullyAcceptedRounds,
+            rejectedRounds: mtpRejectedRounds,
+            firstTokenRejectedRounds: mtpFirstTokenRejectedRounds,
+            acceptedDraftTokens: acceptedDraftTokens,
+            rejectedDraftTokens: Swift.max(0, totalDraftTokens - acceptedDraftTokens),
+            proposedDraftTokens: totalDraftTokens,
+            emittedTokens: tokenCount,
+            targetCacheRollbackCount: mtpRejectedRounds,
+            draftCacheRollbackCount: mtpRejectedRounds
+        )
+    }
 
     public init(
         input: LMInput,
@@ -1523,6 +1597,15 @@ public struct MTPTokenIterator: TokenIteratorProtocol {
         totalDraftTokens += draftTokens.count
 
         let rejectedCount = draftTokens.count - accepted
+        mtpSpeculativeRounds += 1
+        if rejectedCount == 0 {
+            mtpFullyAcceptedRounds += 1
+        } else {
+            mtpRejectedRounds += 1
+        }
+        if !draftTokens.isEmpty && accepted == 0 {
+            mtpFirstTokenRejectedRounds += 1
+        }
         trimPromptCache(cache, numTokens: rejectedCount)
         for mtpCache in mtpCaches {
             trimPromptCache(mtpCache, numTokens: rejectedCount)
@@ -2360,7 +2443,7 @@ private func generateLoopTask<Handler: TokenLoopHandler>(
     // Launch a Task to perform iteration asynchronously.
     let task = Task {
         let performIteration = {
-            let iterator = iterator.consume()
+            var iterator = iterator.consume()
             var handler = handler.consume()
 
             var start = Date.timeIntervalSinceReferenceDate
@@ -2373,7 +2456,7 @@ private func generateLoopTask<Handler: TokenLoopHandler>(
                 tokenizer: tokenizer
             )
 
-            tokenLoop: for token in iterator {
+            tokenLoop: while let token = iterator.next() {
                 // Check for cancellation on every loop iteration.
                 if Task.isCancelled {
                     stopReason = .cancelled
@@ -2438,7 +2521,8 @@ private func generateLoopTask<Handler: TokenLoopHandler>(
                 generationTokenCount: tokenCount,
                 promptTime: promptTime + iterator.promptPrefillTime,
                 generationTime: generateTime,
-                stopReason: stopReason ?? .cancelled
+                stopReason: stopReason ?? .cancelled,
+                speculativeAcceptanceMetrics: iterator.speculativeAcceptanceMetrics
             )
             _ = continuation.yield(handler.infoEvent(info))
 
@@ -2508,6 +2592,9 @@ public struct GenerateCompletionInfo: Sendable {
     /// Reason generation stopped.
     public let stopReason: GenerateStopReason
 
+    /// Optional speculative decoding acceptance and rollback metrics.
+    public let speculativeAcceptanceMetrics: TurboQuantSpeculativeAcceptanceMetrics?
+
     /// The number of tokens processed per second during the prompt phase.
     public var promptTokensPerSecond: Double {
         Double(promptTokenCount) / promptTime
@@ -2523,13 +2610,15 @@ public struct GenerateCompletionInfo: Sendable {
         generationTokenCount: Int,
         promptTime: TimeInterval,
         generationTime: TimeInterval,
-        stopReason: GenerateStopReason = .stop
+        stopReason: GenerateStopReason = .stop,
+        speculativeAcceptanceMetrics: TurboQuantSpeculativeAcceptanceMetrics? = nil
     ) {
         self.promptTokenCount = promptTokenCount
         self.generationTokenCount = generationTokenCount
         self.promptTime = promptTime
         self.generateTime = generationTime
         self.stopReason = stopReason
+        self.speculativeAcceptanceMetrics = speculativeAcceptanceMetrics
     }
 
     public func summary() -> String {

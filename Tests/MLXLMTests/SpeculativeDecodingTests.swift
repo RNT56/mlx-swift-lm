@@ -66,23 +66,36 @@ extension MLXRuntimeSwiftTests {
             )
 
             var normalTokens: [Int] = []
+            var normalInfo: GenerateCompletionInfo?
             for await generation in try generateTokens(
                 input: modelInput, parameters: parameters, context: mainContext
             ) {
                 if let token = generation.token { normalTokens.append(token) }
+                if let info = generation.info { normalInfo = info }
             }
 
             var speculativeTokens: [Int] = []
+            var speculativeInfo: GenerateCompletionInfo?
             for await generation in try generateTokens(
                 input: modelInput, parameters: parameters, context: mainContext,
                 draftModel: draftContext.model, numDraftTokens: numDraftTokens
             ) {
                 if let token = generation.token { speculativeTokens.append(token) }
+                if let info = generation.info { speculativeInfo = info }
             }
 
             #expect(!normalTokens.isEmpty)
             #expect(!speculativeTokens.isEmpty)
             #expect(normalTokens == speculativeTokens)
+            #expect(normalInfo?.speculativeAcceptanceMetrics == nil)
+
+            let metrics = try #require(speculativeInfo?.speculativeAcceptanceMetrics)
+            #expect(metrics.proposedDraftTokens > 0)
+            #expect(metrics.acceptedDraftTokens + metrics.rejectedDraftTokens == metrics.proposedDraftTokens)
+            #expect(metrics.acceptanceRate >= 0.0)
+            #expect(metrics.acceptanceRate <= 1.0)
+            #expect(metrics.rounds > 0)
+            #expect(metrics.emittedTokens >= speculativeTokens.count)
         }
     }
 
