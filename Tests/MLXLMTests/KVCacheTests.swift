@@ -964,7 +964,7 @@ extension MLXRuntimeSwiftTests {
 
             let compressed = try #require(cache.compressedState)
             #expect(cache.state.count == 10)
-            #expect(compressed.0.layout.layoutVersion == 4)
+            #expect(compressed.0.layout.layoutVersion == TurboQuantAttentionLayout.currentVersion)
             #expect(compressed.0.layout.capacity == 8)
             #expect(compressed.0.layout.logicalLength == 8)
             #expect(compressed.0.layout.pinnedPrefixLength == 4)
