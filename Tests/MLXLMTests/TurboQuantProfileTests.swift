@@ -19,6 +19,15 @@ extension MLXRuntimeSwiftTests {
             #expect(TurboQuantScheme(normalizing: "unknown") == nil)
         }
 
+        @Test func testProfileStatusSeparatesGuardedAndCertifiedStates() {
+            #expect(TurboQuantProfileStatus.guarded.isActive)
+            #expect(TurboQuantProfileStatus.guarded.requiresGuardedFallbackDisclosure)
+            #expect(!TurboQuantProfileStatus.guarded.isDeviceEvidenceBacked)
+            #expect(TurboQuantProfileStatus.verified.isDeviceEvidenceBacked)
+            #expect(TurboQuantProfileStatus.certified.isDeviceEvidenceBacked)
+            #expect(!TurboQuantProfileStatus.deprecated.isActive)
+        }
+
         @Test func testBundledRegistryMatchesKnownModelIDs() throws {
             let registry = TurboQuantProfileRegistry.bundled
 
@@ -72,6 +81,7 @@ extension MLXRuntimeSwiftTests {
             #expect(qwen35.recommendedScheme == .turbo8)
             #expect(qwen35.optimizationPolicy == TurboQuantOptimizationPolicy.conservative)
             #expect(qwen35.valueBits == 8)
+            #expect(qwen35.status == .guarded)
 
             let qwen35OptiQ2B = try #require(
                 registry.profile(
@@ -87,6 +97,7 @@ extension MLXRuntimeSwiftTests {
             #expect(qwen35OptiQ2B.recommendedScheme == .turbo8)
             #expect(qwen35OptiQ2B.optimizationPolicy == TurboQuantOptimizationPolicy.conservative)
             #expect(qwen35OptiQ2B.valueBits == 8)
+            #expect(qwen35OptiQ2B.status == .guarded)
 
             let gemma3Small = try #require(
                 registry.profile(
@@ -117,6 +128,7 @@ extension MLXRuntimeSwiftTests {
             #expect(gemma31B.recommendedScheme == .turbo8)
             #expect(gemma31B.optimizationPolicy == TurboQuantOptimizationPolicy.conservative)
             #expect(gemma31B.valueBits == 8)
+            #expect(gemma31B.status == .guarded)
             #expect(
                 registry.profile(
                     for: "mlx-community/gemma-3-270m-it-4bit",
@@ -155,6 +167,7 @@ extension MLXRuntimeSwiftTests {
             #expect(llama32_3B.recommendedScheme == .turbo8)
             #expect(llama32_3B.optimizationPolicy == TurboQuantOptimizationPolicy.conservative)
             #expect(llama32_3B.valueBits == 8)
+            #expect(llama32_3B.status == .guarded)
 
             let mistral4 = try #require(
                 registry.profile(

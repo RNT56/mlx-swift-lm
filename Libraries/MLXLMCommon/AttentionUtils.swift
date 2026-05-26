@@ -229,7 +229,7 @@ private func recordTurboQuantFallback(
         toPath: toPath,
         policy: policy,
         reason: reason,
-        isSemanticallyExact: path == .rawExactSDPA || path == .decodedCompressedSDPA
+        isSemanticallyExact: path == .rawExactSDPA
     )
     cache.recordFallback(result)
     turboQuantTrace(

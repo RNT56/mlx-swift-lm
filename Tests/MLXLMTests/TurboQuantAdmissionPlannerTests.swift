@@ -82,6 +82,35 @@ extension MLXRuntimeSwiftTests {
             #expect(!fatal.memoryPlan.packedFallbackEnabled)
         }
 
+        @Test func testDecodedFallbackReserveCoversFullContextPerDecodedLayer() {
+            let planner = TurboQuantAdmissionPlanner(
+                options: TurboQuantAdmissionPlanner.Options(
+                    defaultTokenizerBytes: 0,
+                    defaultUIReserveBytes: 0,
+                    defaultScratchBytes: 0,
+                    exactFallbackDecodeLayerCount: 2
+                )
+            )
+            let profile = Self.profile(weightGiB: 2, layers: 16)
+            let contextLength = 4096
+            let admission = planner.admit(
+                profile: profile,
+                requestedContextLength: contextLength,
+                userMode: .balanced,
+                fallbackPolicy: .compressedDecodeAllowed,
+                preset: .turbo3_5,
+                memorySample: Self.sample(availableGiB: 16, modelGiB: 2)
+            )
+
+            let rawBytesPerTokenPerLayer =
+                admission.memoryPlan.rawBytesPerToken / max(1, profile.layerCount)
+            #expect(admission.admitted)
+            #expect(
+                admission.memoryPlan.runtimeZones.fallbackReserveBytes
+                    == rawBytesPerTokenPerLayer * 2 * admission.admittedContextLength
+            )
+        }
+
         @Test func testBalancedDowngradesToMaxContextBeforeReducingContext() {
             let planner = Self.planner()
             let profile = Self.profile(weightGiB: 2, layers: 32)

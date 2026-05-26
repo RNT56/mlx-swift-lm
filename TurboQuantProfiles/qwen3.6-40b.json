@@ -106,7 +106,7 @@
   "optimization_policy": "conservative",
   "requires_metal_self_test": true,
   "requires_fused_attention_self_test": false,
-  "status": "experimental",
+  "status": "guarded",
   "source": "profile-audit-2026-05-23",
   "confidence": 0.65,
   "measured": {},

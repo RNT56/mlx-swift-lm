@@ -128,8 +128,28 @@ public enum TurboQuantQualityProfile: String, Codable, Sendable, CaseIterable {
 
 public enum TurboQuantProfileStatus: String, Codable, Sendable, CaseIterable {
     case experimental
+    case guarded
     case validated
+    case verified
+    case certified
     case deprecated
+
+    public var isActive: Bool {
+        self != .deprecated
+    }
+
+    public var isDeviceEvidenceBacked: Bool {
+        switch self {
+        case .verified, .certified:
+            true
+        case .experimental, .guarded, .validated, .deprecated:
+            false
+        }
+    }
+
+    public var requiresGuardedFallbackDisclosure: Bool {
+        self == .guarded
+    }
 }
 
 public enum TurboQuantModelModality: String, Codable, Sendable, CaseIterable {
@@ -1361,7 +1381,7 @@ extension TurboQuantProfile {
         if turboQuant.preferredPaths.isEmpty {
             reasons.append("TurboQuant preferred paths are required")
         }
-        if status == .deprecated {
+        if !status.isActive {
             reasons.append("profile is deprecated")
         }
 
@@ -1566,7 +1586,7 @@ extension TurboQuantProfile {
                 actual: "empty"
             )
         }
-        if status == .deprecated {
+        if !status.isActive {
             append("status", expected: "active", actual: status.rawValue)
         }
         if requireFingerprint, modelFingerprint == nil {
@@ -1976,6 +1996,11 @@ private let bundledConservativeOptimizationProfileIDs: Set<String> = [
     "llama-3.2-3b"
 ]
 
+private let bundledGuardedProfileIDs: Set<String> = [
+    "gemma-3-1b",
+    "llama-3.2-3b",
+]
+
 private let bundledThroughputOptimizationProfileIDs: Set<String> = [
     "phi-2",
     "phi-3-mini",
@@ -2045,6 +2070,11 @@ private func applyingBundledProfileOptimizations(_ profile: TurboQuantProfile)
         for: profile,
         safeContextLength: profile.safeContextLength
     )
+    if bundledGuardedProfileIDs.contains(profile.id)
+        || (isDenseQwen35HybridProfile(profile) && profile.recommendedScheme == .turbo8)
+    {
+        profile.status = .guarded
+    }
     return profile
 }
 

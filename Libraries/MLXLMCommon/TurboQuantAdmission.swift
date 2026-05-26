@@ -980,7 +980,7 @@ public struct TurboQuantAdmissionPlanner: Sendable {
             guard profile.layerCount > 0 else { return rawBytesPerToken * max(0, contextLength) }
             let decodedLayers = min(profile.layerCount, options.exactFallbackDecodeLayerCount)
             return (rawBytesPerToken / max(1, profile.layerCount)) * decodedLayers
-                * max(1, min(contextLength, options.rawShadowPrefillChunkLength))
+                * max(0, contextLength)
         case .fatalOnFailure:
             return 0
         }

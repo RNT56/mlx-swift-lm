@@ -62,6 +62,23 @@ struct TurboQuantRuntimeFailureTests {
         )
     }
 
+    @Test func mapsTypedMLXTurboQuantErrorsForPines() {
+        let backend = TurboQuantRuntimeFailure(
+            TurboQuantError.unsupportedBackend(
+                .metalPolarQJL,
+                "kernel self-test failed"
+            )
+        )
+        #expect(backend == .unsupportedBackend("metalPolarQJL: kernel self-test failed"))
+        #expect(backend.pinesFailureKind == .turboQuantPathUnavailable)
+
+        let dtype = TurboQuantRuntimeFailure(
+            TurboQuantError.invalidMetalConfiguration("unsupported tensor dtype int64")
+        )
+        #expect(dtype == .unsupportedTensorDType("Invalid TurboQuant Metal configuration: unsupported tensor dtype int64"))
+        #expect(dtype.pinesFailureKind == .unsupportedTensorDType)
+    }
+
     @Test func runtimeFailureCodableRoundTripKeepsCaseAndMessage() throws {
         let original = TurboQuantRuntimeFailure.decodedFallbackUnavailable(
             "decode compressed K/V fallback failed"
