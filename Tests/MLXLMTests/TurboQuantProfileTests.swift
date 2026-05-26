@@ -404,16 +404,24 @@ extension MLXRuntimeSwiftTests {
 
         @Test func testGemma2ProfilesMatchCurrentMLXCommunityConfigs() throws {
             let registry = TurboQuantProfileRegistry.bundled
-            let examples: [(String, String, Double, Int)] = [
-                ("mlx-community/gemma-2-2b-it-4bit", "gemma-2-2b", 2, 256),
-                ("mlx-community/gemma-2-baku-2b-it-4bit", "gemma-2-2b", 2, 256),
-                ("mlx-community/gemma-2-9b-it-4bit", "gemma-2-9b", 9, 256),
-                ("mlx-community/Gemma-SEA-LION-v3-9B-IT-mlx-4bit", "gemma-2-9b", 9, 256),
-                ("mlx-community/gemma-2-27b-it-4bit", "gemma-2-27b", 27, 128),
-                ("mlx-community/TheDrummer_Big-Tiger-Gemma-27B-v1_4bit", "gemma-2-27b", 27, 128),
+            let examples: [(String, String, Double, Int, TurboQuantOptimizationPolicy)] = [
+                ("mlx-community/gemma-2-2b-it-4bit", "gemma-2-2b", 2, 256, .preferThroughput),
+                ("mlx-community/gemma-2-baku-2b-it-4bit", "gemma-2-2b", 2, 256, .preferThroughput),
+                ("mlx-community/gemma-2-9b-it-4bit", "gemma-2-9b", 9, 256, .preferMemory),
+                (
+                    "mlx-community/Gemma-SEA-LION-v3-9B-IT-mlx-4bit", "gemma-2-9b", 9, 256,
+                    .preferMemory
+                ),
+                ("mlx-community/gemma-2-27b-it-4bit", "gemma-2-27b", 27, 128, .preferMemory),
+                (
+                    "mlx-community/TheDrummer_Big-Tiger-Gemma-27B-v1_4bit", "gemma-2-27b", 27,
+                    128, .preferMemory
+                ),
             ]
 
-            for (modelID, expectedProfileID, parameterCountB, headDimension) in examples {
+            for (modelID, expectedProfileID, parameterCountB, headDimension, optimizationPolicy)
+                in examples
+            {
                 let profile = try #require(
                     registry.profile(
                         for: modelID,
@@ -424,7 +432,7 @@ extension MLXRuntimeSwiftTests {
                     )
                 )
                 #expect(profile.id == expectedProfileID)
-                #expect(profile.optimizationPolicy == TurboQuantOptimizationPolicy.preferMemory)
+                #expect(profile.optimizationPolicy == optimizationPolicy)
             }
         }
 

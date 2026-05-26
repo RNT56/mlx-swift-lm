@@ -87,6 +87,21 @@ public enum TurboQuantScheme: String, Codable, Sendable, CaseIterable {
         }
     }
 
+    public var defaultKeyBits: Double? {
+        switch self {
+        case .disabled:
+            nil
+        case .turbo8:
+            8
+        case .turbo4v2, .turbo3_5:
+            3.5
+        case .turbo3:
+            3
+        case .turbo2_5:
+            2.5
+        }
+    }
+
     public var defaultOptimizationPolicy: TurboQuantOptimizationPolicy {
         switch self {
         case .disabled, .turbo8, .turbo4v2, .turbo3_5:
@@ -1850,6 +1865,7 @@ private func bundledProfile(
     fallbackScheme: TurboQuantScheme? = .turbo3_5,
     supportedContextLengths: [Int] = bundledProfileDefaultContextLengths,
     safeContextLength: Int? = 65536,
+    keyBits: Double? = nil,
     valueBits: Int = 4,
     source: String? = "profile-audit-2026-05-23",
     confidence: Double? = nil,
@@ -1877,6 +1893,7 @@ private func bundledProfile(
         supportedValueHeadDimensions: supportedValueHeadDimensions,
         recommendedScheme: recommendedScheme,
         fallbackScheme: fallbackScheme,
+        keyBits: keyBits ?? recommendedScheme.defaultKeyBits ?? 3.5,
         valueBits: valueBits,
         safeMaskModes: commonSafeMasks,
         supportedContextLengths: supportedContextLengths,
