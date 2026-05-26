@@ -35,10 +35,20 @@ struct QwenProofQuality: Codable {
 
 struct QwenProofThroughput: Codable {
     var compressedSeconds: Double
+    var compressedSecondsP50: Double
+    var compressedSecondsP95: Double
     var plainSeconds: Double
+    var plainSecondsP50: Double
+    var plainSecondsP95: Double
     var compressedTokensPerSecond: Double
+    var compressedTokensPerSecondP50: Double
+    var compressedTokensPerSecondP95: Double
     var plainTokensPerSecond: Double
+    var plainTokensPerSecondP50: Double
+    var plainTokensPerSecondP95: Double
     var speedRatioToPlain: Double
+    var speedRatioToPlainP50: Double
+    var speedRatioToPlainP95: Double
     var minExtendedTokensPerSecond: Double
     var passedParityGate: Bool
     var passedProductionGate: Bool
@@ -234,16 +244,33 @@ func deterministicValues(count: Int, scale: Double, phase: Double) -> [Float] {
     }
 }
 
-func timed(iterations: Int, _ body: () throws -> MLXArray) throws -> (Double, MLXArray) {
+struct QwenProofTiming {
+    var averageSeconds: Double
+    var p50Seconds: Double
+    var p95Seconds: Double
+    var output: MLXArray
+}
+
+func timed(iterations: Int, _ body: () throws -> MLXArray) throws -> QwenProofTiming {
     let warmup = try body()
     eval(warmup)
     var last = warmup
-    let start = Date.timeIntervalSinceReferenceDate
-    for _ in 0 ..< max(1, iterations) {
+    let measuredIterations = max(1, iterations)
+    var samples = [Double]()
+    samples.reserveCapacity(measuredIterations)
+    for _ in 0 ..< measuredIterations {
+        let start = Date.timeIntervalSinceReferenceDate
         last = try body()
         eval(last)
+        samples.append(Date.timeIntervalSinceReferenceDate - start)
     }
-    return ((Date.timeIntervalSinceReferenceDate - start) / Double(max(1, iterations)), last)
+    let averageSeconds = samples.reduce(0, +) / Double(measuredIterations)
+    return QwenProofTiming(
+        averageSeconds: averageSeconds,
+        p50Seconds: percentile(samples, percentile: 0.50),
+        p95Seconds: percentile(samples, percentile: 0.95),
+        output: last
+    )
 }
 
 func argmax(_ values: ArraySlice<Float>) -> Int {
@@ -530,7 +557,7 @@ func runCase(
             preferOnlineFused: preferOnline,
             availability: availability
         )
-        let (plainSeconds, plainOutput) = try timed(iterations: iterations) {
+        let plainTiming = try timed(iterations: iterations) {
             MLXFast.scaledDotProductAttention(
                 queries: queries,
                 keys: keys,
@@ -539,7 +566,7 @@ func runCase(
                 mask: .causal
             )
         }
-        let (compressedSeconds, compressedOutput) = try timed(iterations: iterations) {
+        let compressedTiming = try timed(iterations: iterations) {
             try turboQuantMetalScaledDotProductAttention(
                 queries: queries,
                 keyCode: compressedKeys,
@@ -551,24 +578,45 @@ func runCase(
             )
         }
         let quality = qualityGate(
-            candidate: compressedOutput,
-            reference: plainOutput,
+            candidate: compressedTiming.output,
+            reference: plainTiming.output,
             scheme: scheme
         )
         let compressedTPS =
-            Double(queryLength) / max(compressedSeconds, Double.leastNonzeroMagnitude)
-        let plainTPS = Double(queryLength) / max(plainSeconds, Double.leastNonzeroMagnitude)
+            Double(queryLength) / max(compressedTiming.averageSeconds, Double.leastNonzeroMagnitude)
+        let compressedTPSP50 =
+            Double(queryLength) / max(compressedTiming.p50Seconds, Double.leastNonzeroMagnitude)
+        let compressedTPSP95 =
+            Double(queryLength) / max(compressedTiming.p95Seconds, Double.leastNonzeroMagnitude)
+        let plainTPS =
+            Double(queryLength) / max(plainTiming.averageSeconds, Double.leastNonzeroMagnitude)
+        let plainTPSP50 =
+            Double(queryLength) / max(plainTiming.p50Seconds, Double.leastNonzeroMagnitude)
+        let plainTPSP95 =
+            Double(queryLength) / max(plainTiming.p95Seconds, Double.leastNonzeroMagnitude)
         let speedRatio = compressedTPS / max(plainTPS, Double.leastNonzeroMagnitude)
+        let speedRatioP50 = compressedTPSP50 / max(plainTPSP50, Double.leastNonzeroMagnitude)
+        let speedRatioP95 = compressedTPSP95 / max(plainTPSP95, Double.leastNonzeroMagnitude)
         let usesPlainProductionRoute = contextLength <= shortContextPlainKVThreshold
-        let passedParityGate = usesPlainProductionRoute || speedRatio >= speedParityRatio
+        let passedParityGate = usesPlainProductionRoute || speedRatioP95 >= speedParityRatio
         let passedProductionGate =
-            usesPlainProductionRoute || compressedTPS >= minExtendedTokensPerSecond
+            usesPlainProductionRoute || compressedTPSP95 >= minExtendedTokensPerSecond
         let throughput = QwenProofThroughput(
-            compressedSeconds: compressedSeconds,
-            plainSeconds: plainSeconds,
+            compressedSeconds: compressedTiming.averageSeconds,
+            compressedSecondsP50: compressedTiming.p50Seconds,
+            compressedSecondsP95: compressedTiming.p95Seconds,
+            plainSeconds: plainTiming.averageSeconds,
+            plainSecondsP50: plainTiming.p50Seconds,
+            plainSecondsP95: plainTiming.p95Seconds,
             compressedTokensPerSecond: compressedTPS,
+            compressedTokensPerSecondP50: compressedTPSP50,
+            compressedTokensPerSecondP95: compressedTPSP95,
             plainTokensPerSecond: plainTPS,
+            plainTokensPerSecondP50: plainTPSP50,
+            plainTokensPerSecondP95: plainTPSP95,
             speedRatioToPlain: speedRatio,
+            speedRatioToPlainP50: speedRatioP50,
+            speedRatioToPlainP95: speedRatioP95,
             minExtendedTokensPerSecond: minExtendedTokensPerSecond,
             passedParityGate: passedParityGate,
             passedProductionGate: passedProductionGate

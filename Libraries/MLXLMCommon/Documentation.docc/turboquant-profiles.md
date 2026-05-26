@@ -46,9 +46,9 @@ Bundled profiles keep the quality-first TurboQuant default of 4-bit V2 keys,
 4-bit values, and group size 64 except where device evidence makes that unsafe.
 Per-profile optimization policy is tuned from config-backed model shape, context
 metadata, and device evidence: Qwen3.5/Qwen3.6 use Turbo8 with exact initial
-prefill plus throughput-oriented two-stage compressed decode, while Gemma 3 1B
+prefill plus block-parallel fused compressed decode, while Gemma 3 1B
 and Llama 3.2 3B use Turbo8 with exact initial prefill and raw-free compressed
-decode; lower-bit guarded profiles use conservative routing. Safe context lengths mirror the
+decode; non-Qwen lower-bit guarded profiles use conservative routing. Safe context lengths mirror the
 public model configuration or model card where available; callers should still
 apply their own memory-fit policy before admitting very long prompts.
 
@@ -59,9 +59,9 @@ families with config-backed 256-dimensional KV head checks: `qwen3.5-0.8b`,
 `qwen3.5-97b-a10b`, `qwen3.5-122b-a10b`, and `qwen3.5-397b-a17b`.
 The production precision for these profiles is Turbo8 with the `.preferThroughput`
 runtime policy. That policy keeps exact initial prefill, skips resident raw
-shadow decode, and routes decode through compressed two-stage QK/AV because that
-path is faster than the current fused shader for Qwen-style 256-dimensional
-grouped-query heads. Turbo4V2 and Turbo3.5 are valid guarded proof candidates
+shadow decode, and routes decode through block-parallel fused compressed
+attention for Qwen-style 256-dimensional grouped-query heads. Turbo4V2 and
+Turbo3.5 are valid guarded proof candidates
 only: Turbo4V2 uses 4-bit key magnitudes and 4-bit values, while Turbo3.5 uses
 mixed 3/4-bit key magnitudes and 4-bit values. The profile API exposes both
 explicitly, but release tooling must promote them per model, device, OS, and
@@ -142,8 +142,9 @@ behavior. The model benchmark records compressed prefill, decode attention, and
 rotating-cache growth. The Qwen proof benchmark records Qwen3.5/Qwen3.6 profile
 coverage, valid precision candidates, TurboQuant compressed attention vs plain
 attention quality, short-context plain-route speed parity, extended-context
-compressed decode throughput, and extended-context memory compression. Its release
-matrix is a decode-throughput gate at query length 1; use explicit
+compressed decode p50/p95 throughput, and extended-context memory compression. Its release
+matrix is a decode-throughput gate at query length 1 and gates production
+throughput on the p95-latency token rate; use explicit
 `--query-lengths` values for wider prompt/prefill stress sweeps. Promote bundled profile fields from pending to measured only when
 the JSON includes the model revision, device, OS, latency, memory, and quality
 data needed to reproduce the decision.
@@ -157,9 +158,9 @@ match the raw rotating cache mask order after wraparound.
 
 The release matrix is intentionally capped at the current production throughput
 contexts. Run `swift run TurboQuantQwenProof --contexts 32768 --query-lengths 1
---schemes turbo8 --dtype float16` as a stress gate; 32K should not be promoted
-until it clears the configured extended-context tokens/sec threshold on target
-devices.
+--schemes turbo8,turbo4v2,turbo3_5 --dtype float16 --strict` as the 32K
+production gate; keep 64K and higher as stress targets until their p95-latency
+token rate clears the configured threshold on target devices.
 
 ## Converted Weights
 

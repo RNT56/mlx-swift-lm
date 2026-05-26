@@ -166,9 +166,9 @@ extension TurboQuantCompressedKVCacheProtocol {
             return false
         }
         switch optimizationPolicy {
-        case .auto, .preferMemory:
+        case .auto, .preferMemory, .preferThroughput:
             return true
-        case .conservative, .preferThroughput:
+        case .conservative:
             return false
         }
     }

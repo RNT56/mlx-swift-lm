@@ -1056,27 +1056,27 @@ public struct TurboQuantProfile: Codable, Equatable, Identifiable, Sendable {
                     fallbackPolicy: .compressedDecodeAllowed,
                     status: .preferred,
                     reason:
-                        "Qwen3.5/Qwen3.6 production route: exact initial prefill, throughput-oriented two-stage compressed decode, and extended-context KV compression."
+                        "Qwen3.5/Qwen3.6 production route: exact initial prefill, block-parallel fused compressed decode, and extended-context KV compression."
                 ),
                 TurboQuantPrecisionCandidate(
                     scheme: .turbo4v2,
                     keyBits: 4,
                     valueBits: 4,
-                    optimizationPolicy: .conservative,
-                    fallbackPolicy: .exactRequired,
+                    optimizationPolicy: .preferThroughput,
+                    fallbackPolicy: .compressedDecodeAllowed,
                     status: .guarded,
                     reason:
-                        "Guarded Qwen lower-bit candidate; must pass per-device proof before product promotion."
+                        "Guarded Qwen lower-bit fused candidate; must pass per-device proof before product promotion."
                 ),
                 TurboQuantPrecisionCandidate(
                     scheme: .turbo3_5,
                     keyBits: 3.5,
                     valueBits: 4,
-                    optimizationPolicy: .conservative,
-                    fallbackPolicy: .exactRequired,
+                    optimizationPolicy: .preferThroughput,
+                    fallbackPolicy: .compressedDecodeAllowed,
                     status: .guarded,
                     reason:
-                        "Guarded Qwen lower-bit candidate; must pass per-device proof before product promotion."
+                        "Guarded Qwen lower-bit fused candidate; must pass per-device proof before product promotion."
                 ),
             ]
         }
@@ -2339,7 +2339,7 @@ private let qwen35MoEModelTypes = ["qwen3_5_moe", "qwen3_5_moe_text"]
 private let qwen35Modalities: [TurboQuantModelModality] = [.text, .visionText]
 private let qwen35ProfileNotes = [
     "Qwen3.5 and Qwen3.6 profiles are config-backed with verified 256-dimensional key and value heads.",
-    "Production Qwen3.5/Qwen3.6 profiles use turbo8 with exact initial prefill, raw-free compressed decode, and exact architecture-specific native state.",
+    "Production Qwen3.5/Qwen3.6 profiles use turbo8 with exact initial prefill, block-parallel fused compressed decode, and exact architecture-specific native state.",
     "Turbo4V2 and Turbo3.5 are guarded proof candidates only; promote them per model/device after the Qwen proof pipeline passes quality, stop, memory, and throughput gates.",
 ]
 

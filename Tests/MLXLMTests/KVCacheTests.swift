@@ -169,7 +169,7 @@ extension MLXRuntimeSwiftTests {
                 #expect(turbo.optimizationPolicy == .preferThroughput)
                 #expect(turbo.seed == 0xDEAD_BEEF_0000_0017)
                 #expect(turbo.diagnostics.optimizationPolicy == .preferThroughput)
-                #expect(turbo.prefersOnlineFusedAttention == false)
+                #expect(turbo.prefersOnlineFusedAttention == true)
                 #expect(turbo.prefersExactInitialPrefill == true)
                 #expect(
                     turbo.diagnostics.selectedKernelProfile
@@ -1154,7 +1154,7 @@ extension MLXRuntimeSwiftTests {
             #expect(cache.attentionDiagnostics.activeAttentionPath == .twoStageCompressed)
         }
 
-        @Test func testQwenThroughputPolicyUsesTwoStageForHeadDimension256Decode() throws {
+        @Test func testQwenThroughputPolicyUsesFusedForHeadDimension256Decode() throws {
             guard TurboQuantKernelAvailability.current.supportsMetalPolarQJLAttention else {
                 return
             }
@@ -1177,8 +1177,8 @@ extension MLXRuntimeSwiftTests {
                     mask: .causal
                 )
             )
-            #expect(cache.prefersOnlineFusedAttention == false)
-            #expect(cache.attentionDiagnostics.activeAttentionPath == .twoStageCompressed)
+            #expect(cache.prefersOnlineFusedAttention == true)
+            #expect(cache.attentionDiagnostics.activeAttentionPath == .tiledOnlineFused)
         }
 
         @Test func testRotatingTurboQuantCompressedStateIsRawFreeWhenAvailable() throws {

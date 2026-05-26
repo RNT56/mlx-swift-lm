@@ -121,7 +121,7 @@
     "Runtime shape checks and Metal self-tests remain authoritative.",
     "Qwen3.5 and Qwen3.6 profiles are config-backed with verified 256-dimensional key and value heads.",
     "Turbo4V2 and Turbo3.5 are guarded proof candidates only; promote them per model/device after the Qwen proof pipeline passes quality, stop, memory, and throughput gates.",
-    "production Qwen3.5/Qwen3.6 uses turbo8 exact initial prefill plus throughput-oriented two-stage compressed decode for extended context",
-    "turbo4v2 and turbo3_5 remain guarded proof candidates and require exact fallback until certified"
+    "production Qwen3.5/Qwen3.6 uses turbo8 exact initial prefill plus block-parallel fused compressed decode for extended context",
+    "turbo4v2 and turbo3_5 remain guarded proof candidates with block-parallel fused decode until certified"
   ]
 }

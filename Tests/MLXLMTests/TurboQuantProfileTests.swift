@@ -1364,15 +1364,15 @@ extension MLXRuntimeSwiftTests {
                 #expect(turbo4.status == .guarded)
                 #expect(turbo4.keyBits == 4)
                 #expect(turbo4.valueBits == 4)
-                #expect(turbo4.optimizationPolicy == .conservative)
-                #expect(turbo4.fallbackPolicy == .exactRequired)
+                #expect(turbo4.optimizationPolicy == .preferThroughput)
+                #expect(turbo4.fallbackPolicy == .compressedDecodeAllowed)
 
                 let turbo35 = try #require(candidates[.turbo3_5])
                 #expect(turbo35.status == .guarded)
                 #expect(turbo35.keyBits == 3.5)
                 #expect(turbo35.valueBits == 4)
-                #expect(turbo35.optimizationPolicy == .conservative)
-                #expect(turbo35.fallbackPolicy == .exactRequired)
+                #expect(turbo35.optimizationPolicy == .preferThroughput)
+                #expect(turbo35.fallbackPolicy == .compressedDecodeAllowed)
 
                 #expect(candidates[.turbo3] == nil)
                 #expect(candidates[.turbo2_5] == nil)
@@ -1381,8 +1381,8 @@ extension MLXRuntimeSwiftTests {
                 #expect(guardedProfile.recommendedScheme == .turbo4v2)
                 #expect(guardedProfile.keyBits == 4)
                 #expect(guardedProfile.valueBits == 4)
-                #expect(guardedProfile.optimizationPolicy == .conservative)
-                #expect(guardedProfile.turboQuant.fallbackPolicy == .exactRequired)
+                #expect(guardedProfile.optimizationPolicy == .preferThroughput)
+                #expect(guardedProfile.turboQuant.fallbackPolicy == .compressedDecodeAllowed)
                 #expect(profile.applyingPrecisionCandidate(.turbo2_5) == nil)
             }
         }
