@@ -357,7 +357,7 @@ extension GenerateParameters {
             return resolved
         }
         if TurboQuantRuntimeControl.enabled("TURBOQUANT_FORCE_TWO_STAGE") {
-            resolved.turboQuantOptimizationPolicy = .conservative
+            resolved.turboQuantOptimizationPolicy = .preferThroughput
         }
         if TurboQuantRuntimeControl.enabled("TURBOQUANT_FORCE_FUSED") {
             resolved.turboQuantOptimizationPolicy = .preferThroughput

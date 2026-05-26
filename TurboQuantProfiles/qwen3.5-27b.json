@@ -1,7 +1,9 @@
 {
   "schema_version": 2,
   "id": "qwen3.5-27b",
-  "exact_model_ids": [],
+  "exact_model_ids": [
+
+  ],
   "model_patterns": [
     "*qwen3.5-27b",
     "*qwen3.5-27b-*",
@@ -103,17 +105,21 @@
   "safe_context_length": 262144,
   "quality_profile": "balanced",
   "backend": "metalPolarQJL",
-  "optimization_policy": "auto",
+  "optimization_policy": "preferThroughput",
   "requires_metal_self_test": true,
   "requires_fused_attention_self_test": false,
   "status": "guarded",
   "source": "profile-audit-2026-05-23",
   "confidence": 0.8,
-  "measured": {},
+  "measured": {
+  },
   "notes": [
     "Uses ordinary MLX model weights; TurboQuant applies only to runtime KV-cache state.",
     "Measured quality and throughput fields are intentionally empty until reproduced on target hardware.",
     "Runtime shape checks and Metal self-tests remain authoritative.",
-    "Qwen3.5 and Qwen3.6 profiles are config-backed with verified 256-dimensional key and value heads."
+    "Qwen3.5 and Qwen3.6 profiles are config-backed with verified 256-dimensional key and value heads.",
+    "Turbo4V2 and Turbo3.5 are guarded proof candidates only; promote them per model/device after the Qwen proof pipeline passes quality, stop, memory, and throughput gates.",
+    "production Qwen3.5/Qwen3.6 uses turbo8 exact initial prefill plus throughput-oriented two-stage compressed decode for extended context",
+    "turbo4v2 and turbo3_5 remain guarded proof candidates and require exact fallback until certified"
   ]
 }

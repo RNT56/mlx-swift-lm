@@ -79,7 +79,7 @@ extension MLXRuntimeSwiftTests {
             #expect(qwen35.id == "qwen3.5-4b")
             #expect(qwen35.safeContextLength == 262144)
             #expect(qwen35.recommendedScheme == .turbo8)
-            #expect(qwen35.optimizationPolicy == TurboQuantOptimizationPolicy.auto)
+            #expect(qwen35.optimizationPolicy == TurboQuantOptimizationPolicy.preferThroughput)
             #expect(qwen35.valueBits == 8)
             #expect(qwen35.status == .guarded)
 
@@ -96,7 +96,7 @@ extension MLXRuntimeSwiftTests {
             #expect(qwen35OptiQ2B.id == "qwen3.5-2b")
             #expect(qwen35OptiQ2B.recommendedScheme == .turbo8)
             #expect(
-                qwen35OptiQ2B.optimizationPolicy == TurboQuantOptimizationPolicy.auto
+                qwen35OptiQ2B.optimizationPolicy == TurboQuantOptimizationPolicy.preferThroughput
             )
             #expect(qwen35OptiQ2B.valueBits == 8)
             #expect(qwen35OptiQ2B.status == .guarded)
@@ -1164,6 +1164,10 @@ extension MLXRuntimeSwiftTests {
                     )
                 )
                 #expect(profile.id == expectedProfileID)
+                #expect(profile.recommendedScheme == .turbo8)
+                #expect(profile.optimizationPolicy == .preferThroughput)
+                #expect(profile.valueBits == 8)
+                #expect(profile.status == .guarded)
             }
         }
 
@@ -1302,20 +1306,79 @@ extension MLXRuntimeSwiftTests {
             #expect(lowerBitProfiles.allSatisfy { $0.optimizationPolicy == .conservative })
         }
 
-        @Test func testTurbo8QualitySensitiveProfilesUseExactPrefillRawFreeDecodePolicy() throws {
+        @Test func testTurbo8QualitySensitiveProfilesUseProductionPolicies() throws {
             let registry = TurboQuantProfileRegistry.bundled
-            let profileIDs = [
+            let qwenProfileIDs = [
                 "qwen3.5-0.8b",
                 "qwen3.5-2b",
+                "qwen3.5-4b",
+                "qwen3.5-9b",
+                "qwen3.5-27b",
+                "qwen3.6-27b",
+                "qwen3.5-40b",
+                "qwen3.6-40b",
+                "qwen3.5-35b-a3b",
+                "qwen3.6-35b-a3b",
+                "qwen3.5-97b-a10b",
+                "qwen3.5-122b-a10b",
+                "qwen3.5-397b-a17b",
+            ]
+            let exactPrefillProfiles = [
                 "gemma-3-1b",
                 "llama-3.2-3b",
             ]
 
-            for profileID in profileIDs {
+            for profileID in qwenProfileIDs {
+                let profile = try #require(registry.profiles.first { $0.id == profileID })
+                #expect(profile.recommendedScheme == .turbo8)
+                #expect(profile.valueBits == 8)
+                #expect(profile.optimizationPolicy == .preferThroughput)
+            }
+
+            for profileID in exactPrefillProfiles {
                 let profile = try #require(registry.profiles.first { $0.id == profileID })
                 #expect(profile.recommendedScheme == .turbo8)
                 #expect(profile.valueBits == 8)
                 #expect(profile.optimizationPolicy == .auto)
+            }
+        }
+
+        @Test func testQwen35AndQwen36PrecisionCandidatesAreExplicitlyGated() throws {
+            let qwenProfiles = TurboQuantProfileRegistry.bundled.profiles.filter {
+                $0.isQwen35Or36Family
+            }
+            #expect(!qwenProfiles.isEmpty)
+
+            for profile in qwenProfiles {
+                let candidates = Dictionary(
+                    uniqueKeysWithValues: profile.precisionCandidates.map { ($0.scheme, $0) }
+                )
+                let preferred = try #require(candidates[.turbo8])
+                #expect(preferred.status == .preferred)
+                #expect(preferred.keyBits == 8)
+                #expect(preferred.valueBits == 8)
+                #expect(preferred.optimizationPolicy == .preferThroughput)
+                #expect(preferred.fallbackPolicy == .compressedDecodeAllowed)
+
+                let turbo4 = try #require(candidates[.turbo4v2])
+                #expect(turbo4.status == .guarded)
+                #expect(turbo4.optimizationPolicy == .conservative)
+                #expect(turbo4.fallbackPolicy == .exactRequired)
+
+                let turbo35 = try #require(candidates[.turbo3_5])
+                #expect(turbo35.status == .guarded)
+                #expect(turbo35.optimizationPolicy == .conservative)
+                #expect(turbo35.fallbackPolicy == .exactRequired)
+
+                #expect(candidates[.turbo3] == nil)
+                #expect(candidates[.turbo2_5] == nil)
+
+                let guardedProfile = try #require(profile.applyingPrecisionCandidate(.turbo4v2))
+                #expect(guardedProfile.recommendedScheme == .turbo4v2)
+                #expect(guardedProfile.valueBits == 4)
+                #expect(guardedProfile.optimizationPolicy == .conservative)
+                #expect(guardedProfile.turboQuant.fallbackPolicy == .exactRequired)
+                #expect(profile.applyingPrecisionCandidate(.turbo2_5) == nil)
             }
         }
 

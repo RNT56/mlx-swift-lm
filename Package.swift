@@ -37,11 +37,14 @@ let package = Package(
         .executable(
             name: "TurboQuantModelBenchmark",
             targets: ["TurboQuantModelBenchmark"]),
+        .executable(
+            name: "TurboQuantQwenProof",
+            targets: ["TurboQuantQwenProof"]),
     ],
     dependencies: [
         .package(
             url: "https://github.com/RNT56/mlx-swift",
-            revision: "e07642fe9cf9c4b305a2d282d3e4a5e1e965323e"),
+            revision: "c96dd8c7b374fa50d64b35bf8c5d7739df7d9984"),
         .package(url: "https://github.com/swiftlang/swift-syntax.git", "600.0.0" ..< "604.0.0"),
     ],
     targets: [
@@ -125,6 +128,14 @@ let package = Package(
                 .product(name: "MLX", package: "mlx-swift"),
             ],
             path: "tools/TurboQuantModelBenchmark"
+        ),
+        .executableTarget(
+            name: "TurboQuantQwenProof",
+            dependencies: [
+                "MLXLMCommon",
+                .product(name: "MLX", package: "mlx-swift"),
+            ],
+            path: "tools/TurboQuantQwenProof"
         ),
         .testTarget(
             name: "MLXLMTests",

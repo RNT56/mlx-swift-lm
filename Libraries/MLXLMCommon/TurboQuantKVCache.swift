@@ -159,14 +159,25 @@ public protocol TurboQuantCompressedKVCacheProtocol: KVCache, AnyObject {
 
 extension TurboQuantCompressedKVCacheProtocol {
     public var prefersOnlineFusedAttention: Bool {
-        optimizationPolicy != .conservative
+        if TurboQuantRuntimeControl.enabled("TURBOQUANT_FORCE_FUSED") {
+            return true
+        }
+        if TurboQuantRuntimeControl.enabled("TURBOQUANT_FORCE_TWO_STAGE") {
+            return false
+        }
+        switch optimizationPolicy {
+        case .auto, .preferMemory:
+            return true
+        case .conservative, .preferThroughput:
+            return false
+        }
     }
 
     public var prefersExactInitialPrefill: Bool {
         switch optimizationPolicy {
-        case .auto, .conservative:
+        case .auto, .conservative, .preferThroughput:
             true
-        case .preferMemory, .preferThroughput:
+        case .preferMemory:
             false
         }
     }

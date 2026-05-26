@@ -163,6 +163,40 @@ public enum TurboQuantProfileStatus: String, Codable, Sendable, CaseIterable {
     }
 }
 
+public enum TurboQuantPrecisionSupportStatus: String, Codable, Sendable, CaseIterable {
+    case preferred
+    case guarded
+    case unsupported
+}
+
+public struct TurboQuantPrecisionCandidate: Codable, Equatable, Sendable {
+    public var scheme: TurboQuantScheme
+    public var keyBits: Double
+    public var valueBits: Int
+    public var optimizationPolicy: TurboQuantOptimizationPolicy
+    public var fallbackPolicy: TurboQuantFallbackPolicy
+    public var status: TurboQuantPrecisionSupportStatus
+    public var reason: String
+
+    public init(
+        scheme: TurboQuantScheme,
+        keyBits: Double,
+        valueBits: Int,
+        optimizationPolicy: TurboQuantOptimizationPolicy,
+        fallbackPolicy: TurboQuantFallbackPolicy,
+        status: TurboQuantPrecisionSupportStatus,
+        reason: String
+    ) {
+        self.scheme = scheme
+        self.keyBits = keyBits
+        self.valueBits = valueBits
+        self.optimizationPolicy = optimizationPolicy
+        self.fallbackPolicy = fallbackPolicy
+        self.status = status
+        self.reason = reason
+    }
+}
+
 public enum TurboQuantModelModality: String, Codable, Sendable, CaseIterable {
     case text
     case visionText
@@ -992,6 +1026,94 @@ public struct TurboQuantProfile: Codable, Equatable, Identifiable, Sendable {
         resolved.turboQuantFallbackPolicy = turboQuant.fallbackPolicy
         warmTurboQuantAttentionKernelsIfAvailable()
         return resolved
+    }
+
+    public var isQwen35Or36Family: Bool {
+        let normalizedID = id.lowercased()
+        if normalizedID.hasPrefix("qwen3.5-") || normalizedID.hasPrefix("qwen3.6-") {
+            return true
+        }
+        let normalizedArchitecture = architecture?
+            .lowercased()
+            .replacingOccurrences(of: "-", with: "_")
+            .replacingOccurrences(of: ".", with: "_")
+        return normalizedArchitecture == "qwen3_5"
+            || normalizedArchitecture == "qwen3_5_text"
+            || normalizedArchitecture == "qwen3_5_moe"
+            || normalizedArchitecture == "qwen3_5_moe_text"
+    }
+
+    public var precisionCandidates: [TurboQuantPrecisionCandidate] {
+        if isQwen35Or36Family {
+            return [
+                TurboQuantPrecisionCandidate(
+                    scheme: .turbo8,
+                    keyBits: 8,
+                    valueBits: 8,
+                    optimizationPolicy: .preferThroughput,
+                    fallbackPolicy: .compressedDecodeAllowed,
+                    status: .preferred,
+                    reason:
+                        "Qwen3.5/Qwen3.6 production route: exact initial prefill, throughput-oriented two-stage compressed decode, and extended-context KV compression."
+                ),
+                TurboQuantPrecisionCandidate(
+                    scheme: .turbo4v2,
+                    keyBits: 3.5,
+                    valueBits: 4,
+                    optimizationPolicy: .conservative,
+                    fallbackPolicy: .exactRequired,
+                    status: .guarded,
+                    reason:
+                        "Guarded Qwen lower-bit candidate; must pass per-device proof before product promotion."
+                ),
+                TurboQuantPrecisionCandidate(
+                    scheme: .turbo3_5,
+                    keyBits: 3.5,
+                    valueBits: 4,
+                    optimizationPolicy: .conservative,
+                    fallbackPolicy: .exactRequired,
+                    status: .guarded,
+                    reason:
+                        "Guarded Qwen lower-bit candidate; must pass per-device proof before product promotion."
+                ),
+            ]
+        }
+
+        return [
+            TurboQuantPrecisionCandidate(
+                scheme: recommendedScheme,
+                keyBits: keyBits,
+                valueBits: valueBits,
+                optimizationPolicy: optimizationPolicy,
+                fallbackPolicy: turboQuant.fallbackPolicy,
+                status: status == .deprecated ? .unsupported : .preferred,
+                reason: "Profile-declared production precision."
+            )
+        ]
+    }
+
+    public func applyingPrecisionCandidate(_ scheme: TurboQuantScheme) -> TurboQuantProfile? {
+        guard let candidate = precisionCandidates.first(where: { $0.scheme == scheme }),
+            candidate.status != .unsupported
+        else {
+            return nil
+        }
+        var profile = self
+        profile.recommendedScheme = candidate.scheme
+        profile.fallbackScheme = candidate.scheme == .turbo8 ? .turbo3_5 : .turbo8
+        profile.keyBits = candidate.keyBits
+        profile.valueBits = candidate.valueBits
+        profile.optimizationPolicy = candidate.optimizationPolicy
+        profile.turboQuant = TurboQuantProfileTurboQuantManifest(
+            keyPreset: candidate.scheme,
+            valueBits: candidate.valueBits,
+            groupSize: groupSize,
+            fallbackPolicy: candidate.fallbackPolicy
+        )
+        if candidate.status == .guarded {
+            profile.status = .guarded
+        }
+        return profile
     }
 
     public func warmTurboQuantAttentionKernelsIfAvailable() {
@@ -1856,8 +1978,8 @@ private let turboQuantProfileNotes = [
 private let commonSafeMasks: [TurboQuantMaskMode] = [.none, .causal]
 private let qualitySensitiveScheme = TurboQuantScheme.turbo8
 private let qualitySensitiveValueBits = 8
-private let qwen35DenseScheme = TurboQuantScheme.turbo8
-private let qwen35DenseValueBits = 8
+private let qwen35ProductionScheme = TurboQuantScheme.turbo8
+private let qwen35ProductionValueBits = 8
 
 private let bundledProfileDefaultContextLengths = [4096, 8192, 16384, 32768, 65536]
 private let bundledProfile8KContextLengths = [4096, 8192]
@@ -2031,6 +2153,11 @@ private func defaultBundledOptimizationPolicy(
     if bundledThroughputOptimizationProfileIDs.contains(profile.id) {
         return .preferThroughput
     }
+    if isQwen35Or36Profile(profile), profile.recommendedScheme == .turbo8,
+        profile.valueBits == 8
+    {
+        return .preferThroughput
+    }
     if profile.recommendedScheme == .turbo8, profile.valueBits == 8 {
         return .auto
     }
@@ -2063,9 +2190,16 @@ private func defaultBundledOptimizationPolicy(
     return .auto
 }
 
-private func isDenseQwen35HybridProfile(_ profile: TurboQuantProfile) -> Bool {
+private func isQwen35Or36Profile(_ profile: TurboQuantProfile) -> Bool {
     let normalizedID = profile.id.lowercased()
     guard normalizedID.hasPrefix("qwen3.5-") || normalizedID.hasPrefix("qwen3.6-") else {
+        return false
+    }
+    return true
+}
+
+private func isDenseQwen35HybridProfile(_ profile: TurboQuantProfile) -> Bool {
+    guard isQwen35Or36Profile(profile) else {
         return false
     }
     let architecture = profile.architecture?.lowercased() ?? ""
@@ -2087,7 +2221,7 @@ private func applyingBundledProfileOptimizations(_ profile: TurboQuantProfile)
         safeContextLength: profile.safeContextLength
     )
     if bundledGuardedProfileIDs.contains(profile.id)
-        || (isDenseQwen35HybridProfile(profile) && profile.recommendedScheme == .turbo8)
+        || (isQwen35Or36Profile(profile) && profile.recommendedScheme == .turbo8)
         || profile.recommendedScheme.requiresGuardedQualityValidation
     {
         profile.status = .guarded
@@ -2203,7 +2337,8 @@ private let qwen35MoEModelTypes = ["qwen3_5_moe", "qwen3_5_moe_text"]
 private let qwen35Modalities: [TurboQuantModelModality] = [.text, .visionText]
 private let qwen35ProfileNotes = [
     "Qwen3.5 and Qwen3.6 profiles are config-backed with verified 256-dimensional key and value heads.",
-    "Dense hybrid profiles use turbo8 with exact initial prefill, raw-free compressed decode, and exact architecture-specific native state.",
+    "Production Qwen3.5/Qwen3.6 profiles use turbo8 with exact initial prefill, raw-free compressed decode, and exact architecture-specific native state.",
+    "Turbo4V2 and Turbo3.5 are guarded proof candidates only; promote them per model/device after the Qwen proof pipeline passes quality, stop, memory, and throughput gates.",
 ]
 
 private let gemmaTextExcludePatterns =
@@ -3677,8 +3812,8 @@ private let bundledProfiles: [TurboQuantProfile] = [
         requiresModelType: true,
         requiresHeadDimensions: true,
         supportedKeyHeadDimensions: [256],
-        recommendedScheme: qwen35DenseScheme,
-        valueBits: qwen35DenseValueBits,
+        recommendedScheme: qwen35ProductionScheme,
+        valueBits: qwen35ProductionValueBits,
         confidence: 0.85,
         extraNotes: qwen35ProfileNotes
     ),
@@ -3694,8 +3829,8 @@ private let bundledProfiles: [TurboQuantProfile] = [
         requiresModelType: true,
         requiresHeadDimensions: true,
         supportedKeyHeadDimensions: [256],
-        recommendedScheme: qwen35DenseScheme,
-        valueBits: qwen35DenseValueBits,
+        recommendedScheme: qwen35ProductionScheme,
+        valueBits: qwen35ProductionValueBits,
         confidence: 0.85,
         extraNotes: qwen35ProfileNotes
     ),
@@ -3711,8 +3846,8 @@ private let bundledProfiles: [TurboQuantProfile] = [
         requiresModelType: true,
         requiresHeadDimensions: true,
         supportedKeyHeadDimensions: [256],
-        recommendedScheme: qwen35DenseScheme,
-        valueBits: qwen35DenseValueBits,
+        recommendedScheme: qwen35ProductionScheme,
+        valueBits: qwen35ProductionValueBits,
         confidence: 0.85,
         extraNotes: qwen35ProfileNotes
     ),
@@ -3728,8 +3863,8 @@ private let bundledProfiles: [TurboQuantProfile] = [
         requiresModelType: true,
         requiresHeadDimensions: true,
         supportedKeyHeadDimensions: [256],
-        recommendedScheme: qwen35DenseScheme,
-        valueBits: qwen35DenseValueBits,
+        recommendedScheme: qwen35ProductionScheme,
+        valueBits: qwen35ProductionValueBits,
         confidence: 0.85,
         extraNotes: qwen35ProfileNotes
     ),
@@ -3745,8 +3880,8 @@ private let bundledProfiles: [TurboQuantProfile] = [
         requiresModelType: true,
         requiresHeadDimensions: true,
         supportedKeyHeadDimensions: [256],
-        recommendedScheme: qwen35DenseScheme,
-        valueBits: qwen35DenseValueBits,
+        recommendedScheme: qwen35ProductionScheme,
+        valueBits: qwen35ProductionValueBits,
         confidence: 0.8,
         extraNotes: qwen35ProfileNotes
     ),
@@ -3762,8 +3897,8 @@ private let bundledProfiles: [TurboQuantProfile] = [
         requiresModelType: true,
         requiresHeadDimensions: true,
         supportedKeyHeadDimensions: [256],
-        recommendedScheme: qwen35DenseScheme,
-        valueBits: qwen35DenseValueBits,
+        recommendedScheme: qwen35ProductionScheme,
+        valueBits: qwen35ProductionValueBits,
         confidence: 0.8,
         extraNotes: qwen35ProfileNotes
     ),
@@ -3779,8 +3914,8 @@ private let bundledProfiles: [TurboQuantProfile] = [
         requiresModelType: true,
         requiresHeadDimensions: true,
         supportedKeyHeadDimensions: [256],
-        recommendedScheme: qwen35DenseScheme,
-        valueBits: qwen35DenseValueBits,
+        recommendedScheme: qwen35ProductionScheme,
+        valueBits: qwen35ProductionValueBits,
         confidence: 0.65,
         extraNotes: qwen35ProfileNotes
     ),
@@ -3796,8 +3931,8 @@ private let bundledProfiles: [TurboQuantProfile] = [
         requiresModelType: true,
         requiresHeadDimensions: true,
         supportedKeyHeadDimensions: [256],
-        recommendedScheme: qwen35DenseScheme,
-        valueBits: qwen35DenseValueBits,
+        recommendedScheme: qwen35ProductionScheme,
+        valueBits: qwen35ProductionValueBits,
         confidence: 0.65,
         extraNotes: qwen35ProfileNotes
     ),
@@ -3813,6 +3948,8 @@ private let bundledProfiles: [TurboQuantProfile] = [
         requiresModelType: true,
         requiresHeadDimensions: true,
         supportedKeyHeadDimensions: [256],
+        recommendedScheme: qwen35ProductionScheme,
+        valueBits: qwen35ProductionValueBits,
         confidence: 0.75,
         extraNotes: qwen35ProfileNotes
     ),
@@ -3828,6 +3965,8 @@ private let bundledProfiles: [TurboQuantProfile] = [
         requiresModelType: true,
         requiresHeadDimensions: true,
         supportedKeyHeadDimensions: [256],
+        recommendedScheme: qwen35ProductionScheme,
+        valueBits: qwen35ProductionValueBits,
         confidence: 0.75,
         extraNotes: qwen35ProfileNotes
     ),
@@ -3844,6 +3983,8 @@ private let bundledProfiles: [TurboQuantProfile] = [
         requiresModelType: true,
         requiresHeadDimensions: true,
         supportedKeyHeadDimensions: [256],
+        recommendedScheme: qwen35ProductionScheme,
+        valueBits: qwen35ProductionValueBits,
         confidence: 0.65,
         extraNotes: qwen35ProfileNotes
     ),
@@ -3859,6 +4000,8 @@ private let bundledProfiles: [TurboQuantProfile] = [
         requiresModelType: true,
         requiresHeadDimensions: true,
         supportedKeyHeadDimensions: [256],
+        recommendedScheme: qwen35ProductionScheme,
+        valueBits: qwen35ProductionValueBits,
         confidence: 0.7,
         extraNotes: qwen35ProfileNotes
     ),
@@ -3874,6 +4017,8 @@ private let bundledProfiles: [TurboQuantProfile] = [
         requiresModelType: true,
         requiresHeadDimensions: true,
         supportedKeyHeadDimensions: [256],
+        recommendedScheme: qwen35ProductionScheme,
+        valueBits: qwen35ProductionValueBits,
         confidence: 0.65,
         extraNotes: qwen35ProfileNotes
     ),

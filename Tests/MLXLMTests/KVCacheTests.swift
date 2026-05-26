@@ -169,6 +169,8 @@ extension MLXRuntimeSwiftTests {
                 #expect(turbo.optimizationPolicy == .preferThroughput)
                 #expect(turbo.seed == 0xDEAD_BEEF_0000_0017)
                 #expect(turbo.diagnostics.optimizationPolicy == .preferThroughput)
+                #expect(turbo.prefersOnlineFusedAttention == false)
+                #expect(turbo.prefersExactInitialPrefill == true)
                 #expect(
                     turbo.diagnostics.selectedKernelProfile
                         == TurboQuantKernelAvailability.current.selectedKernelProfile)

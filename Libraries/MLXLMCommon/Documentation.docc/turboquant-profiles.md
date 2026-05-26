@@ -43,20 +43,29 @@ TurboQuant automatically; a fingerprint mismatch returns no TurboQuant profile s
 the caller keeps its baseline or packed-cache path instead of guessing.
 
 Bundled profiles keep the quality-first TurboQuant default of 3.5-bit keys,
-4-bit values, and group size 64. Per-profile optimization policy is then tuned
-from config-backed model shape, context metadata, and device evidence: Turbo8
-quality-sensitive profiles keep exact initial prefill while using raw-free
-compressed decode, large/long-context/MoE/VLM profiles prefer memory, and
-lower-bit guarded profiles use conservative routing. Safe context lengths mirror
-the public model configuration or model card where available; callers should
-still apply their own memory-fit policy before admitting very long prompts.
+4-bit values, and group size 64 except where device evidence makes that unsafe.
+Per-profile optimization policy is tuned from config-backed model shape, context
+metadata, and device evidence: Qwen3.5/Qwen3.6 use Turbo8 with exact initial
+prefill plus throughput-oriented two-stage compressed decode, while Gemma 3 1B
+and Llama 3.2 3B use Turbo8 with exact initial prefill and raw-free compressed
+decode; lower-bit guarded profiles use conservative routing. Safe context lengths mirror the
+public model configuration or model card where available; callers should still
+apply their own memory-fit policy before admitting very long prompts.
 
 Bundled Qwen3.5/Qwen3.6 profiles cover current MLX Community dense and MoE
 families with config-backed 256-dimensional KV head checks: `qwen3.5-0.8b`,
 `qwen3.5-2b`, `qwen3.5-4b`, `qwen3.5-9b`, `qwen3.5-27b`, `qwen3.6-27b`,
 `qwen3.5-40b`, `qwen3.6-40b`, `qwen3.5-35b-a3b`, `qwen3.6-35b-a3b`,
 `qwen3.5-97b-a10b`, `qwen3.5-122b-a10b`, and `qwen3.5-397b-a17b`.
-Qwen3.7 is intentionally not profiled until open MLX weights exist.
+The production precision for these profiles is Turbo8 with the `.preferThroughput`
+runtime policy. That policy keeps exact initial prefill, skips resident raw
+shadow decode, and routes decode through compressed two-stage QK/AV because that
+path is faster than the current fused shader for Qwen-style 256-dimensional
+grouped-query heads. Turbo4V2 and Turbo3.5 are valid guarded proof candidates
+only: the profile API exposes them explicitly, but release tooling must promote
+them per model, device, OS, and context length only after the Qwen proof pipeline
+passes quality, memory, and throughput gates. Qwen3.7 is intentionally not
+profiled until open MLX weights exist.
 
 Bundled Gemma profiles cover config-backed MLX Community legacy Gemma, Gemma 2,
 Gemma 3, Gemma 3n, and Gemma 4 variants: `gemma-2b`, `gemma-7b`,
@@ -123,13 +132,23 @@ Use the benchmark entrypoints to generate profile evidence:
 ```sh
 swift run TurboQuantBenchmark --iterations 25
 swift run TurboQuantModelBenchmark --iterations 25
+swift run TurboQuantQwenProof --release-matrix --strict --iterations 25 --dtype float16 --min-extended-tokens-per-second 20
 ```
 
 The core benchmark records kernel-level decode, matmul, QK/AV, and fused-attention
 behavior. The model benchmark records compressed prefill, decode attention, and
-rotating-cache growth. Promote bundled profile fields from pending to measured
-only when the JSON includes the model revision, device, OS, latency, memory, and
-quality data needed to reproduce the decision.
+rotating-cache growth. The Qwen proof benchmark records Qwen3.5/Qwen3.6 profile
+coverage, valid precision candidates, TurboQuant compressed attention vs plain
+attention quality, short-context plain-route speed parity, extended-context
+compressed decode throughput, and extended-context memory compression. Promote bundled profile fields from pending to measured only when
+the JSON includes the model revision, device, OS, latency, memory, and quality
+data needed to reproduce the decision.
+
+The release matrix is intentionally capped at the current production throughput
+contexts. Run `swift run TurboQuantQwenProof --contexts 32768 --query-lengths 1
+--schemes turbo8 --dtype float16` as a stress gate; 32K should not be promoted
+until it clears the configured extended-context tokens/sec threshold on target
+devices.
 
 ## Converted Weights
 
