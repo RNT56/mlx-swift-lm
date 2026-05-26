@@ -2028,14 +2028,14 @@ private func defaultBundledOptimizationPolicy(
     if profile.recommendedScheme.requiresGuardedQualityValidation {
         return .conservative
     }
-    if profile.recommendedScheme == .turbo8, profile.valueBits == 8 {
-        return .preferThroughput
-    }
     if bundledThroughputOptimizationProfileIDs.contains(profile.id) {
         return .preferThroughput
     }
+    if profile.recommendedScheme == .turbo8, profile.valueBits == 8 {
+        return .auto
+    }
     if isDenseQwen35HybridProfile(profile) {
-        return .preferThroughput
+        return .auto
     }
     if profile.modalities.contains(where: { $0 != .text }) {
         return .preferMemory
@@ -2203,7 +2203,7 @@ private let qwen35MoEModelTypes = ["qwen3_5_moe", "qwen3_5_moe_text"]
 private let qwen35Modalities: [TurboQuantModelModality] = [.text, .visionText]
 private let qwen35ProfileNotes = [
     "Qwen3.5 and Qwen3.6 profiles are config-backed with verified 256-dimensional key and value heads.",
-    "Dense hybrid profiles use turbo8 raw-free compressed attention for production throughput; architecture-specific native state remains exact.",
+    "Dense hybrid profiles use turbo8 with exact initial prefill, raw-free compressed decode, and exact architecture-specific native state.",
 ]
 
 private let gemmaTextExcludePatterns =
@@ -2450,7 +2450,7 @@ private let bundledProfiles: [TurboQuantProfile] = [
         valueBits: qualitySensitiveValueBits,
         confidence: 0.75,
         extraNotes: gemmaProfileNotes + [
-            "Physical A17 Pro evidence showed the 1B Gemma 3 text profile is quality and latency sensitive under 4-bit compressed attention; use turbo8 raw-free compressed attention for production throughput while lower-bit modes remain guarded."
+            "Physical A17 Pro evidence showed the 1B Gemma 3 text profile is quality and latency sensitive under 4-bit compressed attention; use turbo8 with exact initial prefill and raw-free decode while lower-bit modes remain guarded."
         ]
     ),
     bundledProfile(
@@ -3404,7 +3404,7 @@ private let bundledProfiles: [TurboQuantProfile] = [
         valueBits: qualitySensitiveValueBits,
         confidence: 0.85,
         extraNotes: llamaProfileNotes + [
-            "Physical A17 Pro evidence showed Llama 3.2 3B can emit corrupted text under 4-bit compressed attention; use turbo8 raw-free compressed attention for production throughput while lower-bit modes remain guarded."
+            "Physical A17 Pro evidence showed Llama 3.2 3B can emit corrupted text under 4-bit compressed attention; use turbo8 with exact initial prefill and raw-free decode while lower-bit modes remain guarded."
         ]
     ),
     bundledProfile(

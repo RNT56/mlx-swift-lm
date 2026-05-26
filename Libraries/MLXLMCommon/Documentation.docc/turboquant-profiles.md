@@ -44,12 +44,12 @@ the caller keeps its baseline or packed-cache path instead of guessing.
 
 Bundled profiles keep the quality-first TurboQuant default of 3.5-bit keys,
 4-bit values, and group size 64. Per-profile optimization policy is then tuned
-from config-backed model shape and context metadata: small short-context dense
-profiles prefer throughput, large/long-context/MoE/VLM profiles prefer memory,
-and nonstandard split-dimension latent attention profiles use conservative
-compressed attention routing. Safe context lengths mirror the public model
-configuration or model card where available; callers should still apply their
-own memory-fit policy before admitting very long prompts.
+from config-backed model shape, context metadata, and device evidence: Turbo8
+quality-sensitive profiles keep exact initial prefill while using raw-free
+compressed decode, large/long-context/MoE/VLM profiles prefer memory, and
+lower-bit guarded profiles use conservative routing. Safe context lengths mirror
+the public model configuration or model card where available; callers should
+still apply their own memory-fit policy before admitting very long prompts.
 
 Bundled Qwen3.5/Qwen3.6 profiles cover current MLX Community dense and MoE
 families with config-backed 256-dimensional KV head checks: `qwen3.5-0.8b`,

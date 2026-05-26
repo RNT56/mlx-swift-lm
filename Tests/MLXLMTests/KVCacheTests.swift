@@ -876,7 +876,7 @@ extension MLXRuntimeSwiftTests {
             #expect(cache.attentionDiagnostics.rawFallbackAllocated == false)
         }
 
-        @Test func testConservativeTurboQuantPrefersCompressedAttentionForQwenLikeDecode() throws {
+        @Test func testConservativeTurboQuantUsesExactRawShadowForQwenLikeDecode() throws {
             guard TurboQuantKernelAvailability.current.supportsMetalPolarQJLAttention else {
                 return
             }
@@ -955,20 +955,18 @@ extension MLXRuntimeSwiftTests {
                 scale: scale,
                 mask: .causal
             ).output
-            let compressed = try #require(turboCache.compressedState)
-            let expected = try turboQuantMetalScaledDotProductAttention(
+            let exact = try #require(turboCache.exactRawStateIfComplete())
+            let expected = MLXFast.scaledDotProductAttention(
                 queries: decodeQueries,
-                keyCode: compressed.0,
-                valueCode: compressed.1,
+                keys: exact.keys,
+                values: exact.values,
                 scale: scale,
-                mask: .causal,
-                preferOnlineFused: false,
-                kernelProfile: turboCache.attentionDiagnostics.selectedKernelProfile
+                mask: .causal
             )
 
             #expect(turboCache.attentionDiagnostics.rawFallbackAllocated)
-            #expect(turboCache.attentionDiagnostics.lastFallback?.toPath == .twoStageCompressed)
-            #expect(turboCache.attentionDiagnostics.lastFallback?.isSemanticallyExact == false)
+            #expect(turboCache.attentionDiagnostics.lastFallback?.toPath == .baseline)
+            #expect(turboCache.attentionDiagnostics.lastFallback?.isSemanticallyExact == true)
             #expect(allClose(actual, expected, rtol: 1e-5, atol: 1e-5).item(Bool.self))
         }
 

@@ -79,7 +79,7 @@ extension MLXRuntimeSwiftTests {
             #expect(qwen35.id == "qwen3.5-4b")
             #expect(qwen35.safeContextLength == 262144)
             #expect(qwen35.recommendedScheme == .turbo8)
-            #expect(qwen35.optimizationPolicy == TurboQuantOptimizationPolicy.preferThroughput)
+            #expect(qwen35.optimizationPolicy == TurboQuantOptimizationPolicy.auto)
             #expect(qwen35.valueBits == 8)
             #expect(qwen35.status == .guarded)
 
@@ -96,7 +96,7 @@ extension MLXRuntimeSwiftTests {
             #expect(qwen35OptiQ2B.id == "qwen3.5-2b")
             #expect(qwen35OptiQ2B.recommendedScheme == .turbo8)
             #expect(
-                qwen35OptiQ2B.optimizationPolicy == TurboQuantOptimizationPolicy.preferThroughput
+                qwen35OptiQ2B.optimizationPolicy == TurboQuantOptimizationPolicy.auto
             )
             #expect(qwen35OptiQ2B.valueBits == 8)
             #expect(qwen35OptiQ2B.status == .guarded)
@@ -128,7 +128,7 @@ extension MLXRuntimeSwiftTests {
             )
             #expect(gemma31B.id == "gemma-3-1b")
             #expect(gemma31B.recommendedScheme == .turbo8)
-            #expect(gemma31B.optimizationPolicy == TurboQuantOptimizationPolicy.preferThroughput)
+            #expect(gemma31B.optimizationPolicy == TurboQuantOptimizationPolicy.auto)
             #expect(gemma31B.valueBits == 8)
             #expect(gemma31B.status == .guarded)
             #expect(
@@ -167,7 +167,7 @@ extension MLXRuntimeSwiftTests {
             )
             #expect(llama32_3B.id == "llama-3.2-3b")
             #expect(llama32_3B.recommendedScheme == .turbo8)
-            #expect(llama32_3B.optimizationPolicy == TurboQuantOptimizationPolicy.preferThroughput)
+            #expect(llama32_3B.optimizationPolicy == TurboQuantOptimizationPolicy.auto)
             #expect(llama32_3B.valueBits == 8)
             #expect(llama32_3B.status == .guarded)
 
@@ -1302,7 +1302,7 @@ extension MLXRuntimeSwiftTests {
             #expect(lowerBitProfiles.allSatisfy { $0.optimizationPolicy == .conservative })
         }
 
-        @Test func testTurbo8QualitySensitiveProfilesPreferThroughput() throws {
+        @Test func testTurbo8QualitySensitiveProfilesUseExactPrefillRawFreeDecodePolicy() throws {
             let registry = TurboQuantProfileRegistry.bundled
             let profileIDs = [
                 "qwen3.5-0.8b",
@@ -1315,7 +1315,7 @@ extension MLXRuntimeSwiftTests {
                 let profile = try #require(registry.profiles.first { $0.id == profileID })
                 #expect(profile.recommendedScheme == .turbo8)
                 #expect(profile.valueBits == 8)
-                #expect(profile.optimizationPolicy == .preferThroughput)
+                #expect(profile.optimizationPolicy == .auto)
             }
         }
 

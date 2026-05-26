@@ -315,6 +315,14 @@ private func turboQuantAttentionFallbackLadder(
     }
 
     var failures: [String] = []
+    if cache.optimizationPolicy == .conservative,
+        let output = rawExactOutput(
+            reason: "conservative TurboQuant policy requires exact raw attention while the raw shadow is complete"
+        )
+    {
+        return output
+    }
+
     let canUseOnline =
         sinks == nil && cache.prefersOnlineFusedAttention
         && keyCode.layout.headDimension == valueCode.layout.headDimension
