@@ -131,13 +131,14 @@ extension MLXRuntimeSwiftTests {
             let values = MLXArray.ones([1, 1, 2, 4], dtype: .float32)
             _ = attention.update(keys: keys, values: values)
 
-            materializeRecurrentKVCacheState([CacheList(recurrent, attention)])
+            #expect(materializeRecurrentKVCacheState([CacheList(recurrent, attention)]))
 
             let state = recurrent.state
             #expect(state.count == 2)
             #expect(allClose(state[0], convState).item(Bool.self))
             #expect(allClose(state[1], nativeState).item(Bool.self))
             #expect(attention.state.count == 2)
+            #expect(!materializeRecurrentKVCacheState([attention]))
         }
 
         @Test func testTurboQuantCacheStrategyConvertsSimpleCache() throws {

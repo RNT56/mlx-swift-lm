@@ -1850,10 +1850,14 @@ public class CacheList: BaseKVCache {
 /// next step stores them. Detaching and evaluating only recurrent cache state
 /// prevents lazy graph chains from accumulating while leaving standard
 /// attention KV caches untouched.
-public func materializeRecurrentKVCacheState(_ caches: [KVCache]) {
+@discardableResult
+public func materializeRecurrentKVCacheState(_ caches: [KVCache]) -> Bool {
     let state = recurrentGenerationStateArrays(in: caches)
-    guard !state.isEmpty else { return }
+    guard !state.isEmpty else { return false }
     eval(state)
+    Stream.gpu.synchronize()
+    Memory.clearCache()
+    return true
 }
 
 private func recurrentGenerationStateArrays(in caches: [KVCache]) -> [MLXArray] {

@@ -4,6 +4,15 @@ import Foundation
 import MLX
 import MLXNN
 
+@inline(__always)
+private func withGenerationAutoreleasePool<T>(_ body: () throws -> T) rethrows -> T {
+    #if canImport(ObjectiveC)
+        return try autoreleasepool(invoking: body)
+    #else
+        return try body()
+    #endif
+}
+
 /// A `LogitSampler` is responsible for sampling `logits` produced by
 /// a ``LanguageModel`` to produce a token.
 ///
@@ -765,6 +774,7 @@ public struct TokenIterator: TokenIteratorProtocol {
     let turboQuantSeed: UInt64?
     let turboQuantValueBits: Int?
     let turboQuantResidentBudgetBytes: Int?
+    private var requiresSynchronousGenerationEval = false
     private var runtimeError: Error?
     public var lastRuntimeError: Error? { runtimeError }
 
@@ -905,12 +915,14 @@ public struct TokenIterator: TokenIteratorProtocol {
             // evaluate the remainder of the prompt -- this primes the pump
             let token = try step(previous: y)
             y = .init(tokens: token)
-            asyncEval(y.tokens)
+            evaluateGeneratedToken(y.tokens)
 
         case .logits(let result):
             y = .init(tokens: convertToToken(logits: result.logits))
-            asyncEval(y.tokens)
-            materializeRecurrentKVCacheState(cache)
+            if materializeRecurrentKVCacheState(cache) {
+                requiresSynchronousGenerationEval = true
+            }
+            evaluateGeneratedToken(y.tokens)
 
             break
         }
@@ -955,9 +967,21 @@ public struct TokenIterator: TokenIteratorProtocol {
             turboQuantValueBits: turboQuantValueBits,
             turboQuantResidentBudgetBytes: turboQuantResidentBudgetBytes
         )
-        materializeRecurrentKVCacheState(cache)
+        if materializeRecurrentKVCacheState(cache) {
+            requiresSynchronousGenerationEval = true
+        }
 
         return convertToToken(logits: result.logits)
+    }
+
+    private func evaluateGeneratedToken(_ token: MLXArray) {
+        if requiresSynchronousGenerationEval {
+            eval(token)
+            Stream.gpu.synchronize()
+            Memory.clearCache()
+        } else {
+            asyncEval(token)
+        }
     }
 
     mutating public func next() -> Int? {
@@ -978,7 +1002,7 @@ public struct TokenIterator: TokenIteratorProtocol {
             return nil
         }
         y = .init(tokens: token)
-        asyncEval(token)
+        evaluateGeneratedToken(token)
 
         tokenCount += 1
 
@@ -1035,6 +1059,8 @@ public struct SpeculativeTokenIterator: TokenIteratorProtocol {
     private var pendingTokens = [Int]()
     private var pendingIndex = 0
     private var runtimeError: Error?
+    private var requiresSynchronousMainGenerationEval = false
+    private var requiresSynchronousDraftGenerationEval = false
     public var lastRuntimeError: Error? { runtimeError }
 
     // Internal metrics
@@ -1139,10 +1165,16 @@ public struct SpeculativeTokenIterator: TokenIteratorProtocol {
             logits = processor?.process(logits: logits) ?? logits
             let token = sampler.sample(logits: logits)
             draftY = .init(tokens: token)
-            asyncEval(draftY.tokens)
+            evaluateDraftGeneratedToken(draftY.tokens)
         }
-        materializeRecurrentKVCacheState(mainCache)
-        materializeRecurrentKVCacheState(draftCache)
+        if materializeRecurrentKVCacheState(mainCache) {
+            requiresSynchronousMainGenerationEval = true
+            evaluateMainGeneratedToken(y.tokens)
+        }
+        if materializeRecurrentKVCacheState(draftCache) {
+            requiresSynchronousDraftGenerationEval = true
+            evaluateDraftGeneratedToken(draftY.tokens)
+        }
     }
 
     /// Run one round of speculative decoding: draft, verify, accept/reject
@@ -1174,10 +1206,12 @@ public struct SpeculativeTokenIterator: TokenIteratorProtocol {
                 draftLogits = draftProcessor?.process(logits: draftLogits) ?? draftLogits
                 let draftToken = sampler.sample(logits: draftLogits)
                 draftProcessor?.didSample(token: draftToken)
-                asyncEval(draftToken)
+                evaluateDraftGeneratedToken(draftToken)
                 draftTokens.append(draftToken)
                 draftY = .init(tokens: draftToken)
-                materializeRecurrentKVCacheState(draftCache)
+                if materializeRecurrentKVCacheState(draftCache) {
+                    requiresSynchronousDraftGenerationEval = true
+                }
             }
         } catch {
             _ = try? TurboQuantSpeculativeVerifier.restore(draftCache, to: draftCheckpoint)
@@ -1210,7 +1244,9 @@ public struct SpeculativeTokenIterator: TokenIteratorProtocol {
             }
             let mainLogits = mainResult.logits
             mainState = mainResult.state
-            materializeRecurrentKVCacheState(mainCache)
+            if materializeRecurrentKVCacheState(mainCache) {
+                requiresSynchronousMainGenerationEval = true
+            }
 
             let mainTokens: MLXArray
             if var verifyProcessor = processor {
@@ -1275,8 +1311,12 @@ public struct SpeculativeTokenIterator: TokenIteratorProtocol {
             // Apply dynamic cache quantization after rewind
             quantizeKVCache(&mainCache)
             quantizeKVCache(&draftCache)
-            materializeRecurrentKVCacheState(mainCache)
-            materializeRecurrentKVCacheState(draftCache)
+            if materializeRecurrentKVCacheState(mainCache) {
+                requiresSynchronousMainGenerationEval = true
+            }
+            if materializeRecurrentKVCacheState(draftCache) {
+                requiresSynchronousDraftGenerationEval = true
+            }
 
             // Set y/draftY for the next round
             y = .init(tokens: finalToken)
@@ -1296,6 +1336,26 @@ public struct SpeculativeTokenIterator: TokenIteratorProtocol {
             _ = try? TurboQuantSpeculativeVerifier.restore(mainCache, to: targetCheckpoint)
             _ = try? TurboQuantSpeculativeVerifier.restore(draftCache, to: draftCheckpoint)
             throw error
+        }
+    }
+
+    private func evaluateMainGeneratedToken(_ token: MLXArray) {
+        if requiresSynchronousMainGenerationEval {
+            eval(token)
+            Stream.gpu.synchronize()
+            Memory.clearCache()
+        } else {
+            asyncEval(token)
+        }
+    }
+
+    private func evaluateDraftGeneratedToken(_ token: MLXArray) {
+        if requiresSynchronousDraftGenerationEval {
+            eval(token)
+            Stream.gpu.synchronize()
+            Memory.clearCache()
+        } else {
+            asyncEval(token)
         }
     }
 
@@ -1361,6 +1421,7 @@ public struct MTPTokenIterator: TokenIteratorProtocol {
     private var pendingTokens = [Int]()
     private var pendingIndex = 0
     private var runtimeError: Error?
+    private var requiresSynchronousGenerationEval = false
 
     public var acceptedDraftTokens = 0
     public var totalDraftTokens = 0
@@ -1449,9 +1510,13 @@ public struct MTPTokenIterator: TokenIteratorProtocol {
             y = .init(tokens: token)
             state = result.state
         }
-        materializeRecurrentKVCacheState(cache)
+        if materializeRecurrentKVCacheState(cache) {
+            requiresSynchronousGenerationEval = true
+        }
         for mtpCache in mtpCaches {
-            materializeRecurrentKVCacheState(mtpCache)
+            if materializeRecurrentKVCacheState(mtpCache) {
+                requiresSynchronousGenerationEval = true
+            }
         }
     }
 
@@ -1488,9 +1553,13 @@ public struct MTPTokenIterator: TokenIteratorProtocol {
                 runtimeError = error
                 return
             }
-            materializeRecurrentKVCacheState(cache)
+            if materializeRecurrentKVCacheState(cache) {
+                requiresSynchronousGenerationEval = true
+            }
             for mtpCache in mtpCaches {
-                materializeRecurrentKVCacheState(mtpCache)
+                if materializeRecurrentKVCacheState(mtpCache) {
+                    requiresSynchronousGenerationEval = true
+                }
             }
             guard !mtpResult.isEmpty else { return }
 
@@ -1513,9 +1582,13 @@ public struct MTPTokenIterator: TokenIteratorProtocol {
             for i in mtpCaches.indices {
                 quantizeKVCache(&mtpCaches[i])
             }
-            materializeRecurrentKVCacheState(cache)
+            if materializeRecurrentKVCacheState(cache) {
+                requiresSynchronousGenerationEval = true
+            }
             for mtpCache in mtpCaches {
-                materializeRecurrentKVCacheState(mtpCache)
+                if materializeRecurrentKVCacheState(mtpCache) {
+                    requiresSynchronousGenerationEval = true
+                }
             }
             return
         }
@@ -1532,9 +1605,13 @@ public struct MTPTokenIterator: TokenIteratorProtocol {
             runtimeError = error
             return
         }
-        materializeRecurrentKVCacheState(cache)
+        if materializeRecurrentKVCacheState(cache) {
+            requiresSynchronousGenerationEval = true
+        }
         for mtpCache in mtpCaches {
-            materializeRecurrentKVCacheState(mtpCache)
+            if materializeRecurrentKVCacheState(mtpCache) {
+                requiresSynchronousGenerationEval = true
+            }
         }
         guard !mtpResult.isEmpty else { return }
 
@@ -1642,9 +1719,13 @@ public struct MTPTokenIterator: TokenIteratorProtocol {
         for i in mtpCaches.indices {
             quantizeKVCache(&mtpCaches[i])
         }
-        materializeRecurrentKVCacheState(cache)
+        if materializeRecurrentKVCacheState(cache) {
+            requiresSynchronousGenerationEval = true
+        }
         for mtpCache in mtpCaches {
-            materializeRecurrentKVCacheState(mtpCache)
+            if materializeRecurrentKVCacheState(mtpCache) {
+                requiresSynchronousGenerationEval = true
+            }
         }
 
         y = .init(tokens: finalTokenOut)
@@ -2487,7 +2568,10 @@ private func generateLoopTask<Handler: TokenLoopHandler>(
                 tokenizer: tokenizer
             )
 
-            tokenLoop: while let token = iterator.next() {
+            tokenLoop: while true {
+                guard let token = withGenerationAutoreleasePool({ iterator.next() }) else {
+                    break
+                }
                 // Check for cancellation on every loop iteration.
                 if Task.isCancelled {
                     stopReason = .cancelled
@@ -2504,7 +2588,9 @@ private func generateLoopTask<Handler: TokenLoopHandler>(
                 if token == tokenizer.unknownTokenId || stopTokenIds.contains(token) {
                     if includeStopToken {
                         tokenCount += 1
-                        switch handler.onStopToken(token, emit: continuation.yield) {
+                        switch withGenerationAutoreleasePool({
+                            handler.onStopToken(token, emit: continuation.yield)
+                        }) {
                         case .more:
                             break
                         case .stop:
@@ -2520,7 +2606,9 @@ private func generateLoopTask<Handler: TokenLoopHandler>(
                 }
 
                 tokenCount += 1
-                switch handler.onToken(token, emit: continuation.yield) {
+                switch withGenerationAutoreleasePool({
+                    handler.onToken(token, emit: continuation.yield)
+                }) {
                 case .more:
                     break
                 case .stop:
