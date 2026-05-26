@@ -9,6 +9,8 @@ extension MLXRuntimeSwiftTests {
     struct TurboQuantProfileTests {
 
         @Test func testSchemeAliasesDecodeExternalNames() {
+            #expect(TurboQuantScheme(normalizing: "turbo8") == .turbo8)
+            #expect(TurboQuantScheme(normalizing: "turbo-8") == .turbo8)
             #expect(TurboQuantScheme(normalizing: "turbo4v2") == .turbo4v2)
             #expect(TurboQuantScheme(normalizing: "turbo-4-v2") == .turbo4v2)
             #expect(TurboQuantScheme(normalizing: "turbo3.5") == .turbo3_5)
@@ -67,6 +69,7 @@ extension MLXRuntimeSwiftTests {
             )
             #expect(qwen35.id == "qwen3.5-4b")
             #expect(qwen35.safeContextLength == 262144)
+            #expect(qwen35.recommendedScheme == .turbo8)
             #expect(qwen35.optimizationPolicy == TurboQuantOptimizationPolicy.conservative)
             #expect(qwen35.valueBits == 8)
 
@@ -81,6 +84,7 @@ extension MLXRuntimeSwiftTests {
                 )
             )
             #expect(qwen35OptiQ2B.id == "qwen3.5-2b")
+            #expect(qwen35OptiQ2B.recommendedScheme == .turbo8)
             #expect(qwen35OptiQ2B.optimizationPolicy == TurboQuantOptimizationPolicy.conservative)
             #expect(qwen35OptiQ2B.valueBits == 8)
 

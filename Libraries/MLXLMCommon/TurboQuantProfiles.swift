@@ -8,6 +8,7 @@ import MLX
 /// configuration while mapping to the concrete MLX-Swift cache backends.
 public enum TurboQuantScheme: String, Codable, Sendable, CaseIterable {
     case disabled
+    case turbo8
     case turbo4v2
     case turbo3_5
     case turbo3
@@ -24,6 +25,8 @@ public enum TurboQuantScheme: String, Codable, Sendable, CaseIterable {
         switch normalized {
         case "none", "off", "disabled", "false":
             self = .disabled
+        case "turbo8", "turbo_8":
+            self = .turbo8
         case "turbo4", "turbo4v2", "turbo_4_v2":
             self = .turbo4v2
         case "turbo3_5", "turbo35", "turbo_3_5":
@@ -60,6 +63,8 @@ public enum TurboQuantScheme: String, Codable, Sendable, CaseIterable {
 
     public var preset: TurboQuantPreset {
         switch self {
+        case .turbo8:
+            .turbo8
         case .disabled, .turbo4v2:
             .turbo4v2
         case .turbo3_5:
@@ -73,6 +78,8 @@ public enum TurboQuantScheme: String, Codable, Sendable, CaseIterable {
         switch self {
         case .disabled:
             nil
+        case .turbo8:
+            8
         case .turbo4v2, .turbo3_5:
             4
         case .turbo3, .turbo2_5:
@@ -82,7 +89,7 @@ public enum TurboQuantScheme: String, Codable, Sendable, CaseIterable {
 
     public var defaultOptimizationPolicy: TurboQuantOptimizationPolicy {
         switch self {
-        case .disabled, .turbo4v2, .turbo3_5:
+        case .disabled, .turbo8, .turbo4v2, .turbo3_5:
             .auto
         case .turbo3, .turbo2_5:
             .preferMemory
@@ -1800,6 +1807,7 @@ private let turboQuantProfileNotes = [
 ]
 
 private let commonSafeMasks: [TurboQuantMaskMode] = [.none, .causal]
+private let qwen35DenseScheme = TurboQuantScheme.turbo8
 private let qwen35DenseValueBits = 8
 
 private let bundledProfileDefaultContextLengths = [4096, 8192, 16384, 32768, 65536]
@@ -1836,6 +1844,8 @@ private func bundledProfile(
     supportedExpertsPerToken: [Int] = [],
     supportedKeyHeadDimensions: [Int],
     supportedValueHeadDimensions: [Int]? = nil,
+    recommendedScheme: TurboQuantScheme = .turbo4v2,
+    fallbackScheme: TurboQuantScheme? = .turbo3_5,
     supportedContextLengths: [Int] = bundledProfileDefaultContextLengths,
     safeContextLength: Int? = 65536,
     valueBits: Int = 4,
@@ -1863,6 +1873,8 @@ private func bundledProfile(
         supportedExpertsPerToken: supportedExpertsPerToken,
         supportedKeyHeadDimensions: supportedKeyHeadDimensions,
         supportedValueHeadDimensions: supportedValueHeadDimensions,
+        recommendedScheme: recommendedScheme,
+        fallbackScheme: fallbackScheme,
         valueBits: valueBits,
         safeMaskModes: commonSafeMasks,
         supportedContextLengths: supportedContextLengths,
@@ -3589,6 +3601,7 @@ private let bundledProfiles: [TurboQuantProfile] = [
         requiresModelType: true,
         requiresHeadDimensions: true,
         supportedKeyHeadDimensions: [256],
+        recommendedScheme: qwen35DenseScheme,
         valueBits: qwen35DenseValueBits,
         confidence: 0.85,
         extraNotes: qwen35ProfileNotes
@@ -3605,6 +3618,7 @@ private let bundledProfiles: [TurboQuantProfile] = [
         requiresModelType: true,
         requiresHeadDimensions: true,
         supportedKeyHeadDimensions: [256],
+        recommendedScheme: qwen35DenseScheme,
         valueBits: qwen35DenseValueBits,
         confidence: 0.85,
         extraNotes: qwen35ProfileNotes
@@ -3621,6 +3635,7 @@ private let bundledProfiles: [TurboQuantProfile] = [
         requiresModelType: true,
         requiresHeadDimensions: true,
         supportedKeyHeadDimensions: [256],
+        recommendedScheme: qwen35DenseScheme,
         valueBits: qwen35DenseValueBits,
         confidence: 0.85,
         extraNotes: qwen35ProfileNotes
@@ -3637,6 +3652,7 @@ private let bundledProfiles: [TurboQuantProfile] = [
         requiresModelType: true,
         requiresHeadDimensions: true,
         supportedKeyHeadDimensions: [256],
+        recommendedScheme: qwen35DenseScheme,
         valueBits: qwen35DenseValueBits,
         confidence: 0.85,
         extraNotes: qwen35ProfileNotes
@@ -3653,6 +3669,7 @@ private let bundledProfiles: [TurboQuantProfile] = [
         requiresModelType: true,
         requiresHeadDimensions: true,
         supportedKeyHeadDimensions: [256],
+        recommendedScheme: qwen35DenseScheme,
         valueBits: qwen35DenseValueBits,
         confidence: 0.8,
         extraNotes: qwen35ProfileNotes
@@ -3669,6 +3686,7 @@ private let bundledProfiles: [TurboQuantProfile] = [
         requiresModelType: true,
         requiresHeadDimensions: true,
         supportedKeyHeadDimensions: [256],
+        recommendedScheme: qwen35DenseScheme,
         valueBits: qwen35DenseValueBits,
         confidence: 0.8,
         extraNotes: qwen35ProfileNotes
