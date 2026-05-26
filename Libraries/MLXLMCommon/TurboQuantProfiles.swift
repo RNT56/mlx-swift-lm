@@ -1961,7 +1961,7 @@ private func defaultBundledOptimizationPolicy(
         return .preferThroughput
     }
     if isDenseQwen35HybridProfile(profile) {
-        return .auto
+        return .conservative
     }
     if profile.modalities.contains(where: { $0 != .text }) {
         return .preferMemory
@@ -2122,7 +2122,8 @@ private let qwen35ModelTypes = ["qwen3_5", "qwen3_5_text"]
 private let qwen35MoEModelTypes = ["qwen3_5_moe", "qwen3_5_moe_text"]
 private let qwen35Modalities: [TurboQuantModelModality] = [.text, .visionText]
 private let qwen35ProfileNotes = [
-    "Qwen3.5 and Qwen3.6 profiles are config-backed with verified 256-dimensional key and value heads."
+    "Qwen3.5 and Qwen3.6 profiles are config-backed with verified 256-dimensional key and value heads.",
+    "Dense hybrid profiles use conservative compressed attention until online fused decode has sequence-level quality evidence.",
 ]
 
 private let gemmaTextExcludePatterns =
