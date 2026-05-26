@@ -86,6 +86,17 @@ struct ToolTests {
         #expect(toolCall.function.arguments["unit"] == .string("celsius"))
     }
 
+    @Test("Unparsed tagged tool-call buffer is emitted as text on EOS")
+    func testUnparsedTaggedToolCallBufferReturnsTextOnEOS() throws {
+        let processor = ToolCallProcessor(format: .json, tools: nil)
+
+        #expect(processor.processChunk(#"<tool_call>{"diagnostic": "generated text without a tool call""#) == nil)
+
+        let text = try #require(processor.processEOS())
+        #expect(text == #"<tool_call>{"diagnostic": "generated text without a tool call""#)
+        #expect(processor.toolCalls.isEmpty)
+    }
+
     // MARK: - JSON Format Tests
 
     @Test("Test JSON Tool Call Parser - Default Tags")

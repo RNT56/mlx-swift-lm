@@ -3005,7 +3005,11 @@ private struct TextToolTokenLoopHandler: TokenLoopHandler {
             }
         }
 
-        toolCallProcessor.processEOS()
+        if let text = toolCallProcessor.processEOS() {
+            guard case .more = processText(text, emit: emit) else {
+                return
+            }
+        }
 
         for toolCall in toolCallProcessor.toolCalls {
             if case .terminated = emit(.toolCall(toolCall)) {

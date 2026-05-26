@@ -85,17 +85,29 @@ public class ToolCallProcessor {
     ///
     /// For formats with end tags that appear in the text stream, the buffer
     /// will already be empty at generation end, making this a no-op.
-    public func processEOS() {
-        guard state == .collectingToolCall || state == .potentialToolCall else { return }
+    /// - Returns: Buffered text that was not a valid tool call and should still
+    ///   be emitted as assistant text.
+    @discardableResult
+    public func processEOS() -> String? {
+        guard state == .collectingToolCall || state == .potentialToolCall else { return nil }
         guard !toolCallBuffer.isEmpty else {
             state = .normal
-            return
+            return nil
         }
 
-        toolCalls.append(contentsOf: parser.parseEOS(toolCallBuffer, tools: tools))
+        let parsedToolCalls = parser.parseEOS(toolCallBuffer, tools: tools)
+        if parsedToolCalls.isEmpty {
+            let bufferedText = toolCallBuffer
+            toolCallBuffer = ""
+            state = .normal
+            return bufferedText.isEmpty ? nil : bufferedText
+        }
+
+        toolCalls.append(contentsOf: parsedToolCalls)
 
         toolCallBuffer = ""
         state = .normal
+        return nil
     }
 
     // MARK: - Private Methods
