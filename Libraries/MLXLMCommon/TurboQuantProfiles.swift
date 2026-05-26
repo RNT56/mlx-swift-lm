@@ -1800,6 +1800,7 @@ private let turboQuantProfileNotes = [
 ]
 
 private let commonSafeMasks: [TurboQuantMaskMode] = [.none, .causal]
+private let qwen35DenseValueBits = 8
 
 private let bundledProfileDefaultContextLengths = [4096, 8192, 16384, 32768, 65536]
 private let bundledProfile8KContextLengths = [4096, 8192]
@@ -1837,6 +1838,7 @@ private func bundledProfile(
     supportedValueHeadDimensions: [Int]? = nil,
     supportedContextLengths: [Int] = bundledProfileDefaultContextLengths,
     safeContextLength: Int? = 65536,
+    valueBits: Int = 4,
     source: String? = "profile-audit-2026-05-23",
     confidence: Double? = nil,
     extraNotes: [String] = []
@@ -1861,6 +1863,7 @@ private func bundledProfile(
         supportedExpertsPerToken: supportedExpertsPerToken,
         supportedKeyHeadDimensions: supportedKeyHeadDimensions,
         supportedValueHeadDimensions: supportedValueHeadDimensions,
+        valueBits: valueBits,
         safeMaskModes: commonSafeMasks,
         supportedContextLengths: supportedContextLengths,
         safeContextLength: safeContextLength,
@@ -3585,6 +3588,7 @@ private let bundledProfiles: [TurboQuantProfile] = [
         requiresModelType: true,
         requiresHeadDimensions: true,
         supportedKeyHeadDimensions: [256],
+        valueBits: qwen35DenseValueBits,
         confidence: 0.85,
         extraNotes: qwen35ProfileNotes
     ),
@@ -3600,6 +3604,7 @@ private let bundledProfiles: [TurboQuantProfile] = [
         requiresModelType: true,
         requiresHeadDimensions: true,
         supportedKeyHeadDimensions: [256],
+        valueBits: qwen35DenseValueBits,
         confidence: 0.85,
         extraNotes: qwen35ProfileNotes
     ),
@@ -3615,6 +3620,7 @@ private let bundledProfiles: [TurboQuantProfile] = [
         requiresModelType: true,
         requiresHeadDimensions: true,
         supportedKeyHeadDimensions: [256],
+        valueBits: qwen35DenseValueBits,
         confidence: 0.85,
         extraNotes: qwen35ProfileNotes
     ),
@@ -3630,6 +3636,7 @@ private let bundledProfiles: [TurboQuantProfile] = [
         requiresModelType: true,
         requiresHeadDimensions: true,
         supportedKeyHeadDimensions: [256],
+        valueBits: qwen35DenseValueBits,
         confidence: 0.85,
         extraNotes: qwen35ProfileNotes
     ),
@@ -3645,6 +3652,7 @@ private let bundledProfiles: [TurboQuantProfile] = [
         requiresModelType: true,
         requiresHeadDimensions: true,
         supportedKeyHeadDimensions: [256],
+        valueBits: qwen35DenseValueBits,
         confidence: 0.8,
         extraNotes: qwen35ProfileNotes
     ),
@@ -3660,6 +3668,7 @@ private let bundledProfiles: [TurboQuantProfile] = [
         requiresModelType: true,
         requiresHeadDimensions: true,
         supportedKeyHeadDimensions: [256],
+        valueBits: qwen35DenseValueBits,
         confidence: 0.8,
         extraNotes: qwen35ProfileNotes
     ),
