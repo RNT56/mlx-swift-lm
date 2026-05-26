@@ -516,7 +516,7 @@ let contexts = argumentValues(
 )
 let queryLengths = argumentValues(
     "--query-lengths",
-    default: releaseMatrix ? [1, 4, 16] : [1, 4]
+    default: releaseMatrix ? [1] : [1, 4]
 )
 let schemes = argumentSchemes(
     "--schemes",

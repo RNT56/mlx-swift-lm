@@ -140,7 +140,9 @@ behavior. The model benchmark records compressed prefill, decode attention, and
 rotating-cache growth. The Qwen proof benchmark records Qwen3.5/Qwen3.6 profile
 coverage, valid precision candidates, TurboQuant compressed attention vs plain
 attention quality, short-context plain-route speed parity, extended-context
-compressed decode throughput, and extended-context memory compression. Promote bundled profile fields from pending to measured only when
+compressed decode throughput, and extended-context memory compression. Its release
+matrix is a decode-throughput gate at query length 1; use explicit
+`--query-lengths` values for wider prompt/prefill stress sweeps. Promote bundled profile fields from pending to measured only when
 the JSON includes the model revision, device, OS, latency, memory, and quality
 data needed to reproduce the decision.
 
