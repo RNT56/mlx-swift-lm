@@ -114,6 +114,9 @@ extension MLXRuntimeSwiftTests {
                 )
             )
             #expect(gemma31B.id == "gemma-3-1b")
+            #expect(gemma31B.recommendedScheme == .turbo8)
+            #expect(gemma31B.optimizationPolicy == TurboQuantOptimizationPolicy.conservative)
+            #expect(gemma31B.valueBits == 8)
             #expect(
                 registry.profile(
                     for: "mlx-community/gemma-3-270m-it-4bit",
@@ -137,6 +140,21 @@ extension MLXRuntimeSwiftTests {
             )
             #expect(llama33.id == "llama-3.3-70b")
             #expect(llama33.optimizationPolicy == TurboQuantOptimizationPolicy.preferMemory)
+
+            let llama32_3B = try #require(
+                registry.profile(
+                    for: "mlx-community/Llama-3.2-3B-Instruct-4bit",
+                    modelType: "llama",
+                    parameterCountB: 3,
+                    keyHeadDimension: 128,
+                    valueHeadDimension: 128,
+                    contextLength: 131072
+                )
+            )
+            #expect(llama32_3B.id == "llama-3.2-3b")
+            #expect(llama32_3B.recommendedScheme == .turbo8)
+            #expect(llama32_3B.optimizationPolicy == TurboQuantOptimizationPolicy.conservative)
+            #expect(llama32_3B.valueBits == 8)
 
             let mistral4 = try #require(
                 registry.profile(

@@ -1807,6 +1807,8 @@ private let turboQuantProfileNotes = [
 ]
 
 private let commonSafeMasks: [TurboQuantMaskMode] = [.none, .causal]
+private let qualitySensitiveScheme = TurboQuantScheme.turbo8
+private let qualitySensitiveValueBits = 8
 private let qwen35DenseScheme = TurboQuantScheme.turbo8
 private let qwen35DenseValueBits = 8
 
@@ -1952,7 +1954,9 @@ private let bundledProfileContextLengthOverrides: [String: [Int]] = [
 ]
 
 private let bundledConservativeOptimizationProfileIDs: Set<String> = [
-    "glm4-moe-lite"
+    "gemma-3-1b",
+    "glm4-moe-lite",
+    "llama-3.2-3b"
 ]
 
 private let bundledThroughputOptimizationProfileIDs: Set<String> = [
@@ -2378,8 +2382,12 @@ private let bundledProfiles: [TurboQuantProfile] = [
         requiresModelType: true,
         requiresHeadDimensions: true,
         supportedKeyHeadDimensions: [256],
+        recommendedScheme: qualitySensitiveScheme,
+        valueBits: qualitySensitiveValueBits,
         confidence: 0.75,
-        extraNotes: gemmaProfileNotes
+        extraNotes: gemmaProfileNotes + [
+            "Physical A17 Pro evidence showed the 1B Gemma 3 text profile is quality and latency sensitive under 4-bit compressed attention; use turbo8 with conservative exact recent shadow while keeping compressed KV committed."
+        ]
     ),
     bundledProfile(
         id: "gemma-3-4b",
@@ -3328,8 +3336,12 @@ private let bundledProfiles: [TurboQuantProfile] = [
         requiresModelType: true,
         requiresHeadDimensions: true,
         supportedKeyHeadDimensions: [128],
+        recommendedScheme: qualitySensitiveScheme,
+        valueBits: qualitySensitiveValueBits,
         confidence: 0.85,
-        extraNotes: llamaProfileNotes
+        extraNotes: llamaProfileNotes + [
+            "Physical A17 Pro evidence showed Llama 3.2 3B can emit corrupted text under 4-bit compressed attention; use turbo8 with conservative exact recent shadow while keeping compressed KV committed."
+        ]
     ),
     bundledProfile(
         id: "llama-3.3-3b",
@@ -3703,6 +3715,8 @@ private let bundledProfiles: [TurboQuantProfile] = [
         requiresModelType: true,
         requiresHeadDimensions: true,
         supportedKeyHeadDimensions: [256],
+        recommendedScheme: qwen35DenseScheme,
+        valueBits: qwen35DenseValueBits,
         confidence: 0.65,
         extraNotes: qwen35ProfileNotes
     ),
@@ -3718,6 +3732,8 @@ private let bundledProfiles: [TurboQuantProfile] = [
         requiresModelType: true,
         requiresHeadDimensions: true,
         supportedKeyHeadDimensions: [256],
+        recommendedScheme: qwen35DenseScheme,
+        valueBits: qwen35DenseValueBits,
         confidence: 0.65,
         extraNotes: qwen35ProfileNotes
     ),
