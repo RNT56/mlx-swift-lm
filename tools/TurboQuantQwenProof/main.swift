@@ -88,6 +88,47 @@ struct QwenProofReport: Codable {
     var summary: QwenProofSummary
 }
 
+enum QwenProofAttentionPath: String, CaseIterable {
+    case auto
+    case twoStage
+    case fused
+
+    init?(normalizing value: String) {
+        switch value.lowercased().replacingOccurrences(of: "_", with: "-") {
+        case "auto":
+            self = .auto
+        case "two-stage", "twostage", "two-stage-compressed", "twostagecompressed":
+            self = .twoStage
+        case "fused", "online-fused", "tiled-online-fused", "onlinefused", "tiledonlinefused":
+            self = .fused
+        default:
+            return nil
+        }
+    }
+
+    var idSuffix: String {
+        switch self {
+        case .auto:
+            return ""
+        case .twoStage:
+            return "_pathTwoStage"
+        case .fused:
+            return "_pathFused"
+        }
+    }
+
+    func preferOnlineFused(default defaultValue: Bool) -> Bool {
+        switch self {
+        case .auto:
+            return defaultValue
+        case .twoStage:
+            return false
+        case .fused:
+            return true
+        }
+    }
+}
+
 func argumentValue(_ name: String, default defaultValue: Int) -> Int {
     let arguments = CommandLine.arguments
     guard let index = arguments.firstIndex(of: name), arguments.indices.contains(index + 1),
@@ -117,13 +158,37 @@ func argumentValues(_ name: String, default defaultValue: [Int]) -> [Int] {
     return values.isEmpty ? defaultValue : values
 }
 
-func argumentSchemes(_ name: String, default defaultValue: [TurboQuantScheme]) -> [TurboQuantScheme] {
+func argumentStrings(_ name: String, default defaultValue: [String]) -> [String] {
+    let arguments = CommandLine.arguments
+    guard let index = arguments.firstIndex(of: name), arguments.indices.contains(index + 1) else {
+        return defaultValue
+    }
+    let values = arguments[index + 1].split(separator: ",").map { String($0) }
+    return values.isEmpty ? defaultValue : values
+}
+
+func argumentSchemes(_ name: String, default defaultValue: [TurboQuantScheme]) -> [TurboQuantScheme]
+{
     let arguments = CommandLine.arguments
     guard let index = arguments.firstIndex(of: name), arguments.indices.contains(index + 1) else {
         return defaultValue
     }
     let values = arguments[index + 1].split(separator: ",").compactMap {
         TurboQuantScheme(normalizing: String($0))
+    }
+    return values.isEmpty ? defaultValue : values
+}
+
+func argumentAttentionPaths(
+    _ name: String,
+    default defaultValue: [QwenProofAttentionPath]
+) -> [QwenProofAttentionPath] {
+    let arguments = CommandLine.arguments
+    guard let index = arguments.firstIndex(of: name), arguments.indices.contains(index + 1) else {
+        return defaultValue
+    }
+    let values = arguments[index + 1].split(separator: ",").compactMap {
+        QwenProofAttentionPath(normalizing: String($0))
     }
     return values.isEmpty ? defaultValue : values
 }
@@ -196,12 +261,14 @@ func logSoftmax(_ values: ArraySlice<Float>) -> [Double] {
     guard let maxValue = doubleValues.max(), maxValue.isFinite else {
         return Array(repeating: -Double.greatestFiniteMagnitude, count: values.count)
     }
-    let denominator = maxValue + log(
-        max(
-            doubleValues.reduce(0.0) { $0 + exp($1 - maxValue) },
-            Double.leastNonzeroMagnitude
+    let denominator =
+        maxValue
+        + log(
+            max(
+                doubleValues.reduce(0.0) { $0 + exp($1 - maxValue) },
+                Double.leastNonzeroMagnitude
+            )
         )
-    )
     return doubleValues.map { $0 - denominator }
 }
 
@@ -301,6 +368,35 @@ func qualityGate(
     )
 }
 
+func compressedAttentionPathName(
+    queries: MLXArray,
+    keyCode: TurboQuantAttentionCode,
+    valueCode: TurboQuantAttentionCode,
+    preferOnlineFused: Bool,
+    availability: TurboQuantKernelAvailability
+) -> String {
+    do {
+        let decision = try turboQuantAttentionDecision(
+            request: TurboQuantAttentionRequest(
+                queryShape: queries.shape,
+                keyLayout: keyCode.layout,
+                valueLayout: valueCode.layout,
+                queryDType: queries.dtype,
+                outputDType: queries.dtype,
+                maskKind: .causal,
+                hasSinks: false,
+                preferOnlineFused: preferOnlineFused,
+                memoryBudgetBytes: nil,
+                fallbackState: .none
+            ),
+            capabilities: availability.attentionCapabilities
+        )
+        return decision.selectedPath.rawValue
+    } catch {
+        return "unavailable"
+    }
+}
+
 func runCase(
     profile: TurboQuantProfile,
     scheme: TurboQuantScheme,
@@ -311,11 +407,14 @@ func runCase(
     speedParityRatio: Double,
     minExtendedTokensPerSecond: Double,
     shortContextPlainKVThreshold: Int,
-    availability: TurboQuantKernelAvailability
+    availability: TurboQuantKernelAvailability,
+    attentionPath: QwenProofAttentionPath = .auto
 ) -> QwenProofResult {
+    let caseID =
+        "\(profile.id)_\(scheme.rawValue)_ctx\(contextLength)_q\(queryLength)\(attentionPath.idSuffix)"
     guard let precisionProfile = profile.applyingPrecisionCandidate(scheme) else {
         let benchmarkCase = QwenProofCase(
-            id: "\(profile.id)_\(scheme.rawValue)_ctx\(contextLength)_q\(queryLength)",
+            id: caseID,
             profileID: profile.id,
             scheme: scheme.rawValue,
             dtype: dtypeName(dtype),
@@ -344,7 +443,7 @@ func runCase(
     let queryHeads = 16
     let headDimension = 256
     let benchmarkCase = QwenProofCase(
-        id: "\(profile.id)_\(scheme.rawValue)_ctx\(contextLength)_q\(queryLength)",
+        id: caseID,
         profileID: profile.id,
         scheme: scheme.rawValue,
         dtype: dtypeName(dtype),
@@ -365,7 +464,8 @@ func runCase(
             quality: nil,
             throughput: nil,
             memory: nil,
-            fallbackReason: "Metal TurboQuant attention unavailable: \(availability.selfTestFailureReason ?? "self-test unavailable")",
+            fallbackReason:
+                "Metal TurboQuant attention unavailable: \(availability.selfTestFailureReason ?? "self-test unavailable")",
             error: nil
         )
     }
@@ -394,12 +494,14 @@ func runCase(
             fallbackPolicy: precisionProfile.turboQuant.fallbackPolicy,
             valueBits: precisionProfile.valueBits
         )
-        guard cache.supportsCompressedAttention(
-            queries: queries,
-            keys: keys,
-            values: values,
-            mask: .causal
-        ) else {
+        guard
+            cache.supportsCompressedAttention(
+                queries: queries,
+                keys: keys,
+                values: values,
+                mask: .causal
+            )
+        else {
             return QwenProofResult(
                 id: benchmarkCase.id,
                 status: "skipped",
@@ -418,6 +520,16 @@ func runCase(
             keys: keys,
             values: values
         )
+        let preferOnline = attentionPath.preferOnlineFused(
+            default: cache.prefersOnlineFusedAttention
+        )
+        let selectedAttentionPath = compressedAttentionPathName(
+            queries: queries,
+            keyCode: compressedKeys,
+            valueCode: compressedValues,
+            preferOnlineFused: preferOnline,
+            availability: availability
+        )
         let (plainSeconds, plainOutput) = try timed(iterations: iterations) {
             MLXFast.scaledDotProductAttention(
                 queries: queries,
@@ -427,7 +539,6 @@ func runCase(
                 mask: .causal
             )
         }
-        let preferOnline = cache.prefersOnlineFusedAttention
         let (compressedSeconds, compressedOutput) = try timed(iterations: iterations) {
             try turboQuantMetalScaledDotProductAttention(
                 queries: queries,
@@ -471,20 +582,29 @@ func runCase(
             plainKVBytes: plainBytes,
             compressionRatioToPlain: Double(compressedBytes) / Double(max(1, plainBytes))
         )
+        let fallbackReason: String?
+        if usesPlainProductionRoute {
+            fallbackReason =
+                "speed parity gate waived because production routing uses plain KV at or below \(shortContextPlainKVThreshold) tokens"
+        } else if attentionPath != .auto {
+            fallbackReason =
+                "attention path forced to \(attentionPath.rawValue) for path comparison; selected \(selectedAttentionPath)"
+        } else {
+            fallbackReason =
+                cache.attentionDiagnostics.fallbackReason
+                ?? cache.attentionDiagnostics.lastUnsupportedShape
+        }
         let status = quality.passed && throughput.passedProductionGate ? "ok" : "failed"
         return QwenProofResult(
             id: benchmarkCase.id,
             status: status,
             benchmarkCase: benchmarkCase,
-            selectedAttentionPath: cache.attentionDiagnostics.activeAttentionPath.rawValue,
+            selectedAttentionPath: selectedAttentionPath,
             precisionStatus: candidate?.status.rawValue ?? "unknown",
             quality: quality,
             throughput: throughput,
             memory: memory,
-            fallbackReason: usesPlainProductionRoute
-                ? "speed parity gate waived because production routing uses plain KV at or below \(shortContextPlainKVThreshold) tokens"
-                : cache.attentionDiagnostics.fallbackReason
-                    ?? cache.attentionDiagnostics.lastUnsupportedShape,
+            fallbackReason: fallbackReason,
             error: nil
         )
     } catch {
@@ -505,11 +625,13 @@ func runCase(
 
 let iterations = argumentValue("--iterations", default: 5)
 let releaseMatrix = hasFlag("--release-matrix")
+let pathCompare = hasFlag("--path-compare")
 let strict = hasFlag("--strict")
 let proofDType = argumentDType("--dtype", default: .float16)
 let speedParityRatio = argumentValue("--speed-parity-ratio", default: 1.0)
 let minExtendedTokensPerSecond = argumentValue("--min-extended-tokens-per-second", default: 20.0)
 let shortContextPlainKVThreshold = argumentValue("--plain-route-threshold", default: 4096)
+let cooldownMilliseconds = argumentValue("--cooldown-ms", default: 0)
 let contexts = argumentValues(
     "--contexts",
     default: releaseMatrix ? [8192, 16384] : [8192]
@@ -520,7 +642,22 @@ let queryLengths = argumentValues(
 )
 let schemes = argumentSchemes(
     "--schemes",
-    default: [.turbo8, .turbo4v2, .turbo3_5]
+    default: pathCompare ? [.turbo8] : [.turbo8, .turbo4v2, .turbo3_5]
+)
+let attentionPaths = argumentAttentionPaths(
+    "--attention-paths",
+    default: pathCompare ? [.twoStage, .fused] : [.auto]
+)
+let defaultProfileIDs = [
+    "qwen3.5-0.8b",
+    "qwen3.5-2b",
+    "qwen3.6-27b",
+    "qwen3.5-35b-a3b",
+    "qwen3.6-35b-a3b",
+]
+let requestedProfileIDs = argumentStrings(
+    "--profiles",
+    default: pathCompare ? ["qwen3.5-2b"] : defaultProfileIDs
 )
 let availability = TurboQuantKernelAvailability.current
 let qwenProfiles = TurboQuantProfileRegistry.bundled.profiles
@@ -540,29 +677,34 @@ let profileCoverage = qwenProfiles.map { profile in
 }
 
 var results = [QwenProofResult]()
-let representativeProfiles = qwenProfiles.filter {
-    ["qwen3.5-0.8b", "qwen3.5-2b", "qwen3.6-27b", "qwen3.5-35b-a3b", "qwen3.6-35b-a3b"]
-        .contains($0.id)
-}
+let requestedProfileIDSet = Set(requestedProfileIDs)
+let representativeProfiles = qwenProfiles.filter { requestedProfileIDSet.contains($0.id) }
 for profile in representativeProfiles {
     for scheme in schemes {
         for context in contexts {
             guard context <= (profile.safeContextLength ?? context) else { continue }
             for queryLength in queryLengths {
-                results.append(
-                    runCase(
-                        profile: profile,
-                        scheme: scheme,
-                        contextLength: context,
-                        queryLength: queryLength,
-                        dtype: proofDType,
-                        iterations: iterations,
-                        speedParityRatio: speedParityRatio,
-                        minExtendedTokensPerSecond: minExtendedTokensPerSecond,
-                        shortContextPlainKVThreshold: shortContextPlainKVThreshold,
-                        availability: availability
+                for attentionPath in attentionPaths {
+                    results.append(
+                        runCase(
+                            profile: profile,
+                            scheme: scheme,
+                            contextLength: context,
+                            queryLength: queryLength,
+                            dtype: proofDType,
+                            iterations: iterations,
+                            speedParityRatio: speedParityRatio,
+                            minExtendedTokensPerSecond: minExtendedTokensPerSecond,
+                            shortContextPlainKVThreshold: shortContextPlainKVThreshold,
+                            availability: availability,
+                            attentionPath: attentionPath
+                        )
                     )
-                )
+                    Memory.clearCache()
+                    if cooldownMilliseconds > 0 {
+                        usleep(useconds_t(cooldownMilliseconds * 1000))
+                    }
+                }
             }
         }
     }
