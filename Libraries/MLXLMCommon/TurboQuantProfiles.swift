@@ -1957,6 +1957,9 @@ private func defaultBundledOptimizationPolicy(
     if bundledThroughputOptimizationProfileIDs.contains(profile.id) {
         return .preferThroughput
     }
+    if isDenseQwen35HybridProfile(profile) {
+        return .auto
+    }
     if profile.modalities.contains(where: { $0 != .text }) {
         return .preferMemory
     }
@@ -1981,6 +1984,17 @@ private func defaultBundledOptimizationPolicy(
         return .preferMemory
     }
     return .auto
+}
+
+private func isDenseQwen35HybridProfile(_ profile: TurboQuantProfile) -> Bool {
+    let normalizedID = profile.id.lowercased()
+    guard normalizedID.hasPrefix("qwen3.5-") || normalizedID.hasPrefix("qwen3.6-") else {
+        return false
+    }
+    let architecture = profile.architecture?.lowercased() ?? ""
+    return !architecture.contains("moe")
+        && profile.minRoutedExperts == nil
+        && profile.maxRoutedExperts == nil
 }
 
 private func applyingBundledProfileOptimizations(_ profile: TurboQuantProfile)

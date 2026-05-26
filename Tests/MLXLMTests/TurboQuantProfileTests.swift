@@ -67,7 +67,7 @@ extension MLXRuntimeSwiftTests {
             )
             #expect(qwen35.id == "qwen3.5-4b")
             #expect(qwen35.safeContextLength == 262144)
-            #expect(qwen35.optimizationPolicy == TurboQuantOptimizationPolicy.preferMemory)
+            #expect(qwen35.optimizationPolicy == TurboQuantOptimizationPolicy.auto)
 
             let qwen35OptiQ2B = try #require(
                 registry.profile(
@@ -80,6 +80,7 @@ extension MLXRuntimeSwiftTests {
                 )
             )
             #expect(qwen35OptiQ2B.id == "qwen3.5-2b")
+            #expect(qwen35OptiQ2B.optimizationPolicy == TurboQuantOptimizationPolicy.auto)
 
             let gemma3Small = try #require(
                 registry.profile(
@@ -399,6 +400,7 @@ extension MLXRuntimeSwiftTests {
                     )
                 )
                 #expect(profile.id == expectedProfileID)
+                #expect(profile.optimizationPolicy == TurboQuantOptimizationPolicy.preferMemory)
             }
         }
 
