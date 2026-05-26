@@ -445,7 +445,8 @@ extension MLXRuntimeSwiftTests {
                 turboQuantBackend: .metalPolarQJL,
                 turboQuantOptimizationPolicy: .conservative,
                 turboQuantSeed: 0x1234_5678_9ABC_DEF0,
-                turboQuantValueBits: 4
+                turboQuantValueBits: 4,
+                turboQuantFallbackPolicy: .fatalOnFailure
             )
 
             let cache = try #require(
@@ -457,6 +458,7 @@ extension MLXRuntimeSwiftTests {
             #expect(cache.preset == .turbo2_5)
             #expect(cache.requestedBackend == .metalPolarQJL)
             #expect(cache.optimizationPolicy == .conservative)
+            #expect(cache.fallbackPolicy == .fatalOnFailure)
             #expect(cache.seed == 0x1234_5678_9ABC_DEF0)
             #expect(cache.valueBits == 4)
         }
@@ -874,7 +876,7 @@ extension MLXRuntimeSwiftTests {
             #expect(cache.attentionDiagnostics.rawFallbackAllocated == false)
         }
 
-        @Test func testConservativeTurboQuantUsesExactRawShadowForQwenLikeDecode() throws {
+        @Test func testConservativeTurboQuantPrefersCompressedAttentionForQwenLikeDecode() throws {
             guard TurboQuantKernelAvailability.current.supportsMetalPolarQJLAttention else {
                 return
             }
@@ -929,9 +931,6 @@ extension MLXRuntimeSwiftTests {
                 [1, kvHeadCount, 1, headDimension]
             )
 
-            let rawCache = RotatingKVCache(maxSize: 512)
-            _ = rawCache.update(keys: prefillKeys, values: prefillValues)
-
             let turboCache = RotatingTurboQuantKVCache(
                 maxSize: 512,
                 preset: .turbo8,
@@ -948,14 +947,6 @@ extension MLXRuntimeSwiftTests {
                 mask: .causal
             )
 
-            let rawDecodeState = rawCache.update(keys: decodeKeys, values: decodeValues)
-            let expected = MLXFast.scaledDotProductAttention(
-                queries: decodeQueries,
-                keys: rawDecodeState.0,
-                values: rawDecodeState.1,
-                scale: scale,
-                mask: .causal
-            )
             let actual = try attentionWithCacheUpdateReturningStateThrowing(
                 queries: decodeQueries,
                 keys: decodeKeys,
@@ -964,10 +955,20 @@ extension MLXRuntimeSwiftTests {
                 scale: scale,
                 mask: .causal
             ).output
+            let compressed = try #require(turboCache.compressedState)
+            let expected = try turboQuantMetalScaledDotProductAttention(
+                queries: decodeQueries,
+                keyCode: compressed.0,
+                valueCode: compressed.1,
+                scale: scale,
+                mask: .causal,
+                preferOnlineFused: false,
+                kernelProfile: turboCache.attentionDiagnostics.selectedKernelProfile
+            )
 
             #expect(turboCache.attentionDiagnostics.rawFallbackAllocated)
-            #expect(turboCache.attentionDiagnostics.lastFallback?.toPath == .baseline)
-            #expect(turboCache.attentionDiagnostics.lastFallback?.isSemanticallyExact == true)
+            #expect(turboCache.attentionDiagnostics.lastFallback?.toPath == .twoStageCompressed)
+            #expect(turboCache.attentionDiagnostics.lastFallback?.isSemanticallyExact == false)
             #expect(allClose(actual, expected, rtol: 1e-5, atol: 1e-5).item(Bool.self))
         }
 

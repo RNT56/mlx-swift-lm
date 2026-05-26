@@ -271,6 +271,7 @@ extension LanguageModel where Self: KVCacheDimensionProvider {
             let backend = parameters?.turboQuantBackend ?? .metalPolarQJL
             let groupSize = parameters?.kvGroupSize ?? 64
             let policy = parameters?.turboQuantOptimizationPolicy ?? .auto
+            let fallbackPolicy = parameters?.turboQuantFallbackPolicy ?? .compressedDecodeAllowed
             let seed = parameters?.turboQuantSeed ?? defaultTurboQuantSeed
             let valueBits = parameters?.turboQuantValueBits
             if let maxKVSize = parameters?.maxKVSize {
@@ -282,6 +283,7 @@ extension LanguageModel where Self: KVCacheDimensionProvider {
                         groupSize: groupSize,
                         backend: backend,
                         optimizationPolicy: policy,
+                        fallbackPolicy: fallbackPolicy,
                         seed: seed,
                         valueBits: valueBits,
                         residentBudgetBytes: parameters?.turboQuantPerCacheResidentBudgetBytes
@@ -294,6 +296,7 @@ extension LanguageModel where Self: KVCacheDimensionProvider {
                     groupSize: groupSize,
                     backend: backend,
                     optimizationPolicy: policy,
+                    fallbackPolicy: fallbackPolicy,
                     seed: seed,
                     valueBits: valueBits,
                     residentBudgetBytes: parameters?.turboQuantPerCacheResidentBudgetBytes

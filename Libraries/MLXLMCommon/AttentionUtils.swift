@@ -278,21 +278,40 @@ private func turboQuantAttentionFallbackLadder(
     )
     try cache.validateCompressedState(context: "attention fallback ladder")
 
-    if let exact = cache.exactRawStateIfComplete() {
-        let output = exactScaledDotProductAttention(
-            queries: queries,
-            keys: exact.keys,
-            values: exact.values,
-            scale: scale,
-            mask: adjustedMask,
-            sinks: sinks
-        )
-        recordTurboQuantFallback(
-            cache: cache,
-            path: .rawExactSDPA,
-            reason: "using exact raw shadow for quality-sensitive compressed cache"
-        )
-        return output
+    func rawExactOutput(reason: String) -> MLXArray? {
+        if let exact = cache.exactRawStateIfComplete() {
+            let output = exactScaledDotProductAttention(
+                queries: queries,
+                keys: exact.keys,
+                values: exact.values,
+                scale: scale,
+                mask: adjustedMask,
+                sinks: sinks
+            )
+            recordTurboQuantFallback(
+                cache: cache,
+                path: .rawExactSDPA,
+                reason: reason
+            )
+            return output
+        }
+        if let rawExactKeys, let rawExactValues {
+            let output = exactScaledDotProductAttention(
+                queries: queries,
+                keys: rawExactKeys,
+                values: rawExactValues,
+                scale: scale,
+                mask: mask,
+                sinks: sinks
+            )
+            recordTurboQuantFallback(
+                cache: cache,
+                path: .rawExactSDPA,
+                reason: reason
+            )
+            return output
+        }
+        return nil
     }
 
     var failures: [String] = []
@@ -349,6 +368,22 @@ private func turboQuantAttentionFallbackLadder(
         failures.append(reason)
     }
 
+    let failureReason = failures.joined(separator: "; ")
+
+    switch cache.fallbackPolicy {
+    case .fatalOnFailure:
+        recordTurboQuantFallback(cache: cache, path: .typedFailure, reason: failureReason)
+        throw TurboQuantRuntimeFailure.compressedAttentionUnavailable(failureReason)
+    case .exactRequired:
+        if let output = rawExactOutput(reason: rawExactReason ?? failureReason) {
+            return output
+        }
+        recordTurboQuantFallback(cache: cache, path: .typedFailure, reason: failureReason)
+        throw TurboQuantRuntimeFailure.decodedFallbackUnavailable(failureReason)
+    case .packedAllowed, .compressedDecodeAllowed:
+        break
+    }
+
     if let output = packedQuantizedAttentionFallback(
         queries: queries,
         cache: cache,
@@ -364,6 +399,15 @@ private func turboQuantAttentionFallbackLadder(
         return output
     }
     failures.append("packed quantized SDPA fallback unavailable")
+
+    if cache.fallbackPolicy == .packedAllowed {
+        let reason = failures.joined(separator: "; ")
+        if let output = rawExactOutput(reason: rawExactReason ?? reason) {
+            return output
+        }
+        recordTurboQuantFallback(cache: cache, path: .typedFailure, reason: reason)
+        throw TurboQuantRuntimeFailure.decodedFallbackUnavailable(reason)
+    }
 
     do {
         let (decodedKeys, decodedValues) = try cache.decodedCompressedState(
@@ -386,20 +430,7 @@ private func turboQuantAttentionFallbackLadder(
         failures.append("decode compressed K/V fallback failed: \(error)")
     }
 
-    if let rawExactKeys, let rawExactValues {
-        let output = exactScaledDotProductAttention(
-            queries: queries,
-            keys: rawExactKeys,
-            values: rawExactValues,
-            scale: scale,
-            mask: mask,
-            sinks: sinks
-        )
-        recordTurboQuantFallback(
-            cache: cache,
-            path: .rawExactSDPA,
-            reason: rawExactReason ?? failures.joined(separator: "; ")
-        )
+    if let output = rawExactOutput(reason: rawExactReason ?? failures.joined(separator: "; ")) {
         return output
     }
 

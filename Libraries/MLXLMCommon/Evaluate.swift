@@ -771,6 +771,7 @@ public struct TokenIterator: TokenIteratorProtocol {
     let turboQuantPreset: TurboQuantPreset
     let turboQuantBackend: TurboQuantBackend
     let turboQuantOptimizationPolicy: TurboQuantOptimizationPolicy
+    let turboQuantFallbackPolicy: TurboQuantFallbackPolicy
     let turboQuantSeed: UInt64?
     let turboQuantValueBits: Int?
     let turboQuantResidentBudgetBytes: Int?
@@ -810,6 +811,7 @@ public struct TokenIterator: TokenIteratorProtocol {
         self.turboQuantPreset = runtimeParameters.turboQuantPreset
         self.turboQuantBackend = runtimeParameters.turboQuantBackend
         self.turboQuantOptimizationPolicy = runtimeParameters.turboQuantOptimizationPolicy
+        self.turboQuantFallbackPolicy = runtimeParameters.turboQuantFallbackPolicy
         self.turboQuantSeed = runtimeParameters.turboQuantSeed
         self.turboQuantValueBits = runtimeParameters.turboQuantValueBits
         self.turboQuantResidentBudgetBytes = runtimeParameters.turboQuantPerCacheResidentBudgetBytes
@@ -851,6 +853,7 @@ public struct TokenIterator: TokenIteratorProtocol {
         self.turboQuantPreset = runtimeParameters.turboQuantPreset
         self.turboQuantBackend = runtimeParameters.turboQuantBackend
         self.turboQuantOptimizationPolicy = runtimeParameters.turboQuantOptimizationPolicy
+        self.turboQuantFallbackPolicy = runtimeParameters.turboQuantFallbackPolicy
         self.turboQuantSeed = runtimeParameters.turboQuantSeed
         self.turboQuantValueBits = runtimeParameters.turboQuantValueBits
         self.turboQuantResidentBudgetBytes = runtimeParameters.turboQuantPerCacheResidentBudgetBytes
@@ -895,6 +898,8 @@ public struct TokenIterator: TokenIteratorProtocol {
         self.turboQuantBackend = runtimeCacheParameters?.turboQuantBackend ?? .metalPolarQJL
         self.turboQuantOptimizationPolicy =
             runtimeCacheParameters?.turboQuantOptimizationPolicy ?? .auto
+        self.turboQuantFallbackPolicy =
+            runtimeCacheParameters?.turboQuantFallbackPolicy ?? .compressedDecodeAllowed
         self.turboQuantSeed = runtimeCacheParameters?.turboQuantSeed
         self.turboQuantValueBits = runtimeCacheParameters?.turboQuantValueBits
         self.turboQuantResidentBudgetBytes =
@@ -963,6 +968,7 @@ public struct TokenIterator: TokenIteratorProtocol {
             turboQuantPreset: turboQuantPreset,
             turboQuantBackend: turboQuantBackend,
             turboQuantOptimizationPolicy: turboQuantOptimizationPolicy,
+            turboQuantFallbackPolicy: turboQuantFallbackPolicy,
             turboQuantSeed: turboQuantSeed,
             turboQuantValueBits: turboQuantValueBits,
             turboQuantResidentBudgetBytes: turboQuantResidentBudgetBytes
@@ -1127,6 +1133,7 @@ public struct SpeculativeTokenIterator: TokenIteratorProtocol {
                 turboQuantPreset: mainRuntimeParameters.turboQuantPreset,
                 turboQuantBackend: mainRuntimeParameters.turboQuantBackend,
                 turboQuantOptimizationPolicy: mainRuntimeParameters.turboQuantOptimizationPolicy,
+                turboQuantFallbackPolicy: mainRuntimeParameters.turboQuantFallbackPolicy,
                 turboQuantSeed: mainRuntimeParameters.turboQuantSeed,
                 turboQuantValueBits: mainRuntimeParameters.turboQuantValueBits,
                 turboQuantResidentBudgetBytes: mainRuntimeParameters
@@ -1484,6 +1491,7 @@ public struct MTPTokenIterator: TokenIteratorProtocol {
                 turboQuantPreset: runtimeParameters.turboQuantPreset,
                 turboQuantBackend: runtimeParameters.turboQuantBackend,
                 turboQuantOptimizationPolicy: runtimeParameters.turboQuantOptimizationPolicy,
+                turboQuantFallbackPolicy: runtimeParameters.turboQuantFallbackPolicy,
                 turboQuantSeed: runtimeParameters.turboQuantSeed,
                 turboQuantValueBits: runtimeParameters.turboQuantValueBits,
                 turboQuantResidentBudgetBytes: runtimeParameters

@@ -2256,6 +2256,7 @@ public func makePromptCacheWithLayerCount(
         let backend = parameters?.turboQuantBackend ?? .metalPolarQJL
         let groupSize = parameters?.kvGroupSize ?? 64
         let policy = parameters?.turboQuantOptimizationPolicy ?? .auto
+        let fallbackPolicy = parameters?.turboQuantFallbackPolicy ?? .compressedDecodeAllowed
         let seed = parameters?.turboQuantSeed ?? defaultTurboQuantSeed
         let valueBits = parameters?.turboQuantValueBits
         if let maxKVSize = parameters?.maxKVSize ?? maxKVSize {
@@ -2266,6 +2267,7 @@ public func makePromptCacheWithLayerCount(
                     groupSize: groupSize,
                     backend: backend,
                     optimizationPolicy: policy,
+                    fallbackPolicy: fallbackPolicy,
                     seed: seed,
                     valueBits: valueBits,
                     residentBudgetBytes: parameters?.turboQuantPerCacheResidentBudgetBytes
@@ -2278,6 +2280,7 @@ public func makePromptCacheWithLayerCount(
                 groupSize: groupSize,
                 backend: backend,
                 optimizationPolicy: policy,
+                fallbackPolicy: fallbackPolicy,
                 seed: seed,
                 valueBits: valueBits,
                 residentBudgetBytes: parameters?.turboQuantPerCacheResidentBudgetBytes
@@ -2312,6 +2315,7 @@ public func makeAttentionKVCache(
         let backend = parameters?.turboQuantBackend ?? .metalPolarQJL
         let groupSize = parameters?.kvGroupSize ?? 64
         let policy = parameters?.turboQuantOptimizationPolicy ?? .auto
+        let fallbackPolicy = parameters?.turboQuantFallbackPolicy ?? .compressedDecodeAllowed
         let seed = parameters?.turboQuantSeed ?? defaultTurboQuantSeed
         let valueBits = parameters?.turboQuantValueBits
         if let maxKVSize = resolvedMaxKVSize {
@@ -2322,6 +2326,7 @@ public func makeAttentionKVCache(
                 groupSize: groupSize,
                 backend: backend,
                 optimizationPolicy: policy,
+                fallbackPolicy: fallbackPolicy,
                 seed: seed,
                 valueBits: valueBits,
                 residentBudgetBytes: parameters?.turboQuantPerCacheResidentBudgetBytes
@@ -2332,6 +2337,7 @@ public func makeAttentionKVCache(
             groupSize: groupSize,
             backend: backend,
             optimizationPolicy: policy,
+            fallbackPolicy: fallbackPolicy,
             seed: seed,
             valueBits: valueBits,
             residentBudgetBytes: parameters?.turboQuantPerCacheResidentBudgetBytes
@@ -2652,6 +2658,7 @@ public func maybeQuantizeKVCache(
     turboQuantPreset: TurboQuantPreset = .turbo3_5,
     turboQuantBackend: TurboQuantBackend = .metalPolarQJL,
     turboQuantOptimizationPolicy: TurboQuantOptimizationPolicy = .auto,
+    turboQuantFallbackPolicy: TurboQuantFallbackPolicy = .compressedDecodeAllowed,
     turboQuantSeed: UInt64? = nil,
     turboQuantValueBits: Int? = nil,
     turboQuantResidentBudgetBytes: Int? = nil
@@ -2698,6 +2705,7 @@ public func maybeQuantizeKVCache(
                     groupSize: kvGroupSize,
                     backend: turboQuantBackend,
                     optimizationPolicy: turboQuantOptimizationPolicy,
+                    fallbackPolicy: turboQuantFallbackPolicy,
                     seed: turboQuantSeed ?? defaultTurboQuantSeed,
                     valueBits: turboQuantValueBits,
                     residentBudgetBytes: turboQuantResidentBudgetBytes
@@ -2711,6 +2719,7 @@ public func maybeQuantizeKVCache(
                 groupSize: kvGroupSize,
                 backend: turboQuantBackend,
                 optimizationPolicy: turboQuantOptimizationPolicy,
+                fallbackPolicy: turboQuantFallbackPolicy,
                 seed: turboQuantSeed ?? defaultTurboQuantSeed,
                 valueBits: turboQuantValueBits,
                 residentBudgetBytes: turboQuantResidentBudgetBytes

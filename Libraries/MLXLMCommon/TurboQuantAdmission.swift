@@ -846,13 +846,13 @@ public struct TurboQuantAdmissionPlanner: Sendable {
             contextLength = min(requestedContextLength, options.fastestContextCap)
             selectedPreset = preset
             selectedValueBits = max(valueBits, preset.defaultValueBits)
-            usesRawShadow = true
+            usesRawShadow = false
             packedFallbackEnabled = false
         case .balanced:
             contextLength = requestedContextLength
             selectedPreset = preset
             selectedValueBits = valueBits
-            usesRawShadow = true
+            usesRawShadow = false
             packedFallbackEnabled = fallbackPolicy == .packedAllowed
         case .maxContext:
             contextLength = requestedContextLength

@@ -74,7 +74,7 @@
   "safe_context_length": 32768,
   "quality_profile": "balanced",
   "backend": "metalPolarQJL",
-  "optimization_policy": "conservative",
+  "optimization_policy": "preferThroughput",
   "requires_metal_self_test": true,
   "requires_fused_attention_self_test": false,
   "status": "guarded",
@@ -86,6 +86,6 @@
     "Measured quality and throughput fields are intentionally empty until reproduced on target hardware.",
     "Runtime shape checks and Metal self-tests remain authoritative.",
     "Gemma 2/3/3n/4 profiles are config-backed experimental profiles; measured quality and throughput validation is still pending.",
-    "Physical A17 Pro evidence showed the 1B Gemma 3 text profile is quality and latency sensitive under 4-bit compressed attention; use turbo8 with conservative exact recent shadow while keeping compressed KV committed."
+    "Physical A17 Pro evidence showed the 1B Gemma 3 text profile is quality and latency sensitive under 4-bit compressed attention; use turbo8 raw-free compressed attention for production throughput while lower-bit modes remain guarded."
   ]
 }

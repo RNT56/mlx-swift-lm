@@ -105,7 +105,7 @@
   "safe_context_length": 262144,
   "quality_profile": "balanced",
   "backend": "metalPolarQJL",
-  "optimization_policy": "conservative",
+  "optimization_policy": "preferThroughput",
   "requires_metal_self_test": true,
   "requires_fused_attention_self_test": false,
   "status": "guarded",

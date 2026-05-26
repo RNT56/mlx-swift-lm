@@ -111,6 +111,7 @@ public enum WiredMemoryUtils {
                 turboQuantPreset: parameters.turboQuantPreset,
                 turboQuantBackend: parameters.turboQuantBackend,
                 turboQuantOptimizationPolicy: parameters.turboQuantOptimizationPolicy,
+                turboQuantFallbackPolicy: parameters.turboQuantFallbackPolicy,
                 turboQuantSeed: parameters.turboQuantSeed,
                 turboQuantValueBits: parameters.turboQuantValueBits
             )
@@ -125,6 +126,7 @@ public enum WiredMemoryUtils {
                 turboQuantPreset: parameters.turboQuantPreset,
                 turboQuantBackend: parameters.turboQuantBackend,
                 turboQuantOptimizationPolicy: parameters.turboQuantOptimizationPolicy,
+                turboQuantFallbackPolicy: parameters.turboQuantFallbackPolicy,
                 turboQuantSeed: parameters.turboQuantSeed,
                 turboQuantValueBits: parameters.turboQuantValueBits
             )

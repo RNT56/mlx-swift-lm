@@ -27,7 +27,27 @@ extension MLXRuntimeSwiftTests {
             #expect(admission.selectedMode == .balanced)
             #expect(admission.downgradeReasons.isEmpty)
             #expect(admission.memoryPlan.runtimeZones.compressedKVBytes > 0)
+            #expect(!admission.memoryPlan.usesRawShadow)
+            #expect(admission.memoryPlan.runtimeZones.rawShadowBytes == 0)
             #expect(admission.userMessage.contains("8192 tokens"))
+        }
+
+        @Test func testFastestAdmissionDoesNotReserveRawShadow() {
+            let planner = Self.planner()
+            let admission = planner.admit(
+                profile: Self.profile(weightGiB: 2, layers: 24),
+                requestedContextLength: 8192,
+                userMode: .fastest,
+                fallbackPolicy: .packedAllowed,
+                preset: .turbo8,
+                valueBits: 8,
+                memorySample: Self.sample(availableGiB: 12, modelGiB: 2)
+            )
+
+            #expect(admission.admitted)
+            #expect(admission.selectedMode == .fastest)
+            #expect(!admission.memoryPlan.usesRawShadow)
+            #expect(admission.memoryPlan.runtimeZones.rawShadowBytes == 0)
         }
 
         @Test func testLowMemoryReducesAdmittedContextBeforeGeneration() {

@@ -79,7 +79,7 @@ extension MLXRuntimeSwiftTests {
             #expect(qwen35.id == "qwen3.5-4b")
             #expect(qwen35.safeContextLength == 262144)
             #expect(qwen35.recommendedScheme == .turbo8)
-            #expect(qwen35.optimizationPolicy == TurboQuantOptimizationPolicy.conservative)
+            #expect(qwen35.optimizationPolicy == TurboQuantOptimizationPolicy.preferThroughput)
             #expect(qwen35.valueBits == 8)
             #expect(qwen35.status == .guarded)
 
@@ -95,7 +95,9 @@ extension MLXRuntimeSwiftTests {
             )
             #expect(qwen35OptiQ2B.id == "qwen3.5-2b")
             #expect(qwen35OptiQ2B.recommendedScheme == .turbo8)
-            #expect(qwen35OptiQ2B.optimizationPolicy == TurboQuantOptimizationPolicy.conservative)
+            #expect(
+                qwen35OptiQ2B.optimizationPolicy == TurboQuantOptimizationPolicy.preferThroughput
+            )
             #expect(qwen35OptiQ2B.valueBits == 8)
             #expect(qwen35OptiQ2B.status == .guarded)
 
@@ -126,7 +128,7 @@ extension MLXRuntimeSwiftTests {
             )
             #expect(gemma31B.id == "gemma-3-1b")
             #expect(gemma31B.recommendedScheme == .turbo8)
-            #expect(gemma31B.optimizationPolicy == TurboQuantOptimizationPolicy.conservative)
+            #expect(gemma31B.optimizationPolicy == TurboQuantOptimizationPolicy.preferThroughput)
             #expect(gemma31B.valueBits == 8)
             #expect(gemma31B.status == .guarded)
             #expect(
@@ -165,7 +167,7 @@ extension MLXRuntimeSwiftTests {
             )
             #expect(llama32_3B.id == "llama-3.2-3b")
             #expect(llama32_3B.recommendedScheme == .turbo8)
-            #expect(llama32_3B.optimizationPolicy == TurboQuantOptimizationPolicy.conservative)
+            #expect(llama32_3B.optimizationPolicy == TurboQuantOptimizationPolicy.preferThroughput)
             #expect(llama32_3B.valueBits == 8)
             #expect(llama32_3B.status == .guarded)
 
@@ -1286,6 +1288,7 @@ extension MLXRuntimeSwiftTests {
             #expect(parameters.turboQuantPreset == .turbo4v2)
             #expect(parameters.turboQuantBackend == .metalPolarQJL)
             #expect(parameters.turboQuantOptimizationPolicy == .conservative)
+            #expect(parameters.turboQuantFallbackPolicy == .compressedDecodeAllowed)
             #expect(parameters.turboQuantValueBits == 4)
         }
 
@@ -1297,6 +1300,23 @@ extension MLXRuntimeSwiftTests {
             #expect(!lowerBitProfiles.isEmpty)
             #expect(lowerBitProfiles.allSatisfy { $0.status == .guarded })
             #expect(lowerBitProfiles.allSatisfy { $0.optimizationPolicy == .conservative })
+        }
+
+        @Test func testTurbo8QualitySensitiveProfilesPreferThroughput() throws {
+            let registry = TurboQuantProfileRegistry.bundled
+            let profileIDs = [
+                "qwen3.5-0.8b",
+                "qwen3.5-2b",
+                "gemma-3-1b",
+                "llama-3.2-3b",
+            ]
+
+            for profileID in profileIDs {
+                let profile = try #require(registry.profiles.first { $0.id == profileID })
+                #expect(profile.recommendedScheme == .turbo8)
+                #expect(profile.valueBits == 8)
+                #expect(profile.optimizationPolicy == .preferThroughput)
+            }
         }
 
         @Test func testMemoryProfileMapsToAggressiveRuntimePreset() {

@@ -117,6 +117,7 @@ public protocol TurboQuantCompressedKVCacheProtocol: KVCache, AnyObject {
     var requestedBackend: TurboQuantBackend { get }
     var activeBackend: TurboQuantBackend { get }
     var optimizationPolicy: TurboQuantOptimizationPolicy { get }
+    var fallbackPolicy: TurboQuantFallbackPolicy { get }
     var attentionDiagnostics: TurboQuantAttentionDiagnostics { get }
     var compressedState: (TurboQuantAttentionCode, TurboQuantAttentionCode)? { get }
     var cacheLifecycle: TurboQuantCacheLifecycle { get }
@@ -794,6 +795,7 @@ public final class TurboQuantKVCache: QuantizedKVCache, TurboQuantCompressedKVCa
     public let activeBackend: TurboQuantBackend
     public let backendFallbackReason: String?
     public let optimizationPolicy: TurboQuantOptimizationPolicy
+    public let fallbackPolicy: TurboQuantFallbackPolicy
     public let seed: UInt64
     public let valueBits: Int
 
@@ -803,6 +805,7 @@ public final class TurboQuantKVCache: QuantizedKVCache, TurboQuantCompressedKVCa
         mode: QuantizationMode = .affine,
         backend: TurboQuantBackend = .metalPolarQJL,
         optimizationPolicy: TurboQuantOptimizationPolicy = .auto,
+        fallbackPolicy: TurboQuantFallbackPolicy = .compressedDecodeAllowed,
         seed: UInt64 = 0x9E37_79B9_7F4A_7C15,
         valueBits: Int? = nil,
         residentBudgetBytes: Int? = nil
@@ -810,6 +813,7 @@ public final class TurboQuantKVCache: QuantizedKVCache, TurboQuantCompressedKVCa
         self.preset = preset
         self.requestedBackend = backend
         self.optimizationPolicy = optimizationPolicy
+        self.fallbackPolicy = fallbackPolicy
         self.seed = seed
         self.valueBits = valueBits ?? preset.defaultValueBits
         self.residentBudgetBytes = residentBudgetBytes
@@ -1530,6 +1534,7 @@ public final class TurboQuantKVCache: QuantizedKVCache, TurboQuantCompressedKVCa
             mode: mode,
             backend: requestedBackend,
             optimizationPolicy: optimizationPolicy,
+            fallbackPolicy: fallbackPolicy,
             seed: seed,
             valueBits: valueBits,
             residentBudgetBytes: residentBudgetBytes
@@ -1771,6 +1776,7 @@ public final class RotatingTurboQuantKVCache: BaseKVCache, QuantizedKVCacheProto
     public let activeBackend: TurboQuantBackend
     public let backendFallbackReason: String?
     public let optimizationPolicy: TurboQuantOptimizationPolicy
+    public let fallbackPolicy: TurboQuantFallbackPolicy
     public let groupSize: Int
     public let bits: Int
     public let mode: QuantizationMode
@@ -1801,6 +1807,7 @@ public final class RotatingTurboQuantKVCache: BaseKVCache, QuantizedKVCacheProto
         mode: QuantizationMode = .affine,
         backend: TurboQuantBackend = .metalPolarQJL,
         optimizationPolicy: TurboQuantOptimizationPolicy = .auto,
+        fallbackPolicy: TurboQuantFallbackPolicy = .compressedDecodeAllowed,
         seed: UInt64 = 0x9E37_79B9_7F4A_7C15,
         valueBits: Int? = nil,
         residentBudgetBytes: Int? = nil
@@ -1812,6 +1819,7 @@ public final class RotatingTurboQuantKVCache: BaseKVCache, QuantizedKVCacheProto
         self.preset = preset
         self.requestedBackend = backend
         self.optimizationPolicy = optimizationPolicy
+        self.fallbackPolicy = fallbackPolicy
         self.seed = seed
         self.valueBits = valueBits ?? preset.defaultValueBits
         self.residentBudgetBytes = residentBudgetBytes
@@ -2690,6 +2698,7 @@ public final class RotatingTurboQuantKVCache: BaseKVCache, QuantizedKVCacheProto
             mode: mode,
             backend: requestedBackend,
             optimizationPolicy: optimizationPolicy,
+            fallbackPolicy: fallbackPolicy,
             seed: seed,
             valueBits: valueBits,
             residentBudgetBytes: residentBudgetBytes
@@ -2980,6 +2989,7 @@ extension RotatingKVCache {
         mode: QuantizationMode = .affine,
         backend: TurboQuantBackend = .metalPolarQJL,
         optimizationPolicy: TurboQuantOptimizationPolicy = .auto,
+        fallbackPolicy: TurboQuantFallbackPolicy = .compressedDecodeAllowed,
         seed: UInt64 = 0x9E37_79B9_7F4A_7C15,
         valueBits: Int? = nil,
         residentBudgetBytes: Int? = nil
@@ -2995,6 +3005,7 @@ extension RotatingKVCache {
             mode: mode,
             backend: backend,
             optimizationPolicy: optimizationPolicy,
+            fallbackPolicy: fallbackPolicy,
             seed: seed,
             valueBits: resolvedValueBits,
             residentBudgetBytes: residentBudgetBytes
@@ -3115,6 +3126,7 @@ extension KVCacheSimple {
         mode: QuantizationMode = .affine,
         backend: TurboQuantBackend = .metalPolarQJL,
         optimizationPolicy: TurboQuantOptimizationPolicy = .auto,
+        fallbackPolicy: TurboQuantFallbackPolicy = .compressedDecodeAllowed,
         seed: UInt64 = 0x9E37_79B9_7F4A_7C15,
         valueBits: Int? = nil,
         residentBudgetBytes: Int? = nil
@@ -3126,6 +3138,7 @@ extension KVCacheSimple {
             mode: mode,
             backend: backend,
             optimizationPolicy: optimizationPolicy,
+            fallbackPolicy: fallbackPolicy,
             seed: seed,
             valueBits: resolvedValueBits,
             residentBudgetBytes: residentBudgetBytes
