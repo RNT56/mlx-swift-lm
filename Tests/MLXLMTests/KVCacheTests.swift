@@ -878,6 +878,86 @@ extension MLXRuntimeSwiftTests {
             #expect(cache.attentionDiagnostics.rawFallbackAllocated == false)
         }
 
+        @Test func testTurboQuantCanonicalizesTransposedAttentionInputs() throws {
+            guard TurboQuantKernelAvailability.current.supportsMetalPolarQJLAttention else {
+                return
+            }
+
+            let cache = TurboQuantKVCache(backend: .metalPolarQJL)
+            let queries = MLXArray.ones([1, 1, 4, 64], dtype: .float32)
+                .transposed(0, 2, 1, 3)
+            let keys = MLXArray.ones([1, 1, 2, 64], dtype: .float32)
+                .transposed(0, 2, 1, 3)
+            let values = MLXArray.ones([1, 1, 2, 64], dtype: .float32)
+                .transposed(0, 2, 1, 3)
+
+            let result = try attentionWithCacheUpdateReturningStateThrowing(
+                queries: queries,
+                keys: keys,
+                values: values,
+                cache: cache,
+                scale: 0.125
+            )
+
+            #expect(result.output.shape == [1, 4, 1, 64])
+            guard case .turboQuant = result.state else {
+                Issue.record("Expected transposed inputs to use compressed TurboQuant state")
+                return
+            }
+        }
+
+        @Test func testTurboQuantUpdateFailureUsesPackedFallbackWhenPolicyAllows() throws {
+            guard TurboQuantKernelAvailability.current.supportsMetalPolarQJLAttention else {
+                return
+            }
+
+            let cache = TurboQuantKVCache(
+                backend: .metalPolarQJL,
+                fallbackPolicy: .compressedDecodeAllowed,
+                residentBudgetBytes: 1
+            )
+            let keys = MLXArray.ones([1, 2, 1, 64], dtype: .float32)
+            let values = MLXArray.ones([1, 2, 1, 64], dtype: .float32)
+            let queries = MLXArray.ones([1, 4, 1, 64], dtype: .float32)
+
+            let result = try attentionWithCacheUpdateReturningStateThrowing(
+                queries: queries,
+                keys: keys,
+                values: values,
+                cache: cache,
+                scale: 0.125
+            )
+
+            #expect(result.output.shape == [1, 4, 1, 64])
+            guard case .quantized = result.state else {
+                Issue.record("Expected compressed update failure to fall back to packed state")
+                return
+            }
+            #expect(cache.fallbackResults.last?.toPath == .mlxPackedFallback)
+        }
+
+        @Test func testTurboQuantCompressedDecodePolicyDoesNotKeepPackedFallbackHot() throws {
+            guard TurboQuantKernelAvailability.current.supportsMetalPolarQJLAttention else {
+                return
+            }
+
+            let cache = TurboQuantKVCache(
+                backend: .metalPolarQJL,
+                fallbackPolicy: .compressedDecodeAllowed
+            )
+            let keys = MLXArray.ones([1, 2, 2, 64], dtype: .float32)
+            let values = MLXArray.ones([1, 2, 2, 64], dtype: .float32)
+            _ = try cache.updateCompressed(keys: keys, values: values)
+            _ = try #require(cache.getQuantizedState())
+            #expect(cache.cacheFootprint.packedFallbackBytes > 0)
+
+            let nextKeys = MLXArray.ones([1, 2, 1, 64], dtype: .float32)
+            let nextValues = MLXArray.ones([1, 2, 1, 64], dtype: .float32)
+            _ = try cache.updateCompressed(keys: nextKeys, values: nextValues)
+
+            #expect(cache.cacheFootprint.packedFallbackBytes == 0)
+        }
+
         @Test func testConservativeTurboQuantUsesExactRawShadowForQwenLikeDecode() throws {
             guard TurboQuantKernelAvailability.current.supportsMetalPolarQJLAttention else {
                 return
@@ -1131,6 +1211,38 @@ extension MLXRuntimeSwiftTests {
             #expect(means[1] - means[0] > 4)
             #expect(means[2] - means[1] > 4)
             #expect(means[3] - means[2] > 4)
+        }
+
+        @Test func testRotatingTurboQuantSingleTokenWindowMaskMatchesRawRotatingCache() throws {
+            guard TurboQuantKernelAvailability.current.supportsMetalPolarQJLAttention else {
+                return
+            }
+
+            let rawCache = RotatingKVCache(maxSize: 8, keep: 2)
+            let turboCache = RotatingTurboQuantKVCache(
+                maxSize: 8,
+                keep: 2,
+                backend: .metalPolarQJL
+            )
+
+            for token in 0 ..< 10 {
+                let keys = MLXArray.ones([1, 2, 1, 64], dtype: .float32) * Float(token + 1)
+                let values = keys + 0.25
+                _ = rawCache.update(keys: keys, values: values)
+                _ = try turboCache.updateCompressed(keys: keys, values: values)
+            }
+
+            let rawMask = rawCache.makeMask(n: 1, windowSize: 4, returnArray: false)
+            let turboMask = turboCache.makeMask(n: 1, windowSize: 4, returnArray: false)
+            guard case .array(let rawArray) = rawMask,
+                case .array(let turboArray) = turboMask
+            else {
+                Issue.record("Expected wrapped single-token masks to materialize arrays")
+                return
+            }
+
+            #expect(rawArray.shape == turboArray.shape)
+            #expect(rawArray.asArray(Bool.self) == turboArray.asArray(Bool.self))
         }
 
         @Test func testTurboQuantCompressedCacheExpansionKeepsCompactUnusedBitsets() throws {

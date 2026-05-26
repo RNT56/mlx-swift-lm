@@ -1488,11 +1488,15 @@ public final class TurboQuantKVCache: QuantizedKVCache, TurboQuantCompressedKVCa
         }
         currentValues.scales[.ellipsis, range, 0..., 0...] = encodedValues.scales
 
-        if turboQuantSupportsPackedFallback(keys: keys, values: values, groupSize: groupSize),
+        if fallbackPolicy == .packedAllowed,
+            turboQuantSupportsPackedFallback(keys: keys, values: values, groupSize: groupSize),
             super.getQuantizedState() != nil
         {
             _ = super.updateQuantized(keys: keys, values: values)
         } else {
+            if activeBackend == .metalPolarQJL, !super.state.isEmpty {
+                super.state = []
+            }
             offset += tokenCount
         }
         currentKeys.layout.logicalLength = offset
@@ -2667,7 +2671,12 @@ public final class RotatingTurboQuantKVCache: BaseKVCache, QuantizedKVCacheProto
         guard let windowSize else { return .none }
         if offset >= windowSize, maxCacheSize > windowSize {
             let maskSize = offset < maxCacheSize ? offset + 1 : maxCacheSize
-            return .array(MLXArray(0 ..< Int32(maskSize)) .>= Int32(maskSize - windowSize))
+            let mask = MLXArray(0 ..< Int32(maskSize)) .>= Int32(maskSize - windowSize)
+            var currentWriteIndex = writeIndex
+            if currentWriteIndex >= maxCacheSize {
+                currentWriteIndex = 0
+            }
+            return .array(roll(mask, shift: currentWriteIndex + 1))
         }
         return .none
     }

@@ -68,15 +68,22 @@ class Gemma2Attention: Module {
         queries = applyRotaryPosition(rope, to: queries, offset: offset)
         keys = applyRotaryPosition(rope, to: keys, offset: offset)
 
+        let turboQuantQueries = cache is TurboQuantCompressedKVCacheProtocol
+            ? queries.contiguous(stream: .gpu) : queries
+        let turboQuantKeys = cache is TurboQuantCompressedKVCacheProtocol
+            ? keys.contiguous(stream: .gpu) : keys
+        let turboQuantValues = cache is TurboQuantCompressedKVCacheProtocol
+            ? values.contiguous(stream: .gpu) : values
+
         if let output = try withTurboQuantCompressedCacheUpdateThrowing(
-            queries: queries,
-            keys: keys,
-            values: values,
+            queries: turboQuantQueries,
+            keys: turboQuantKeys,
+            values: turboQuantValues,
             cache: cache,
             mask: .none,
             { compressedKeys, compressedValues, _ in
                 var scores = try turboQuantMetalQK(
-                    queries: queries,
+                    queries: turboQuantQueries,
                     keyCode: compressedKeys,
                     scale: self.scale,
                     mask: .none
@@ -89,7 +96,7 @@ class Gemma2Attention: Module {
                 return try turboQuantMetalAV(
                     attentionWeights: scores,
                     valueCode: compressedValues,
-                    outputDType: queries.dtype
+                    outputDType: turboQuantQueries.dtype
                 )
             }
         ) {

@@ -47,6 +47,24 @@ public enum AttentionKVState {
     }
 }
 
+private struct TurboQuantAttentionInputs {
+    var queries: MLXArray
+    var keys: MLXArray
+    var values: MLXArray
+}
+
+private func canonicalTurboQuantInputs(
+    queries: MLXArray,
+    keys: MLXArray,
+    values: MLXArray
+) -> TurboQuantAttentionInputs {
+    TurboQuantAttentionInputs(
+        queries: queries.contiguous(stream: .gpu),
+        keys: keys.contiguous(stream: .gpu),
+        values: values.contiguous(stream: .gpu)
+    )
+}
+
 public func attentionKeyLengthAfterUpdate(cache: KVCache?, keys: MLXArray) -> Int {
     let updatedLength = (cache?.offset ?? 0) + keys.dim(2)
     if let maxSize = cache?.maxSize {
@@ -95,11 +113,12 @@ public func withTurboQuantCompressedCacheUpdateThrowing<T>(
     )
         throws -> T
 ) throws -> T? {
+    let canonical = canonicalTurboQuantInputs(queries: queries, keys: keys, values: values)
     guard var turboQuantCache = cache as? TurboQuantCompressedKVCacheProtocol,
         turboQuantCache.supportsCompressedAttention(
-            queries: queries,
-            keys: keys,
-            values: values,
+            queries: canonical.queries,
+            keys: canonical.keys,
+            values: canonical.values,
             mask: mask
         )
     else {
@@ -118,8 +137,8 @@ public func withTurboQuantCompressedCacheUpdateThrowing<T>(
     }
     do {
         let (compressedKeys, compressedValues) = try turboQuantCache.updateCompressed(
-            keys: keys,
-            values: values
+            keys: canonical.keys,
+            values: canonical.values
         )
         try turboQuantCache.validateCompressedState(context: "compressed cache update")
         return try body(compressedKeys, compressedValues, turboQuantCache)
@@ -165,6 +184,50 @@ public func withTurboQuantCompressedCacheUpdate<T>(
         }
         return nil
     }
+}
+
+private func turboQuantPackedUpdateFallbackAfterFailure(
+    queries: MLXArray,
+    keys: MLXArray,
+    values: MLXArray,
+    cache: any TurboQuantCompressedKVCacheProtocol,
+    scale: Float,
+    mask: MLXFast.ScaledDotProductAttentionMaskMode,
+    sinks: MLXArray?,
+    failure: Error
+) -> (output: MLXArray, state: AttentionKVState)? {
+    guard cache.fallbackPolicy == .packedAllowed || cache.fallbackPolicy == .compressedDecodeAllowed,
+        let quantizedCache = cache as? any QuantizedKVCacheProtocol
+    else {
+        return nil
+    }
+
+    let (quantizedKeys, quantizedValues) = quantizedCache.updateQuantized(keys: keys, values: values)
+    let reason = "compressed cache update failed; using packed fallback: \(failure)"
+    cache.recordFallback(
+        TurboQuantFallbackResult(
+            fromPath: cache.attentionDiagnostics.activeAttentionPath,
+            toPath: .mlxPackedFallback,
+            policy: .packedAllowed,
+            reason: reason,
+            isSemanticallyExact: false
+        )
+    )
+    let output = quantizedScaledDotProductAttention(
+        queries: queries,
+        quantizedKeys: quantizedKeys,
+        quantizedValues: quantizedValues,
+        scale: scale,
+        mask: mask,
+        sinks: sinks,
+        groupSize: quantizedCache.groupSize,
+        bits: quantizedCache.bits,
+        mode: quantizedCache.mode
+    )
+    return (
+        output,
+        .quantized(keys: quantizedKeys, values: quantizedValues, cache: quantizedCache)
+    )
 }
 
 func packedQuantizedAttentionFallback(
@@ -479,14 +542,15 @@ private func turboQuantCompressedPrefillAttentionThrowing(
     mask: MLXFast.ScaledDotProductAttentionMaskMode,
     sinks: MLXArray?
 ) throws -> (output: MLXArray, state: AttentionKVState)? {
+    let canonical = canonicalTurboQuantInputs(queries: queries, keys: keys, values: values)
     guard queries.dim(2) > 1, queries.dim(2) == keys.dim(2) else {
         return nil
     }
     guard var turboQuantCache = cache as? TurboQuantCompressedKVCacheProtocol,
         turboQuantCache.supportsCompressedAttention(
-            queries: queries,
-            keys: keys,
-            values: values,
+            queries: canonical.queries,
+            keys: canonical.keys,
+            values: canonical.values,
             mask: mask
         )
     else {
@@ -505,8 +569,8 @@ private func turboQuantCompressedPrefillAttentionThrowing(
     }
     do {
         let (compressedKeys, compressedValues) = try turboQuantCache.updateCompressed(
-            keys: keys,
-            values: values
+            keys: canonical.keys,
+            values: canonical.values
         )
         try turboQuantCache.validateCompressedState(context: "compressed prefill append")
         let state = AttentionKVState.turboQuant(
@@ -519,9 +583,9 @@ private func turboQuantCompressedPrefillAttentionThrowing(
             // The exact raw prefill output does not consume the compressed writes, so
             // schedule them explicitly to avoid carrying raw prompt tensors into decode.
             let output = exactScaledDotProductAttention(
-                queries: queries,
-                keys: keys,
-                values: values,
+                queries: canonical.queries,
+                keys: canonical.keys,
+                values: canonical.values,
                 scale: scale,
                 mask: mask,
                 sinks: sinks
@@ -543,20 +607,32 @@ private func turboQuantCompressedPrefillAttentionThrowing(
         }
 
         let output = try turboQuantAttentionFallbackLadder(
-            queries: queries,
+            queries: canonical.queries,
             keyCode: compressedKeys,
             valueCode: compressedValues,
             cache: turboQuantCache,
             scale: scale,
             mask: mask,
             sinks: sinks,
-            rawExactKeys: keys,
-            rawExactValues: values,
+            rawExactKeys: canonical.keys,
+            rawExactValues: canonical.values,
             rawExactReason: "compressed prefill failed; using exact raw chunk output"
         )
         return (output, state)
     } catch {
         restorePreviousState()
+        if let fallback = turboQuantPackedUpdateFallbackAfterFailure(
+            queries: canonical.queries,
+            keys: canonical.keys,
+            values: canonical.values,
+            cache: turboQuantCache,
+            scale: scale,
+            mask: mask,
+            sinks: sinks,
+            failure: turboQuantRuntimeFailure(error)
+        ) {
+            return fallback
+        }
         turboQuantCache.recordCompressedAttentionFailure(String(describing: error))
         throw turboQuantRuntimeFailure(error)
     }
@@ -615,6 +691,7 @@ public func attentionWithKVStateThrowing(
 
     case .turboQuant(let keys, let values, let cache):
         do {
+            let queries = queries.contiguous(stream: .gpu)
             return try turboQuantAttentionFallbackLadder(
                 queries: queries,
                 keyCode: keys,
@@ -811,10 +888,15 @@ public func attentionWithCacheUpdateReturningStateThrowing(
             state
         )
     }
+    let useTurboQuantInputs = cache is TurboQuantCompressedKVCacheProtocol
+    let turboQuantInputs =
+        useTurboQuantInputs
+        ? canonicalTurboQuantInputs(queries: queries, keys: keys, values: values)
+        : TurboQuantAttentionInputs(queries: queries, keys: keys, values: values)
     if let prefill = try turboQuantCompressedPrefillAttentionThrowing(
-        queries: queries,
-        keys: keys,
-        values: values,
+        queries: turboQuantInputs.queries,
+        keys: turboQuantInputs.keys,
+        values: turboQuantInputs.values,
         cache: cache,
         scale: scale,
         mask: mask,
@@ -824,9 +906,9 @@ public func attentionWithCacheUpdateReturningStateThrowing(
     }
     if var turboQuantCache = cache as? TurboQuantCompressedKVCacheProtocol,
         turboQuantCache.supportsCompressedAttention(
-            queries: queries,
-            keys: keys,
-            values: values,
+            queries: turboQuantInputs.queries,
+            keys: turboQuantInputs.keys,
+            values: turboQuantInputs.values,
             mask: mask
         )
     {
@@ -842,8 +924,8 @@ public func attentionWithCacheUpdateReturningStateThrowing(
         }
         do {
             let (compressedKeys, compressedValues) = try turboQuantCache.updateCompressed(
-                keys: keys,
-                values: values
+                keys: turboQuantInputs.keys,
+                values: turboQuantInputs.values
             )
             try turboQuantCache.validateCompressedState(context: "decode compressed update")
             let state = AttentionKVState.turboQuant(
@@ -852,7 +934,7 @@ public func attentionWithCacheUpdateReturningStateThrowing(
                 cache: turboQuantCache
             )
             let output = try turboQuantAttentionFallbackLadder(
-                queries: queries,
+                queries: turboQuantInputs.queries,
                 keyCode: compressedKeys,
                 valueCode: compressedValues,
                 cache: turboQuantCache,
@@ -863,11 +945,26 @@ public func attentionWithCacheUpdateReturningStateThrowing(
             return (output, state)
         } catch {
             restorePreviousState()
+            if let fallback = turboQuantPackedUpdateFallbackAfterFailure(
+                queries: turboQuantInputs.queries,
+                keys: turboQuantInputs.keys,
+                values: turboQuantInputs.values,
+                cache: turboQuantCache,
+                scale: scale,
+                mask: mask,
+                sinks: sinks,
+                failure: turboQuantRuntimeFailure(error)
+            ) {
+                return fallback
+            }
             turboQuantCache.recordCompressedAttentionFailure(String(describing: error))
             throw turboQuantRuntimeFailure(error)
         }
     }
     if let quantizedKVCache = cache as? QuantizedKVCacheProtocol {
+        let keys = useTurboQuantInputs ? turboQuantInputs.keys : keys
+        let values = useTurboQuantInputs ? turboQuantInputs.values : values
+        let queries = useTurboQuantInputs ? turboQuantInputs.queries : queries
         let (quantizedKeys, quantizedValues) = quantizedKVCache.updateQuantized(
             keys: keys, values: values)
         let state = AttentionKVState.quantized(

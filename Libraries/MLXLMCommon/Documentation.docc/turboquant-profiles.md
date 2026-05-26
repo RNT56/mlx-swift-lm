@@ -146,6 +146,13 @@ matrix is a decode-throughput gate at query length 1; use explicit
 the JSON includes the model revision, device, OS, latency, memory, and quality
 data needed to reproduce the decision.
 
+Production decode hardening keeps normal model attention layouts recoverable:
+Q/K/V tensors are canonicalized before compressed cache encode and compressed
+attention, compressed-update failures fall back to packed quantized attention
+when the selected policy allows it, compressed-decode profiles do not keep packed
+fallback caches resident on the hot path, and rotating single-token window masks
+match the raw rotating cache mask order after wraparound.
+
 The release matrix is intentionally capped at the current production throughput
 contexts. Run `swift run TurboQuantQwenProof --contexts 32768 --query-lengths 1
 --schemes turbo8 --dtype float16` as a stress gate; 32K should not be promoted
