@@ -140,7 +140,6 @@ public func withTurboQuantCompressedCacheUpdateThrowing<T>(
             keys: canonical.keys,
             values: canonical.values
         )
-        try turboQuantCache.validateCompressedState(context: "compressed cache update")
         return try body(compressedKeys, compressedValues, turboQuantCache)
     } catch {
         restorePreviousState()
@@ -333,13 +332,16 @@ private func turboQuantAttentionFallbackLadder(
     sinks: MLXArray?,
     rawExactKeys: MLXArray? = nil,
     rawExactValues: MLXArray? = nil,
-    rawExactReason: String? = nil
+    rawExactReason: String? = nil,
+    stateAlreadyValidated: Bool = false
 ) throws -> MLXArray {
     let adjustedMask = adjustedAttentionMask(
         mask,
         keyLength: keyCode.layout.logicalLength
     )
-    try cache.validateCompressedState(context: "attention fallback ladder")
+    if !stateAlreadyValidated {
+        try cache.validateCompressedState(context: "attention fallback ladder")
+    }
 
     func rawExactOutput(reason: String) -> MLXArray? {
         if let exact = cache.exactRawStateIfComplete() {
@@ -542,10 +544,10 @@ private func turboQuantCompressedPrefillAttentionThrowing(
     mask: MLXFast.ScaledDotProductAttentionMaskMode,
     sinks: MLXArray?
 ) throws -> (output: MLXArray, state: AttentionKVState)? {
-    let canonical = canonicalTurboQuantInputs(queries: queries, keys: keys, values: values)
     guard queries.dim(2) > 1, queries.dim(2) == keys.dim(2) else {
         return nil
     }
+    let canonical = canonicalTurboQuantInputs(queries: queries, keys: keys, values: values)
     guard var turboQuantCache = cache as? TurboQuantCompressedKVCacheProtocol,
         turboQuantCache.supportsCompressedAttention(
             queries: canonical.queries,
@@ -572,7 +574,6 @@ private func turboQuantCompressedPrefillAttentionThrowing(
             keys: canonical.keys,
             values: canonical.values
         )
-        try turboQuantCache.validateCompressedState(context: "compressed prefill append")
         let state = AttentionKVState.turboQuant(
             keys: compressedKeys,
             values: compressedValues,
@@ -616,7 +617,8 @@ private func turboQuantCompressedPrefillAttentionThrowing(
             sinks: sinks,
             rawExactKeys: canonical.keys,
             rawExactValues: canonical.values,
-            rawExactReason: "compressed prefill failed; using exact raw chunk output"
+            rawExactReason: "compressed prefill failed; using exact raw chunk output",
+            stateAlreadyValidated: true
         )
         return (output, state)
     } catch {
@@ -927,7 +929,6 @@ public func attentionWithCacheUpdateReturningStateThrowing(
                 keys: turboQuantInputs.keys,
                 values: turboQuantInputs.values
             )
-            try turboQuantCache.validateCompressedState(context: "decode compressed update")
             let state = AttentionKVState.turboQuant(
                 keys: compressedKeys,
                 values: compressedValues,
@@ -940,7 +941,8 @@ public func attentionWithCacheUpdateReturningStateThrowing(
                 cache: turboQuantCache,
                 scale: scale,
                 mask: mask,
-                sinks: sinks
+                sinks: sinks,
+                stateAlreadyValidated: true
             )
             return (output, state)
         } catch {

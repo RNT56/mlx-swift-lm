@@ -29,6 +29,7 @@ struct QwenProofCase: Codable {
     var queryHeads: Int
     var contextLength: Int
     var reservedCapacityLength: Int
+    var blockParallelTokenBlockSize: Int?
     var queryLength: Int
 }
 
@@ -114,6 +115,7 @@ struct QwenProofReport: Codable {
     var minExtendedTokensPerSecond: Double
     var shortContextPlainKVThreshold: Int
     var requestedReservedCapacityLength: Int?
+    var requestedBlockParallelTokenBlockSize: Int?
     var productionContexts: [Int]
     var largeContextExperimentContexts: [Int]
     var requireLargeContextExperimentGates: Bool
@@ -504,6 +506,7 @@ func runCase(
     minExtendedTokensPerSecond: Double,
     shortContextPlainKVThreshold: Int,
     availability: TurboQuantKernelAvailability,
+    blockParallelTokenBlockSize: Int? = nil,
     attentionPath: QwenProofAttentionPath = .auto
 ) -> QwenProofResult {
     let caseID =
@@ -520,6 +523,7 @@ func runCase(
             queryHeads: 16,
             contextLength: contextLength,
             reservedCapacityLength: reservedCapacityLength,
+            blockParallelTokenBlockSize: blockParallelTokenBlockSize,
             queryLength: queryLength
         )
         return QwenProofResult(
@@ -554,6 +558,7 @@ func runCase(
         queryHeads: queryHeads,
         contextLength: contextLength,
         reservedCapacityLength: reservedCapacityLength,
+        blockParallelTokenBlockSize: blockParallelTokenBlockSize,
         queryLength: queryLength
     )
 
@@ -683,7 +688,8 @@ func runCase(
                 scale: scale,
                 mask: .causal,
                 preferOnlineFused: preferOnline,
-                kernelProfile: cache.attentionDiagnostics.selectedKernelProfile
+                kernelProfile: cache.attentionDiagnostics.selectedKernelProfile,
+                blockParallelTokenBlockSize: blockParallelTokenBlockSize
             )
         }
         let quality = qualityGate(
@@ -806,6 +812,7 @@ let speedParityRatio = argumentValue("--speed-parity-ratio", default: 1.0)
 let minExtendedTokensPerSecond = argumentValue("--min-extended-tokens-per-second", default: 20.0)
 let shortContextPlainKVThreshold = argumentValue("--plain-route-threshold", default: 4096)
 let reservedCapacityOverride = optionalPositiveArgumentValue("--reserved-capacity")
+let blockParallelTokenBlockSize = optionalPositiveArgumentValue("--block-tokens")
 let cooldownMilliseconds = argumentValue("--cooldown-ms", default: 0)
 let contexts = argumentValues(
     "--contexts",
@@ -892,6 +899,7 @@ for profile in representativeProfiles {
                             minExtendedTokensPerSecond: minExtendedTokensPerSecond,
                             shortContextPlainKVThreshold: shortContextPlainKVThreshold,
                             availability: availability,
+                            blockParallelTokenBlockSize: blockParallelTokenBlockSize,
                             attentionPath: attentionPath
                         )
                     )
@@ -925,7 +933,7 @@ let strictPassed =
     !strictGateResults.isEmpty
     && strictGateResults.allSatisfy { $0.status == "ok" }
 let report = QwenProofReport(
-    schemaVersion: 3,
+    schemaVersion: 4,
     generatedAt: ISO8601DateFormatter().string(from: Date()),
     iterations: iterations,
     warmupIterations: warmupIterations,
@@ -934,6 +942,7 @@ let report = QwenProofReport(
     minExtendedTokensPerSecond: minExtendedTokensPerSecond,
     shortContextPlainKVThreshold: shortContextPlainKVThreshold,
     requestedReservedCapacityLength: reservedCapacityOverride,
+    requestedBlockParallelTokenBlockSize: blockParallelTokenBlockSize,
     productionContexts: uniqueSorted(contexts),
     largeContextExperimentContexts: uniqueSorted(largeContextExperimentContexts),
     requireLargeContextExperimentGates: requireLargeContextExperimentGates,
