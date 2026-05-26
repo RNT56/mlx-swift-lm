@@ -159,8 +159,20 @@ match the raw rotating cache mask order after wraparound.
 The release matrix is intentionally capped at the current production throughput
 contexts. Run `swift run TurboQuantQwenProof --contexts 32768 --query-lengths 1
 --schemes turbo8,turbo4v2,turbo3_5 --dtype float16 --strict` as the 32K
-production gate; keep 64K and higher as stress targets until their p95-latency
-token rate clears the configured threshold on target devices.
+production gate. Use `--experimental-contexts 65536,131072,262144` to append
+64K/128K/256K proof rows for stress evidence without turning them into
+production certification gates. The proof report labels those rows with
+`gateScope = "largeContextExperiment"`, `strictGateRequired = false`, and
+`certificationStatus = "experiment-only-not-production-certified"`; pass
+`--require-experimental-gates` only when intentionally promoting those rows into
+the strict gate set. Use `--warmup` to keep first-use Metal compilation outside
+reported p50/p95 timing.
+
+The pinned core `cff5d0ad87f79585ac778224c21a5278d25a4e79` adds a Mac-gated
+GQA block-partials fused kernel for Qwen-style grouped-query decode. On the
+local Mac proof machine it keeps 32K production rows green for Turbo8,
+Turbo4V2, and Turbo3.5; 64K remains an experiment row because p95 is still not
+consistently above the 20 tok/s floor under sustained load.
 
 ## Converted Weights
 

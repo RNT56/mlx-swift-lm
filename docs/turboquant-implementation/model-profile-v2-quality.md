@@ -149,3 +149,23 @@ swift run TurboQuantModelBenchmark --iterations 1 --head-dims 64 --contexts 1 --
 ```
 
 All four commands passed locally on 2026-05-25. The benchmark run emitted aggregate and per-result quality blocks; it is still evidence input, not a product compatibility claim.
+
+## Qwen Larger-Context Proof Rows
+
+`TurboQuantQwenProof` keeps `--contexts` as the production strict-gate matrix.
+Use `--experimental-contexts 65536,131072,262144` for 64K/128K/256K stress
+experiments that should be reported but not production-certified. Experimental
+rows are emitted with `gateScope = "largeContextExperiment"`,
+`strictGateRequired = false`, and
+`certificationStatus = "experiment-only-not-production-certified"`. They are
+excluded from `summary.strictPassed` unless `--require-experimental-gates` is
+specified. `--warmup` controls unmeasured per-case warmup iterations so Metal
+compile and first-use cache effects stay out of reported p50/p95 timing. These
+fields are part of `TurboQuantQwenProof` report schema v2.
+
+With `mlx-swift` `cff5d0ad87f79585ac778224c21a5278d25a4e79`, the Mac proof
+uses the grouped-query block fused kernel for Qwen decode. Local results keep
+32K production proof rows above the 20 tok/s p95 gate for Turbo8, Turbo4V2, and
+Turbo3.5. The 64K row remains experiment-only: Turbo4V2 p50 was around 20 tok/s,
+but p95 was still below the promotion floor during the sustained pinned-package
+run, so 64K is not production-certified.

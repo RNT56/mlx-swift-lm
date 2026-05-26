@@ -7,9 +7,15 @@ struct QwenProofProfileCoverage: Codable {
     var profileID: String
     var architecture: String?
     var modelTypes: [String]
+    var supportedContextLengths: [Int]
     var safeContextLength: Int?
     var preferredScheme: String
     var precisionCandidates: [String]
+}
+
+enum QwenProofGateScope: String, Codable {
+    case production
+    case largeContextExperiment
 }
 
 struct QwenProofCase: Codable {
@@ -17,6 +23,7 @@ struct QwenProofCase: Codable {
     var profileID: String
     var scheme: String
     var dtype: String
+    var gateScope: QwenProofGateScope
     var headDimension: Int
     var kvHeads: Int
     var queryHeads: Int
@@ -66,6 +73,9 @@ struct QwenProofResult: Codable {
     var id: String
     var status: String
     var benchmarkCase: QwenProofCase
+    var gateScope: QwenProofGateScope
+    var strictGateRequired: Bool
+    var certificationStatus: String
     var selectedAttentionPath: String?
     var precisionStatus: String
     var quality: QwenProofQuality?
@@ -79,6 +89,12 @@ struct QwenProofSummary: Codable {
     var ok: Int
     var skipped: Int
     var failed: Int
+    var productionOk: Int
+    var productionSkipped: Int
+    var productionFailed: Int
+    var largeContextExperimentOk: Int
+    var largeContextExperimentSkipped: Int
+    var largeContextExperimentFailed: Int
     var strictPassed: Bool
 }
 
@@ -86,10 +102,14 @@ struct QwenProofReport: Codable {
     var schemaVersion: Int
     var generatedAt: String
     var iterations: Int
+    var warmupIterations: Int
     var dtype: String
     var speedParityRatio: Double
     var minExtendedTokensPerSecond: Double
     var shortContextPlainKVThreshold: Int
+    var productionContexts: [Int]
+    var largeContextExperimentContexts: [Int]
+    var requireLargeContextExperimentGates: Bool
     var device: TurboQuantDeviceCapabilities
     var supportsMetalCodec: Bool
     var supportsMetalAttention: Bool
@@ -168,6 +188,10 @@ func argumentValues(_ name: String, default defaultValue: [Int]) -> [Int] {
     return values.isEmpty ? defaultValue : values
 }
 
+func uniqueSorted(_ values: [Int]) -> [Int] {
+    Array(Set(values)).sorted()
+}
+
 func argumentStrings(_ name: String, default defaultValue: [String]) -> [String] {
     let arguments = CommandLine.arguments
     guard let index = arguments.firstIndex(of: name), arguments.indices.contains(index + 1) else {
@@ -233,6 +257,15 @@ func dtypeName(_ dtype: DType) -> String {
     }
 }
 
+func certificationStatus(for gateScope: QwenProofGateScope) -> String {
+    switch gateScope {
+    case .production:
+        return "production-gated"
+    case .largeContextExperiment:
+        return "experiment-only-not-production-certified"
+    }
+}
+
 func hasFlag(_ name: String) -> Bool {
     CommandLine.arguments.contains(name)
 }
@@ -251,17 +284,25 @@ struct QwenProofTiming {
     var output: MLXArray
 }
 
-func timed(iterations: Int, _ body: () throws -> MLXArray) throws -> QwenProofTiming {
-    let warmup = try body()
-    eval(warmup)
-    var last = warmup
+func timed(
+    iterations: Int,
+    warmupIterations: Int,
+    _ body: () throws -> MLXArray
+) throws -> QwenProofTiming {
+    var last: MLXArray?
+    for _ in 0 ..< max(0, warmupIterations) {
+        let warmup = try body()
+        eval(warmup)
+        last = warmup
+    }
     let measuredIterations = max(1, iterations)
     var samples = [Double]()
     samples.reserveCapacity(measuredIterations)
     for _ in 0 ..< measuredIterations {
         let start = Date.timeIntervalSinceReferenceDate
-        last = try body()
-        eval(last)
+        let output = try body()
+        eval(output)
+        last = output
         samples.append(Date.timeIntervalSinceReferenceDate - start)
     }
     let averageSeconds = samples.reduce(0, +) / Double(measuredIterations)
@@ -269,7 +310,7 @@ func timed(iterations: Int, _ body: () throws -> MLXArray) throws -> QwenProofTi
         averageSeconds: averageSeconds,
         p50Seconds: percentile(samples, percentile: 0.50),
         p95Seconds: percentile(samples, percentile: 0.95),
-        output: last
+        output: last!
     )
 }
 
@@ -430,7 +471,10 @@ func runCase(
     contextLength: Int,
     queryLength: Int,
     dtype: DType,
+    gateScope: QwenProofGateScope,
+    strictGateRequired: Bool,
     iterations: Int,
+    warmupIterations: Int,
     speedParityRatio: Double,
     minExtendedTokensPerSecond: Double,
     shortContextPlainKVThreshold: Int,
@@ -445,6 +489,7 @@ func runCase(
             profileID: profile.id,
             scheme: scheme.rawValue,
             dtype: dtypeName(dtype),
+            gateScope: gateScope,
             headDimension: 256,
             kvHeads: 4,
             queryHeads: 16,
@@ -455,6 +500,9 @@ func runCase(
             id: benchmarkCase.id,
             status: "skipped",
             benchmarkCase: benchmarkCase,
+            gateScope: gateScope,
+            strictGateRequired: strictGateRequired,
+            certificationStatus: certificationStatus(for: gateScope),
             selectedAttentionPath: nil,
             precisionStatus: "unsupported",
             quality: nil,
@@ -474,6 +522,7 @@ func runCase(
         profileID: profile.id,
         scheme: scheme.rawValue,
         dtype: dtypeName(dtype),
+        gateScope: gateScope,
         headDimension: headDimension,
         kvHeads: kvHeads,
         queryHeads: queryHeads,
@@ -486,6 +535,9 @@ func runCase(
             id: benchmarkCase.id,
             status: "skipped",
             benchmarkCase: benchmarkCase,
+            gateScope: gateScope,
+            strictGateRequired: strictGateRequired,
+            certificationStatus: certificationStatus(for: gateScope),
             selectedAttentionPath: nil,
             precisionStatus: candidate?.status.rawValue ?? "unknown",
             quality: nil,
@@ -533,6 +585,9 @@ func runCase(
                 id: benchmarkCase.id,
                 status: "skipped",
                 benchmarkCase: benchmarkCase,
+                gateScope: gateScope,
+                strictGateRequired: strictGateRequired,
+                certificationStatus: certificationStatus(for: gateScope),
                 selectedAttentionPath: cache.attentionDiagnostics.activeAttentionPath.rawValue,
                 precisionStatus: candidate?.status.rawValue ?? "unknown",
                 quality: nil,
@@ -557,7 +612,7 @@ func runCase(
             preferOnlineFused: preferOnline,
             availability: availability
         )
-        let plainTiming = try timed(iterations: iterations) {
+        let plainTiming = try timed(iterations: iterations, warmupIterations: warmupIterations) {
             MLXFast.scaledDotProductAttention(
                 queries: queries,
                 keys: keys,
@@ -566,7 +621,10 @@ func runCase(
                 mask: .causal
             )
         }
-        let compressedTiming = try timed(iterations: iterations) {
+        let compressedTiming = try timed(
+            iterations: iterations,
+            warmupIterations: warmupIterations
+        ) {
             try turboQuantMetalScaledDotProductAttention(
                 queries: queries,
                 keyCode: compressedKeys,
@@ -647,6 +705,9 @@ func runCase(
             id: benchmarkCase.id,
             status: status,
             benchmarkCase: benchmarkCase,
+            gateScope: gateScope,
+            strictGateRequired: strictGateRequired,
+            certificationStatus: certificationStatus(for: gateScope),
             selectedAttentionPath: selectedAttentionPath,
             precisionStatus: candidate?.status.rawValue ?? "unknown",
             quality: quality,
@@ -660,6 +721,9 @@ func runCase(
             id: benchmarkCase.id,
             status: "failed",
             benchmarkCase: benchmarkCase,
+            gateScope: gateScope,
+            strictGateRequired: strictGateRequired,
+            certificationStatus: certificationStatus(for: gateScope),
             selectedAttentionPath: nil,
             precisionStatus: candidate?.status.rawValue ?? "unknown",
             quality: nil,
@@ -672,6 +736,7 @@ func runCase(
 }
 
 let iterations = argumentValue("--iterations", default: 5)
+let warmupIterations = argumentValue("--warmup", default: 1)
 let releaseMatrix = hasFlag("--release-matrix")
 let pathCompare = hasFlag("--path-compare")
 let strict = hasFlag("--strict")
@@ -684,6 +749,11 @@ let contexts = argumentValues(
     "--contexts",
     default: releaseMatrix ? [8192, 16384] : [8192]
 )
+let largeContextExperimentContexts = argumentValues(
+    "--experimental-contexts",
+    default: []
+)
+let requireLargeContextExperimentGates = hasFlag("--require-experimental-gates")
 let queryLengths = argumentValues(
     "--query-lengths",
     default: releaseMatrix ? [1] : [1, 4]
@@ -716,6 +786,7 @@ let profileCoverage = qwenProfiles.map { profile in
         profileID: profile.id,
         architecture: profile.architecture,
         modelTypes: profile.modelTypes,
+        supportedContextLengths: profile.supportedContextLengths,
         safeContextLength: profile.safeContextLength,
         preferredScheme: profile.recommendedScheme.rawValue,
         precisionCandidates: profile.precisionCandidates.map {
@@ -727,9 +798,15 @@ let profileCoverage = qwenProfiles.map { profile in
 var results = [QwenProofResult]()
 let requestedProfileIDSet = Set(requestedProfileIDs)
 let representativeProfiles = qwenProfiles.filter { requestedProfileIDSet.contains($0.id) }
+let contextMatrix =
+    uniqueSorted(contexts).map { (context: $0, gateScope: QwenProofGateScope.production) }
+    + uniqueSorted(largeContextExperimentContexts)
+        .filter { !contexts.contains($0) }
+        .map { (context: $0, gateScope: QwenProofGateScope.largeContextExperiment) }
 for profile in representativeProfiles {
     for scheme in schemes {
-        for context in contexts {
+        for entry in contextMatrix {
+            let context = entry.context
             guard context <= (profile.safeContextLength ?? context) else { continue }
             for queryLength in queryLengths {
                 for attentionPath in attentionPaths {
@@ -740,7 +817,11 @@ for profile in representativeProfiles {
                             contextLength: context,
                             queryLength: queryLength,
                             dtype: proofDType,
+                            gateScope: entry.gateScope,
+                            strictGateRequired: entry.gateScope == .production
+                                || requireLargeContextExperimentGates,
                             iterations: iterations,
+                            warmupIterations: warmupIterations,
                             speedParityRatio: speedParityRatio,
                             minExtendedTokensPerSecond: minExtendedTokensPerSecond,
                             shortContextPlainKVThreshold: shortContextPlainKVThreshold,
@@ -761,15 +842,34 @@ for profile in representativeProfiles {
 let okCount = results.filter { $0.status == "ok" }.count
 let skippedCount = results.filter { $0.status == "skipped" }.count
 let failedCount = results.filter { $0.status == "failed" }.count
-let strictPassed = failedCount == 0 && skippedCount == 0 && !results.isEmpty
+let productionResults = results.filter { $0.gateScope == .production }
+let largeContextExperimentResults = results.filter { $0.gateScope == .largeContextExperiment }
+let productionOkCount = productionResults.filter { $0.status == "ok" }.count
+let productionSkippedCount = productionResults.filter { $0.status == "skipped" }.count
+let productionFailedCount = productionResults.filter { $0.status == "failed" }.count
+let largeContextExperimentOkCount =
+    largeContextExperimentResults.filter { $0.status == "ok" }.count
+let largeContextExperimentSkippedCount =
+    largeContextExperimentResults.filter { $0.status == "skipped" }.count
+let largeContextExperimentFailedCount =
+    largeContextExperimentResults.filter { $0.status == "failed" }.count
+let strictGateResults =
+    requireLargeContextExperimentGates ? results : productionResults
+let strictPassed =
+    !strictGateResults.isEmpty
+    && strictGateResults.allSatisfy { $0.status == "ok" }
 let report = QwenProofReport(
-    schemaVersion: 1,
+    schemaVersion: 2,
     generatedAt: ISO8601DateFormatter().string(from: Date()),
     iterations: iterations,
+    warmupIterations: warmupIterations,
     dtype: dtypeName(proofDType),
     speedParityRatio: speedParityRatio,
     minExtendedTokensPerSecond: minExtendedTokensPerSecond,
     shortContextPlainKVThreshold: shortContextPlainKVThreshold,
+    productionContexts: uniqueSorted(contexts),
+    largeContextExperimentContexts: uniqueSorted(largeContextExperimentContexts),
+    requireLargeContextExperimentGates: requireLargeContextExperimentGates,
     device: TurboQuantDeviceCapabilities.current,
     supportsMetalCodec: availability.supportsMetalPolarQJLCodec,
     supportsMetalAttention: availability.supportsMetalPolarQJLAttention,
@@ -779,6 +879,12 @@ let report = QwenProofReport(
         ok: okCount,
         skipped: skippedCount,
         failed: failedCount,
+        productionOk: productionOkCount,
+        productionSkipped: productionSkippedCount,
+        productionFailed: productionFailedCount,
+        largeContextExperimentOk: largeContextExperimentOkCount,
+        largeContextExperimentSkipped: largeContextExperimentSkippedCount,
+        largeContextExperimentFailed: largeContextExperimentFailedCount,
         strictPassed: strictPassed
     )
 )
