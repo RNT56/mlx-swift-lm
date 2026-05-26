@@ -910,6 +910,7 @@ public struct TokenIterator: TokenIteratorProtocol {
         case .logits(let result):
             y = .init(tokens: convertToToken(logits: result.logits))
             asyncEval(y.tokens)
+            materializeRecurrentKVCacheState(cache)
 
             break
         }
@@ -954,6 +955,7 @@ public struct TokenIterator: TokenIteratorProtocol {
             turboQuantValueBits: turboQuantValueBits,
             turboQuantResidentBudgetBytes: turboQuantResidentBudgetBytes
         )
+        materializeRecurrentKVCacheState(cache)
 
         return convertToToken(logits: result.logits)
     }
@@ -1139,6 +1141,8 @@ public struct SpeculativeTokenIterator: TokenIteratorProtocol {
             draftY = .init(tokens: token)
             asyncEval(draftY.tokens)
         }
+        materializeRecurrentKVCacheState(mainCache)
+        materializeRecurrentKVCacheState(draftCache)
     }
 
     /// Run one round of speculative decoding: draft, verify, accept/reject
@@ -1173,6 +1177,7 @@ public struct SpeculativeTokenIterator: TokenIteratorProtocol {
                 asyncEval(draftToken)
                 draftTokens.append(draftToken)
                 draftY = .init(tokens: draftToken)
+                materializeRecurrentKVCacheState(draftCache)
             }
         } catch {
             _ = try? TurboQuantSpeculativeVerifier.restore(draftCache, to: draftCheckpoint)
@@ -1205,6 +1210,7 @@ public struct SpeculativeTokenIterator: TokenIteratorProtocol {
             }
             let mainLogits = mainResult.logits
             mainState = mainResult.state
+            materializeRecurrentKVCacheState(mainCache)
 
             let mainTokens: MLXArray
             if var verifyProcessor = processor {
@@ -1269,6 +1275,8 @@ public struct SpeculativeTokenIterator: TokenIteratorProtocol {
             // Apply dynamic cache quantization after rewind
             quantizeKVCache(&mainCache)
             quantizeKVCache(&draftCache)
+            materializeRecurrentKVCacheState(mainCache)
+            materializeRecurrentKVCacheState(draftCache)
 
             // Set y/draftY for the next round
             y = .init(tokens: finalToken)
@@ -1441,6 +1449,10 @@ public struct MTPTokenIterator: TokenIteratorProtocol {
             y = .init(tokens: token)
             state = result.state
         }
+        materializeRecurrentKVCacheState(cache)
+        for mtpCache in mtpCaches {
+            materializeRecurrentKVCacheState(mtpCache)
+        }
     }
 
     mutating func speculateRound() {
@@ -1476,6 +1488,10 @@ public struct MTPTokenIterator: TokenIteratorProtocol {
                 runtimeError = error
                 return
             }
+            materializeRecurrentKVCacheState(cache)
+            for mtpCache in mtpCaches {
+                materializeRecurrentKVCacheState(mtpCache)
+            }
             guard !mtpResult.isEmpty else { return }
 
             var logits = mtpResult[0][0..., -1, 0...]
@@ -1497,6 +1513,10 @@ public struct MTPTokenIterator: TokenIteratorProtocol {
             for i in mtpCaches.indices {
                 quantizeKVCache(&mtpCaches[i])
             }
+            materializeRecurrentKVCacheState(cache)
+            for mtpCache in mtpCaches {
+                materializeRecurrentKVCacheState(mtpCache)
+            }
             return
         }
 
@@ -1511,6 +1531,10 @@ public struct MTPTokenIterator: TokenIteratorProtocol {
         } catch {
             runtimeError = error
             return
+        }
+        materializeRecurrentKVCacheState(cache)
+        for mtpCache in mtpCaches {
+            materializeRecurrentKVCacheState(mtpCache)
         }
         guard !mtpResult.isEmpty else { return }
 
@@ -1617,6 +1641,10 @@ public struct MTPTokenIterator: TokenIteratorProtocol {
         quantizeKVCache(&cache)
         for i in mtpCaches.indices {
             quantizeKVCache(&mtpCaches[i])
+        }
+        materializeRecurrentKVCacheState(cache)
+        for mtpCache in mtpCaches {
+            materializeRecurrentKVCacheState(mtpCache)
         }
 
         y = .init(tokens: finalTokenOut)

@@ -118,6 +118,28 @@ extension MLXRuntimeSwiftTests {
             assertArraysClose(restored.state, cache.state)
         }
 
+        @Test func testMaterializeRecurrentKVCacheStateWalksCacheLists() throws {
+            let recurrent = MambaCache()
+            let source = MLXArray(0 ..< 12, [1, 6, 2])
+            let convState = source[0..., 3..., 0...] + 1
+            let nativeState = source[0..., ..<3, 0...] * 2
+            recurrent[0] = convState
+            recurrent[1] = nativeState
+
+            let attention = KVCacheSimple()
+            let keys = MLXArray.ones([1, 1, 2, 4], dtype: .float32)
+            let values = MLXArray.ones([1, 1, 2, 4], dtype: .float32)
+            _ = attention.update(keys: keys, values: values)
+
+            materializeRecurrentKVCacheState([CacheList(recurrent, attention)])
+
+            let state = recurrent.state
+            #expect(state.count == 2)
+            #expect(allClose(state[0], convState).item(Bool.self))
+            #expect(allClose(state[1], nativeState).item(Bool.self))
+            #expect(attention.state.count == 2)
+        }
+
         @Test func testTurboQuantCacheStrategyConvertsSimpleCache() throws {
             guard TurboQuantKernelAvailability.current.supportsMetalPolarQJLCodec else { return }
 

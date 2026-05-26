@@ -166,6 +166,45 @@ struct TurboQuantRuntimeFailureTests {
         #expect(caches[1] is TurboQuantCompressedKVCacheProtocol)
     }
 
+    @Test func qwen35HybridTokenIteratorMaterializesNativeStateWithTurboQuantAttention() throws {
+        let model = Qwen35TextModel(try Self.qwen35TextConfiguration())
+        let parameters = GenerateParameters(
+            maxTokens: 3,
+            maxKVSize: 16,
+            kvCacheStrategy: .turboQuant,
+            turboQuantAdmissionPolicy: .automatic,
+            temperature: 0
+        )
+        let resolved = try parameters.resolvedForTurboQuantRuntime(layerCount: 1)
+        let cache = model.newCache(parameters: resolved)
+        #expect(cache[0] is MambaCache)
+        #expect(cache[1] is TurboQuantCompressedKVCacheProtocol)
+
+        let prompt = MLXArray([1, 2] as [Int32])
+        var iterator = try TokenIterator(
+            input: LMInput(text: .init(tokens: prompt)),
+            model: model,
+            cache: cache,
+            parameters: parameters
+        )
+
+        var emitted = [Int]()
+        while let token = iterator.next() {
+            emitted.append(token)
+        }
+        if let error = iterator.lastRuntimeError {
+            Issue.record("Unexpected Qwen3.5 hybrid TurboQuant iterator error: \(error)")
+        }
+
+        #expect(emitted.count == 3)
+        let recurrent = try #require(cache[0] as? MambaCache)
+        let recurrentState = recurrent.state
+        #expect(recurrentState.count == 2)
+        eval(recurrentState)
+        #expect(recurrentState[0].shape == [1, 3, 14336])
+        #expect(recurrentState[1].shape == [1, 64, 128, 192])
+    }
+
     @Test func exportedCapabilityRegistryMatchesThrowingRuntimeCoverage() async throws {
         let registeredModelTypes = Set(await LLMTypeRegistry.shared.registeredModelTypes)
         let textConfigOnlyModelTypes: Set<String> = [
@@ -588,10 +627,10 @@ struct TurboQuantRuntimeFailureTests {
           "intermediate_size": 128,
           "num_attention_heads": 4,
           "num_key_value_heads": 2,
-          "linear_num_value_heads": 1,
-          "linear_num_key_heads": 1,
-          "linear_key_head_dim": 16,
-          "linear_value_head_dim": 16,
+          "linear_num_value_heads": 64,
+          "linear_num_key_heads": 16,
+          "linear_key_head_dim": 192,
+          "linear_value_head_dim": 128,
           "linear_conv_kernel_dim": 4,
           "rms_norm_eps": 1e-6,
           "vocab_size": 128,
@@ -615,10 +654,10 @@ struct TurboQuantRuntimeFailureTests {
             "intermediate_size": 128,
             "num_attention_heads": 4,
             "num_key_value_heads": 2,
-            "linear_num_value_heads": 1,
-            "linear_num_key_heads": 1,
-            "linear_key_head_dim": 16,
-            "linear_value_head_dim": 16,
+            "linear_num_value_heads": 64,
+            "linear_num_key_heads": 16,
+            "linear_key_head_dim": 192,
+            "linear_value_head_dim": 128,
             "linear_conv_kernel_dim": 4,
             "rms_norm_eps": 1e-6,
             "vocab_size": 128,
@@ -957,10 +996,10 @@ struct TurboQuantRuntimeFailureTests {
           "intermediate_size": 128,
           "num_attention_heads": 4,
           "num_key_value_heads": 2,
-          "linear_num_value_heads": 1,
-          "linear_num_key_heads": 1,
-          "linear_key_head_dim": 16,
-          "linear_value_head_dim": 16,
+          "linear_num_value_heads": 64,
+          "linear_num_key_heads": 16,
+          "linear_key_head_dim": 192,
+          "linear_value_head_dim": 128,
           "linear_conv_kernel_dim": 4,
           "rms_norm_eps": 1e-6,
           "vocab_size": 128,
@@ -985,10 +1024,10 @@ struct TurboQuantRuntimeFailureTests {
             "intermediate_size": 128,
             "num_attention_heads": 4,
             "num_key_value_heads": 2,
-            "linear_num_value_heads": 1,
-            "linear_num_key_heads": 1,
-            "linear_key_head_dim": 16,
-            "linear_value_head_dim": 16,
+            "linear_num_value_heads": 64,
+            "linear_num_key_heads": 16,
+            "linear_key_head_dim": 192,
+            "linear_value_head_dim": 128,
             "linear_conv_kernel_dim": 4,
             "rms_norm_eps": 1e-6,
             "vocab_size": 128,

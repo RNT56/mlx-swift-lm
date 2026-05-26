@@ -1686,6 +1686,17 @@ public class MambaCache: ArraysCache {
         super.init(size: 2, leftPadding: leftPadding)
     }
 
+    fileprivate func detachedGenerationState() -> [MLXArray] {
+        var detached = [MLXArray]()
+        for index in 0 ..< slotCount {
+            guard let array = self[index] else { continue }
+            let state = stopGradient(array)
+            self[index] = state
+            detached.append(state)
+        }
+        return detached
+    }
+
     public override func copy() -> any KVCache {
         let new = MambaCache()
         let s = self.state
@@ -1828,6 +1839,35 @@ public class CacheList: BaseKVCache {
 
         return CacheList(caches: children)
     }
+}
+
+/// Materialize recurrent/native cache state after generation steps.
+///
+/// Hybrid models such as Qwen3.5 and LFM2 use TurboQuant attention caches for
+/// attention layers but retain Mamba-style native state for recurrent/linear
+/// layers. Token generation evaluates the sampled token asynchronously, which
+/// does not guarantee those native cache arrays are materialized before the
+/// next step stores them. Detaching and evaluating only recurrent cache state
+/// prevents lazy graph chains from accumulating while leaving standard
+/// attention KV caches untouched.
+public func materializeRecurrentKVCacheState(_ caches: [KVCache]) {
+    let state = recurrentGenerationStateArrays(in: caches)
+    guard !state.isEmpty else { return }
+    eval(state)
+}
+
+private func recurrentGenerationStateArrays(in caches: [KVCache]) -> [MLXArray] {
+    caches.flatMap { recurrentGenerationStateArrays(in: $0) }
+}
+
+private func recurrentGenerationStateArrays(in cache: KVCache) -> [MLXArray] {
+    if let cache = cache as? MambaCache {
+        return cache.detachedGenerationState()
+    }
+    if let cache = cache as? CacheList {
+        return recurrentGenerationStateArrays(in: cache.children)
+    }
+    return []
 }
 
 // MARK: - Error Types
