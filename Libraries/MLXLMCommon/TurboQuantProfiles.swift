@@ -104,10 +104,21 @@ public enum TurboQuantScheme: String, Codable, Sendable, CaseIterable {
 
     public var defaultOptimizationPolicy: TurboQuantOptimizationPolicy {
         switch self {
-        case .disabled, .turbo8, .turbo4v2, .turbo3_5:
+        case .disabled, .turbo8:
             .auto
+        case .turbo4v2, .turbo3_5:
+            .conservative
         case .turbo3, .turbo2_5:
             .preferMemory
+        }
+    }
+
+    public var requiresGuardedQualityValidation: Bool {
+        switch self {
+        case .disabled, .turbo8:
+            false
+        case .turbo4v2, .turbo3_5, .turbo3, .turbo2_5:
+            true
         }
     }
 }
@@ -2015,6 +2026,9 @@ private func defaultBundledOptimizationPolicy(
     if bundledConservativeOptimizationProfileIDs.contains(profile.id) {
         return .conservative
     }
+    if profile.recommendedScheme.requiresGuardedQualityValidation {
+        return .conservative
+    }
     if bundledThroughputOptimizationProfileIDs.contains(profile.id) {
         return .preferThroughput
     }
@@ -2072,6 +2086,7 @@ private func applyingBundledProfileOptimizations(_ profile: TurboQuantProfile)
     )
     if bundledGuardedProfileIDs.contains(profile.id)
         || (isDenseQwen35HybridProfile(profile) && profile.recommendedScheme == .turbo8)
+        || profile.recommendedScheme.requiresGuardedQualityValidation
     {
         profile.status = .guarded
     }

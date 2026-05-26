@@ -112,7 +112,7 @@ extension MLXRuntimeSwiftTests {
             #expect(gemma3Small.id == "gemma-3-270m")
             #expect(gemma3Small.safeContextLength == 32768)
             #expect(
-                gemma3Small.optimizationPolicy == TurboQuantOptimizationPolicy.preferThroughput
+                gemma3Small.optimizationPolicy == TurboQuantOptimizationPolicy.conservative
             )
             let gemma31B = try #require(
                 registry.profile(
@@ -151,7 +151,7 @@ extension MLXRuntimeSwiftTests {
                 )
             )
             #expect(llama33.id == "llama-3.3-70b")
-            #expect(llama33.optimizationPolicy == TurboQuantOptimizationPolicy.preferMemory)
+            #expect(llama33.optimizationPolicy == TurboQuantOptimizationPolicy.conservative)
 
             let llama32_3B = try #require(
                 registry.profile(
@@ -184,7 +184,7 @@ extension MLXRuntimeSwiftTests {
             )
             #expect(mistral4.id == "mistral-small-4-119b-a6b")
             #expect(mistral4.safeContextLength == 1_048_576)
-            #expect(mistral4.optimizationPolicy == TurboQuantOptimizationPolicy.preferMemory)
+            #expect(mistral4.optimizationPolicy == TurboQuantOptimizationPolicy.conservative)
         }
 
         @Test func testBundledProfilesRequireStrictModelAndHeadMetadata() throws {
@@ -418,17 +418,17 @@ extension MLXRuntimeSwiftTests {
         @Test func testGemma2ProfilesMatchCurrentMLXCommunityConfigs() throws {
             let registry = TurboQuantProfileRegistry.bundled
             let examples: [(String, String, Double, Int, TurboQuantOptimizationPolicy)] = [
-                ("mlx-community/gemma-2-2b-it-4bit", "gemma-2-2b", 2, 256, .preferThroughput),
-                ("mlx-community/gemma-2-baku-2b-it-4bit", "gemma-2-2b", 2, 256, .preferThroughput),
-                ("mlx-community/gemma-2-9b-it-4bit", "gemma-2-9b", 9, 256, .preferMemory),
+                ("mlx-community/gemma-2-2b-it-4bit", "gemma-2-2b", 2, 256, .conservative),
+                ("mlx-community/gemma-2-baku-2b-it-4bit", "gemma-2-2b", 2, 256, .conservative),
+                ("mlx-community/gemma-2-9b-it-4bit", "gemma-2-9b", 9, 256, .conservative),
                 (
                     "mlx-community/Gemma-SEA-LION-v3-9B-IT-mlx-4bit", "gemma-2-9b", 9, 256,
-                    .preferMemory
+                    .conservative
                 ),
-                ("mlx-community/gemma-2-27b-it-4bit", "gemma-2-27b", 27, 128, .preferMemory),
+                ("mlx-community/gemma-2-27b-it-4bit", "gemma-2-27b", 27, 128, .conservative),
                 (
                     "mlx-community/TheDrummer_Big-Tiger-Gemma-27B-v1_4bit", "gemma-2-27b", 27,
-                    128, .preferMemory
+                    128, .conservative
                 ),
             ]
 
@@ -1285,8 +1285,18 @@ extension MLXRuntimeSwiftTests {
             #expect(parameters.kvGroupSize == 64)
             #expect(parameters.turboQuantPreset == .turbo4v2)
             #expect(parameters.turboQuantBackend == .metalPolarQJL)
-            #expect(parameters.turboQuantOptimizationPolicy == .preferThroughput)
+            #expect(parameters.turboQuantOptimizationPolicy == .conservative)
             #expect(parameters.turboQuantValueBits == 4)
+        }
+
+        @Test func testLowerBitBundledProfilesAreGuardedConservative() {
+            let lowerBitProfiles = TurboQuantProfileRegistry.bundled.profiles.filter {
+                $0.recommendedScheme.requiresGuardedQualityValidation
+            }
+
+            #expect(!lowerBitProfiles.isEmpty)
+            #expect(lowerBitProfiles.allSatisfy { $0.status == .guarded })
+            #expect(lowerBitProfiles.allSatisfy { $0.optimizationPolicy == .conservative })
         }
 
         @Test func testMemoryProfileMapsToAggressiveRuntimePreset() {
