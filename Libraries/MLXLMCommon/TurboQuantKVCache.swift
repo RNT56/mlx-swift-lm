@@ -153,6 +153,7 @@ public protocol TurboQuantCompressedKVCacheProtocol: KVCache, AnyObject {
     func validateCompressedState(context: String) throws
     func decodedCompressedState(outputDType: DType) throws -> (MLXArray, MLXArray)
     func releaseRawShadow()
+    func exactRawStateIfComplete() -> (keys: MLXArray, values: MLXArray)?
 }
 
 extension TurboQuantCompressedKVCacheProtocol {
@@ -167,6 +168,10 @@ extension TurboQuantCompressedKVCacheProtocol {
         case .preferMemory, .preferThroughput:
             false
         }
+    }
+
+    public func exactRawStateIfComplete() -> (keys: MLXArray, values: MLXArray)? {
+        nil
     }
 
     public func exportSnapshot(
@@ -1779,6 +1784,14 @@ public final class RotatingTurboQuantKVCache: BaseKVCache, QuantizedKVCacheProto
         min(keep, maxCacheSize, max(0, logicalLength))
     }
 
+    private var shouldMaintainExactRawShadow: Bool {
+        activeBackend == .metalPolarQJL && optimizationPolicy == .conservative
+    }
+
+    private var exactRawShadowMaxSize: Int {
+        min(maxCacheSize, max(keep + 1, 512))
+    }
+
     public init(
         maxSize: Int,
         keep: Int = 4,
@@ -2338,6 +2351,10 @@ public final class RotatingTurboQuantKVCache: BaseKVCache, QuantizedKVCacheProto
             }
         }
 
+        if shouldMaintainExactRawShadow {
+            _ = materializedExactRawShadowCache().update(keys: keys, values: values)
+        }
+
         offset += tokenCount
         writeIndex = nextWriteIndex(afterOffset: offset)
         if shouldUpdatePackedFallback {
@@ -2351,7 +2368,9 @@ public final class RotatingTurboQuantKVCache: BaseKVCache, QuantizedKVCacheProto
         packedKeys = nil
         packedValues = nil
         lastDecodedTransientBytes = 0
-        releaseRawShadow()
+        if !shouldMaintainExactRawShadow {
+            releaseRawShadow()
+        }
         try validateCompressedState(context: "rotating compressed append")
         cacheLifecycle = .compressedCommitted(
             logicalLength: currentKeys.layout.logicalLength,
@@ -2366,6 +2385,24 @@ public final class RotatingTurboQuantKVCache: BaseKVCache, QuantizedKVCacheProto
         offset = rawCache.offset
         writeIndex = currentWriteIndexFromRawMeta(rawCache.metaState)
         return result
+    }
+
+    public func exactRawStateIfComplete() -> (keys: MLXArray, values: MLXArray)? {
+        guard shouldMaintainExactRawShadow,
+              let rawFallbackCache,
+              let compressedKeys,
+              rawFallbackCache.offset == offset
+        else {
+            return nil
+        }
+        let state = rawFallbackCache.state
+        guard state.count == 2,
+              state[0].dim(2) == compressedKeys.layout.logicalLength,
+              state[1].dim(2) == compressedKeys.layout.logicalLength
+        else {
+            return nil
+        }
+        return (state[0], state[1])
     }
 
     public override var state: [MLXArray] {
@@ -2807,7 +2844,9 @@ public final class RotatingTurboQuantKVCache: BaseKVCache, QuantizedKVCacheProto
     }
 
     private func materializedRawFallbackCache() -> RotatingKVCache {
-        if let rawFallbackCache { return rawFallbackCache }
+        if let rawFallbackCache, rawFallbackCache.maxSize == maxCacheSize {
+            return rawFallbackCache
+        }
         let rawCache = RotatingKVCache(maxSize: maxCacheSize, keep: keep, step: step)
         if let compressedKeys, let compressedValues {
             do {
@@ -2830,6 +2869,28 @@ public final class RotatingTurboQuantKVCache: BaseKVCache, QuantizedKVCacheProto
             String(step),
             String(offset),
             String(rawFallbackWriteIndex(forOffset: offset)),
+        ]
+        rawFallbackCache = rawCache
+        return rawCache
+    }
+
+    private func materializedExactRawShadowCache() -> RotatingKVCache {
+        if let rawFallbackCache,
+           rawFallbackCache.maxSize == exactRawShadowMaxSize,
+           rawFallbackCache.offset == offset {
+            return rawFallbackCache
+        }
+        let rawCache = RotatingKVCache(
+            maxSize: exactRawShadowMaxSize,
+            keep: min(keep, exactRawShadowMaxSize),
+            step: min(step, max(1, exactRawShadowMaxSize))
+        )
+        rawCache.metaState = [
+            String(min(keep, exactRawShadowMaxSize)),
+            String(exactRawShadowMaxSize),
+            String(min(step, max(1, exactRawShadowMaxSize))),
+            String(offset),
+            String(min(offset, exactRawShadowMaxSize)),
         ]
         rawFallbackCache = rawCache
         return rawCache

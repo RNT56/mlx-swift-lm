@@ -874,6 +874,103 @@ extension MLXRuntimeSwiftTests {
             #expect(cache.attentionDiagnostics.rawFallbackAllocated == false)
         }
 
+        @Test func testConservativeTurboQuantUsesExactRawShadowForQwenLikeDecode() throws {
+            guard TurboQuantKernelAvailability.current.supportsMetalPolarQJLAttention else {
+                return
+            }
+
+            let headDimension = 256
+            let queryHeadCount = 16
+            let kvHeadCount = 4
+            let prefillLength = 8
+            let scale = 1 / sqrt(Float(headDimension))
+
+            func values(count: Int, sinFactor: Double, cosFactor: Double) -> [Float] {
+                (0 ..< count).map { index in
+                    let position = Double(index)
+                    return Float(0.31 * sin(position * sinFactor) + 0.23 * cos(position * cosFactor))
+                }
+            }
+
+            let prefillQueries = MLXArray(
+                values(
+                    count: queryHeadCount * prefillLength * headDimension,
+                    sinFactor: 0.013,
+                    cosFactor: 0.041
+                ),
+                [1, queryHeadCount, prefillLength, headDimension]
+            )
+            let prefillKeys = MLXArray(
+                values(
+                    count: kvHeadCount * prefillLength * headDimension,
+                    sinFactor: 0.019,
+                    cosFactor: 0.071
+                ),
+                [1, kvHeadCount, prefillLength, headDimension]
+            )
+            let prefillValues = MLXArray(
+                values(
+                    count: kvHeadCount * prefillLength * headDimension,
+                    sinFactor: 0.029,
+                    cosFactor: 0.053
+                ),
+                [1, kvHeadCount, prefillLength, headDimension]
+            )
+            let decodeQueries = MLXArray(
+                values(count: queryHeadCount * headDimension, sinFactor: 0.017, cosFactor: 0.037),
+                [1, queryHeadCount, 1, headDimension]
+            )
+            let decodeKeys = MLXArray(
+                values(count: kvHeadCount * headDimension, sinFactor: 0.023, cosFactor: 0.067),
+                [1, kvHeadCount, 1, headDimension]
+            )
+            let decodeValues = MLXArray(
+                values(count: kvHeadCount * headDimension, sinFactor: 0.031, cosFactor: 0.047),
+                [1, kvHeadCount, 1, headDimension]
+            )
+
+            let rawCache = RotatingKVCache(maxSize: 512)
+            _ = rawCache.update(keys: prefillKeys, values: prefillValues)
+
+            let turboCache = RotatingTurboQuantKVCache(
+                maxSize: 512,
+                preset: .turbo8,
+                backend: .metalPolarQJL,
+                optimizationPolicy: .conservative,
+                valueBits: 8
+            )
+            _ = try attentionWithCacheUpdateReturningStateThrowing(
+                queries: prefillQueries,
+                keys: prefillKeys,
+                values: prefillValues,
+                cache: turboCache,
+                scale: scale,
+                mask: .causal
+            )
+
+            let rawDecodeState = rawCache.update(keys: decodeKeys, values: decodeValues)
+            let expected = MLXFast.scaledDotProductAttention(
+                queries: decodeQueries,
+                keys: rawDecodeState.0,
+                values: rawDecodeState.1,
+                scale: scale,
+                mask: .causal
+            )
+            let actual = try attentionWithCacheUpdateReturningStateThrowing(
+                queries: decodeQueries,
+                keys: decodeKeys,
+                values: decodeValues,
+                cache: turboCache,
+                scale: scale,
+                mask: .causal
+            ).output
+
+            #expect(turboCache.attentionDiagnostics.rawFallbackAllocated)
+            #expect(turboCache.attentionDiagnostics.lastFallback?.toPath == .baseline)
+            #expect(turboCache.attentionDiagnostics.lastFallback?.isSemanticallyExact == true)
+            #expect(allClose(actual, expected, rtol: 1e-5, atol: 1e-5).item(Bool.self))
+        }
+
         @Test func testTurboQuantCompressedAttentionStateSupportsSplitValueDimension() throws {
             guard TurboQuantKernelAvailability.current.supportsMetalPolarQJLAttention else {
                 return

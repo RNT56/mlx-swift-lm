@@ -278,6 +278,23 @@ private func turboQuantAttentionFallbackLadder(
     )
     try cache.validateCompressedState(context: "attention fallback ladder")
 
+    if let exact = cache.exactRawStateIfComplete() {
+        let output = exactScaledDotProductAttention(
+            queries: queries,
+            keys: exact.keys,
+            values: exact.values,
+            scale: scale,
+            mask: adjustedMask,
+            sinks: sinks
+        )
+        recordTurboQuantFallback(
+            cache: cache,
+            path: .rawExactSDPA,
+            reason: "using exact raw shadow for quality-sensitive compressed cache"
+        )
+        return output
+    }
+
     var failures: [String] = []
     let canUseOnline =
         sinks == nil && cache.prefersOnlineFusedAttention
