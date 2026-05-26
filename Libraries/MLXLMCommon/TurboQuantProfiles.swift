@@ -93,7 +93,9 @@ public enum TurboQuantScheme: String, Codable, Sendable, CaseIterable {
             nil
         case .turbo8:
             8
-        case .turbo4v2, .turbo3_5:
+        case .turbo4v2:
+            4
+        case .turbo3_5:
             3.5
         case .turbo3:
             3
@@ -1058,7 +1060,7 @@ public struct TurboQuantProfile: Codable, Equatable, Identifiable, Sendable {
                 ),
                 TurboQuantPrecisionCandidate(
                     scheme: .turbo4v2,
-                    keyBits: 3.5,
+                    keyBits: 4,
                     valueBits: 4,
                     optimizationPolicy: .conservative,
                     fallbackPolicy: .exactRequired,
@@ -2125,7 +2127,7 @@ private let bundledProfileContextLengthOverrides: [String: [Int]] = [
 ]
 
 private let bundledConservativeOptimizationProfileIDs: Set<String> = [
-    "glm4-moe-lite",
+    "glm4-moe-lite"
 ]
 
 private let bundledGuardedProfileIDs: Set<String> = [

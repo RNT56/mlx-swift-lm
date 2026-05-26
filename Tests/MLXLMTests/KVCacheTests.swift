@@ -972,7 +972,8 @@ extension MLXRuntimeSwiftTests {
             func values(count: Int, sinFactor: Double, cosFactor: Double) -> [Float] {
                 (0 ..< count).map { index in
                     let position = Double(index)
-                    return Float(0.31 * sin(position * sinFactor) + 0.23 * cos(position * cosFactor))
+                    return Float(
+                        0.31 * sin(position * sinFactor) + 0.23 * cos(position * cosFactor))
                 }
             }
 
@@ -1150,6 +1151,33 @@ extension MLXRuntimeSwiftTests {
                     mask: .none
                 )
             )
+            #expect(cache.attentionDiagnostics.activeAttentionPath == .twoStageCompressed)
+        }
+
+        @Test func testQwenThroughputPolicyUsesTwoStageForHeadDimension256Decode() throws {
+            guard TurboQuantKernelAvailability.current.supportsMetalPolarQJLAttention else {
+                return
+            }
+
+            let cache = TurboQuantKVCache(
+                preset: .turbo8,
+                backend: .metalPolarQJL,
+                optimizationPolicy: .preferThroughput,
+                valueBits: 8
+            )
+            let keys = MLXArray.ones([1, 4, 8, 256], dtype: .float16)
+            let values = MLXArray.ones([1, 4, 8, 256], dtype: .float16)
+            let queries = MLXArray.ones([1, 16, 1, 256], dtype: .float16)
+
+            #expect(
+                cache.supportsCompressedAttention(
+                    queries: queries,
+                    keys: keys,
+                    values: values,
+                    mask: .causal
+                )
+            )
+            #expect(cache.prefersOnlineFusedAttention == false)
             #expect(cache.attentionDiagnostics.activeAttentionPath == .twoStageCompressed)
         }
 

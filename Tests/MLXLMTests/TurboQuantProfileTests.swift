@@ -1362,11 +1362,15 @@ extension MLXRuntimeSwiftTests {
 
                 let turbo4 = try #require(candidates[.turbo4v2])
                 #expect(turbo4.status == .guarded)
+                #expect(turbo4.keyBits == 4)
+                #expect(turbo4.valueBits == 4)
                 #expect(turbo4.optimizationPolicy == .conservative)
                 #expect(turbo4.fallbackPolicy == .exactRequired)
 
                 let turbo35 = try #require(candidates[.turbo3_5])
                 #expect(turbo35.status == .guarded)
+                #expect(turbo35.keyBits == 3.5)
+                #expect(turbo35.valueBits == 4)
                 #expect(turbo35.optimizationPolicy == .conservative)
                 #expect(turbo35.fallbackPolicy == .exactRequired)
 
@@ -1375,6 +1379,7 @@ extension MLXRuntimeSwiftTests {
 
                 let guardedProfile = try #require(profile.applyingPrecisionCandidate(.turbo4v2))
                 #expect(guardedProfile.recommendedScheme == .turbo4v2)
+                #expect(guardedProfile.keyBits == 4)
                 #expect(guardedProfile.valueBits == 4)
                 #expect(guardedProfile.optimizationPolicy == .conservative)
                 #expect(guardedProfile.turboQuant.fallbackPolicy == .exactRequired)

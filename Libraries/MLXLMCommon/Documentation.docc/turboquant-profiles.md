@@ -42,7 +42,7 @@ App preflight code should use strict fingerprint-aware selection when enabling
 TurboQuant automatically; a fingerprint mismatch returns no TurboQuant profile so
 the caller keeps its baseline or packed-cache path instead of guessing.
 
-Bundled profiles keep the quality-first TurboQuant default of 3.5-bit keys,
+Bundled profiles keep the quality-first TurboQuant default of 4-bit V2 keys,
 4-bit values, and group size 64 except where device evidence makes that unsafe.
 Per-profile optimization policy is tuned from config-backed model shape, context
 metadata, and device evidence: Qwen3.5/Qwen3.6 use Turbo8 with exact initial
@@ -62,10 +62,12 @@ runtime policy. That policy keeps exact initial prefill, skips resident raw
 shadow decode, and routes decode through compressed two-stage QK/AV because that
 path is faster than the current fused shader for Qwen-style 256-dimensional
 grouped-query heads. Turbo4V2 and Turbo3.5 are valid guarded proof candidates
-only: the profile API exposes them explicitly, but release tooling must promote
-them per model, device, OS, and context length only after the Qwen proof pipeline
-passes quality, memory, and throughput gates. Qwen3.7 is intentionally not
-profiled until open MLX weights exist.
+only: Turbo4V2 uses 4-bit key magnitudes and 4-bit values, while Turbo3.5 uses
+mixed 3/4-bit key magnitudes and 4-bit values. The profile API exposes both
+explicitly, but release tooling must promote them per model, device, OS, and
+context length only after the Qwen proof pipeline passes quality, memory, and
+throughput gates. Qwen3.7 is intentionally not profiled until open MLX weights
+exist.
 
 Bundled Gemma profiles cover config-backed MLX Community legacy Gemma, Gemma 2,
 Gemma 3, Gemma 3n, and Gemma 4 variants: `gemma-2b`, `gemma-7b`,
@@ -174,7 +176,7 @@ guessed TurboQuant format.
 ## Scheme Aliases
 
 ``TurboQuantScheme/turbo4v2`` maps to the `.turbo4v2` runtime preset with
-the profile-declared key/value bit widths. It is the balanced default profile
-scheme. ``TurboQuantScheme/turbo3``
-maps to the more memory-oriented `.turbo2_5` runtime preset and should be reserved
-for memory-pressure profiles.
+4-bit key magnitudes and 4-bit values. It is the balanced default profile
+scheme. ``TurboQuantScheme/turbo3_5`` maps to mixed 3/4-bit key magnitudes and
+4-bit values. ``TurboQuantScheme/turbo3`` maps to the more memory-oriented
+`.turbo2_5` runtime preset and should be reserved for memory-pressure profiles.

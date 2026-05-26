@@ -55,7 +55,7 @@
   ],
   "recommended_scheme": "turbo4v2",
   "fallback_scheme": "turbo3_5",
-  "key_bits": 3.5,
+  "key_bits": 4,
   "value_bits": 4,
   "group_size": 64,
   "safe_mask_modes": [
