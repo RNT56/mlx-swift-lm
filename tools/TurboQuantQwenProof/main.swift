@@ -28,6 +28,7 @@ struct QwenProofCase: Codable {
     var kvHeads: Int
     var queryHeads: Int
     var contextLength: Int
+    var reservedCapacityLength: Int
     var queryLength: Int
 }
 
@@ -65,8 +66,13 @@ struct QwenProofMemory: Codable {
     var compressedKeyBytes: Int
     var compressedValueBytes: Int
     var compressedBytesPerToken: Double
+    var compressedBytesPerLogicalToken: Double
+    var compressedBytesPerReservedToken: Double
     var plainKVBytes: Int
+    var plainKVBytesAtReservedCapacity: Int
     var compressionRatioToPlain: Double
+    var compressionRatioToPlainReservedCapacity: Double
+    var reservedCapacityMultiplier: Double
 }
 
 struct QwenProofResult: Codable {
@@ -107,6 +113,7 @@ struct QwenProofReport: Codable {
     var speedParityRatio: Double
     var minExtendedTokensPerSecond: Double
     var shortContextPlainKVThreshold: Int
+    var requestedReservedCapacityLength: Int?
     var productionContexts: [Int]
     var largeContextExperimentContexts: [Int]
     var requireLargeContextExperimentGates: Bool
@@ -188,8 +195,25 @@ func argumentValues(_ name: String, default defaultValue: [Int]) -> [Int] {
     return values.isEmpty ? defaultValue : values
 }
 
+func optionalPositiveArgumentValue(_ name: String) -> Int? {
+    let arguments = CommandLine.arguments
+    guard let index = arguments.firstIndex(of: name), arguments.indices.contains(index + 1),
+        let value = Int(arguments[index + 1]),
+        value > 0
+    else {
+        return nil
+    }
+    return value
+}
+
 func uniqueSorted(_ values: [Int]) -> [Int] {
     Array(Set(values)).sorted()
+}
+
+func roundedReservedCapacityLength(_ requiredLength: Int) -> Int {
+    let compressedCapacityStep = 256
+    return ((compressedCapacityStep + requiredLength - 1) / compressedCapacityStep)
+        * compressedCapacityStep
 }
 
 func argumentStrings(_ name: String, default defaultValue: [String]) -> [String] {
@@ -469,6 +493,7 @@ func runCase(
     profile: TurboQuantProfile,
     scheme: TurboQuantScheme,
     contextLength: Int,
+    reservedCapacityLength: Int,
     queryLength: Int,
     dtype: DType,
     gateScope: QwenProofGateScope,
@@ -482,7 +507,7 @@ func runCase(
     attentionPath: QwenProofAttentionPath = .auto
 ) -> QwenProofResult {
     let caseID =
-        "\(profile.id)_\(scheme.rawValue)_ctx\(contextLength)_q\(queryLength)\(attentionPath.idSuffix)"
+        "\(profile.id)_\(scheme.rawValue)_ctx\(contextLength)_cap\(reservedCapacityLength)_q\(queryLength)\(attentionPath.idSuffix)"
     guard let precisionProfile = profile.applyingPrecisionCandidate(scheme) else {
         let benchmarkCase = QwenProofCase(
             id: caseID,
@@ -494,6 +519,7 @@ func runCase(
             kvHeads: 4,
             queryHeads: 16,
             contextLength: contextLength,
+            reservedCapacityLength: reservedCapacityLength,
             queryLength: queryLength
         )
         return QwenProofResult(
@@ -527,6 +553,7 @@ func runCase(
         kvHeads: kvHeads,
         queryHeads: queryHeads,
         contextLength: contextLength,
+        reservedCapacityLength: reservedCapacityLength,
         queryLength: queryLength
     )
 
@@ -598,9 +625,33 @@ func runCase(
             )
         }
 
-        let (compressedKeys, compressedValues) = try cache.updateCompressed(
-            keys: keys,
-            values: values
+        let keyConfiguration = TurboQuantConfiguration(
+            preset: precisionProfile.recommendedScheme.preset,
+            role: .key,
+            groupSize: precisionProfile.groupSize,
+            backend: precisionProfile.backend
+        )
+        let valueConfiguration = TurboQuantConfiguration(
+            preset: precisionProfile.recommendedScheme.preset,
+            role: .value,
+            groupSize: precisionProfile.groupSize,
+            backend: precisionProfile.backend,
+            seed: 0x9E37_79B9_7F4A_7C15 ^ 0xD1B5_4A32_D192_ED03,
+            valueBits: precisionProfile.valueBits
+        )
+        let (compressedKeys, compressedValues) = (
+            try turboQuantMetalEncodeAttention(
+                keys,
+                configuration: keyConfiguration,
+                capacity: reservedCapacityLength,
+                logicalLength: contextLength
+            ),
+            try turboQuantMetalEncodeAttention(
+                values,
+                configuration: valueConfiguration,
+                capacity: reservedCapacityLength,
+                logicalLength: contextLength
+            )
         )
         let preferOnline = attentionPath.preferOnlineFused(
             default: cache.prefersOnlineFusedAttention
@@ -681,12 +732,22 @@ func runCase(
         )
         let compressedBytes = compressedKeys.storageByteCount + compressedValues.storageByteCount
         let plainBytes = keys.nbytes + values.nbytes
+        let plainBytesAtReservedCapacity =
+            plainBytes * reservedCapacityLength / max(1, contextLength)
         let memory = QwenProofMemory(
             compressedKeyBytes: compressedKeys.storageByteCount,
             compressedValueBytes: compressedValues.storageByteCount,
             compressedBytesPerToken: Double(compressedBytes) / Double(max(1, contextLength)),
+            compressedBytesPerLogicalToken: Double(compressedBytes) / Double(max(1, contextLength)),
+            compressedBytesPerReservedToken: Double(compressedBytes)
+                / Double(max(1, reservedCapacityLength)),
             plainKVBytes: plainBytes,
-            compressionRatioToPlain: Double(compressedBytes) / Double(max(1, plainBytes))
+            plainKVBytesAtReservedCapacity: plainBytesAtReservedCapacity,
+            compressionRatioToPlain: Double(compressedBytes) / Double(max(1, plainBytes)),
+            compressionRatioToPlainReservedCapacity: Double(compressedBytes)
+                / Double(max(1, plainBytesAtReservedCapacity)),
+            reservedCapacityMultiplier: Double(reservedCapacityLength)
+                / Double(max(1, contextLength))
         )
         let fallbackReason: String?
         if usesPlainProductionRoute {
@@ -744,6 +805,7 @@ let proofDType = argumentDType("--dtype", default: .float16)
 let speedParityRatio = argumentValue("--speed-parity-ratio", default: 1.0)
 let minExtendedTokensPerSecond = argumentValue("--min-extended-tokens-per-second", default: 20.0)
 let shortContextPlainKVThreshold = argumentValue("--plain-route-threshold", default: 4096)
+let reservedCapacityOverride = optionalPositiveArgumentValue("--reserved-capacity")
 let cooldownMilliseconds = argumentValue("--cooldown-ms", default: 0)
 let contexts = argumentValues(
     "--contexts",
@@ -801,13 +863,16 @@ let representativeProfiles = qwenProfiles.filter { requestedProfileIDSet.contain
 let contextMatrix =
     uniqueSorted(contexts).map { (context: $0, gateScope: QwenProofGateScope.production) }
     + uniqueSorted(largeContextExperimentContexts)
-        .filter { !contexts.contains($0) }
-        .map { (context: $0, gateScope: QwenProofGateScope.largeContextExperiment) }
+    .filter { !contexts.contains($0) }
+    .map { (context: $0, gateScope: QwenProofGateScope.largeContextExperiment) }
 for profile in representativeProfiles {
     for scheme in schemes {
         for entry in contextMatrix {
             let context = entry.context
             guard context <= (profile.safeContextLength ?? context) else { continue }
+            let reservedCapacityLength = roundedReservedCapacityLength(
+                max(context, reservedCapacityOverride ?? context)
+            )
             for queryLength in queryLengths {
                 for attentionPath in attentionPaths {
                     results.append(
@@ -815,6 +880,7 @@ for profile in representativeProfiles {
                             profile: profile,
                             scheme: scheme,
                             contextLength: context,
+                            reservedCapacityLength: reservedCapacityLength,
                             queryLength: queryLength,
                             dtype: proofDType,
                             gateScope: entry.gateScope,
@@ -859,7 +925,7 @@ let strictPassed =
     !strictGateResults.isEmpty
     && strictGateResults.allSatisfy { $0.status == "ok" }
 let report = QwenProofReport(
-    schemaVersion: 2,
+    schemaVersion: 3,
     generatedAt: ISO8601DateFormatter().string(from: Date()),
     iterations: iterations,
     warmupIterations: warmupIterations,
@@ -867,6 +933,7 @@ let report = QwenProofReport(
     speedParityRatio: speedParityRatio,
     minExtendedTokensPerSecond: minExtendedTokensPerSecond,
     shortContextPlainKVThreshold: shortContextPlainKVThreshold,
+    requestedReservedCapacityLength: reservedCapacityOverride,
     productionContexts: uniqueSorted(contexts),
     largeContextExperimentContexts: uniqueSorted(largeContextExperimentContexts),
     requireLargeContextExperimentGates: requireLargeContextExperimentGates,
