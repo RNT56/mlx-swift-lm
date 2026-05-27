@@ -65,7 +65,18 @@ public struct TurboQuantRuntimeCacheFootprint: Equatable, Codable, Sendable {
 public enum KVCacheStrategy: String, Codable, Sendable, CaseIterable {
     case none
     case mlxAffine
+    case adaptiveTurboQuant
     case turboQuant
+}
+
+extension KVCacheStrategy {
+    public var canUseTurboQuant: Bool {
+        self == .adaptiveTurboQuant || self == .turboQuant
+    }
+
+    public var createsTurboQuantCacheImmediately: Bool {
+        self == .turboQuant
+    }
 }
 
 public enum TurboQuantOptimizationPolicy: String, Codable, Sendable, CaseIterable {

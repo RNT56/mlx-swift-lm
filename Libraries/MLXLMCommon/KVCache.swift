@@ -2251,7 +2251,7 @@ public func makePromptCacheWithLayerCount(
     maxKVSize: Int? = nil,
     parameters: GenerateParameters? = nil
 ) -> [KVCache] {
-    if parameters?.kvCacheStrategy == .turboQuant {
+    if parameters?.kvCacheStrategy.createsTurboQuantCacheImmediately == true {
         let preset = parameters?.turboQuantPreset ?? .turbo3_5
         let backend = parameters?.turboQuantBackend ?? .metalPolarQJL
         let groupSize = parameters?.kvGroupSize ?? 64
@@ -2310,7 +2310,7 @@ public func makeAttentionKVCache(
             parameters?.maxKVSize ?? maxKVSize
         }
 
-    if parameters?.kvCacheStrategy == .turboQuant {
+    if parameters?.kvCacheStrategy.createsTurboQuantCacheImmediately == true {
         let preset = parameters?.turboQuantPreset ?? .turbo3_5
         let backend = parameters?.turboQuantBackend ?? .metalPolarQJL
         let groupSize = parameters?.kvGroupSize ?? 64
@@ -2665,7 +2665,7 @@ public func maybeQuantizeKVCache(
 ) {
     guard !cache.isEmpty else { return }
     if kvCacheStrategy == .none { return }
-    let resolvedBits = kvCacheStrategy == .turboQuant ? turboQuantPreset.effectiveBits : kvBits
+    let resolvedBits = kvCacheStrategy.canUseTurboQuant ? turboQuantPreset.effectiveBits : kvBits
     guard let kvBits = resolvedBits else { return }
 
     func isReadyForQuantization(_ item: KVCache) -> Bool {
@@ -2699,7 +2699,7 @@ public func maybeQuantizeKVCache(
             return item
         }
         if let simpleCache = item as? KVCacheSimple {
-            if kvCacheStrategy == .turboQuant {
+            if kvCacheStrategy.canUseTurboQuant {
                 return simpleCache.toTurboQuant(
                     preset: turboQuantPreset,
                     groupSize: kvGroupSize,
@@ -2713,7 +2713,7 @@ public func maybeQuantizeKVCache(
             }
             return simpleCache.toQuantized(groupSize: kvGroupSize, bits: kvBits)
         }
-        if kvCacheStrategy == .turboQuant, let rotatingCache = item as? RotatingKVCache {
+        if kvCacheStrategy.canUseTurboQuant, let rotatingCache = item as? RotatingKVCache {
             return rotatingCache.toTurboQuant(
                 preset: turboQuantPreset,
                 groupSize: kvGroupSize,

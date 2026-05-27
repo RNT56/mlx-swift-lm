@@ -190,6 +190,56 @@ extension MLXRuntimeSwiftTests {
             }
         }
 
+        @Test func testAdaptiveTurboQuantStartsRawAndConvertsAfterThreshold() throws {
+            guard TurboQuantKernelAvailability.current.supportsMetalPolarQJLCodec else { return }
+
+            try Device.withDefaultDevice(.cpu) {
+                let parameters = GenerateParameters(
+                    quantizedKVStart: 4,
+                    kvCacheStrategy: .adaptiveTurboQuant,
+                    turboQuantPreset: .turbo3_5,
+                    turboQuantBackend: .metalPolarQJL,
+                    turboQuantOptimizationPolicy: .preferThroughput
+                )
+                var cache: [KVCache] = [makeAttentionKVCache(parameters: parameters)]
+                #expect(cache[0] is KVCacheSimple)
+
+                let firstKeys = MLXArray.ones([1, 8, 4, 64], dtype: .bfloat16)
+                let firstValues = MLXArray.ones([1, 8, 4, 64], dtype: .bfloat16)
+                _ = cache[0].update(keys: firstKeys, values: firstValues)
+                maybeQuantizeKVCache(
+                    cache: &cache,
+                    kvBits: nil,
+                    kvGroupSize: 64,
+                    quantizedKVStart: parameters.quantizedKVStart,
+                    kvCacheStrategy: parameters.kvCacheStrategy,
+                    turboQuantPreset: parameters.turboQuantPreset,
+                    turboQuantBackend: parameters.turboQuantBackend,
+                    turboQuantOptimizationPolicy: parameters.turboQuantOptimizationPolicy
+                )
+                #expect(cache[0] is KVCacheSimple)
+
+                let nextKeys = MLXArray.ones([1, 8, 1, 64], dtype: .bfloat16)
+                let nextValues = MLXArray.ones([1, 8, 1, 64], dtype: .bfloat16)
+                _ = cache[0].update(keys: nextKeys, values: nextValues)
+                maybeQuantizeKVCache(
+                    cache: &cache,
+                    kvBits: nil,
+                    kvGroupSize: 64,
+                    quantizedKVStart: parameters.quantizedKVStart,
+                    kvCacheStrategy: parameters.kvCacheStrategy,
+                    turboQuantPreset: parameters.turboQuantPreset,
+                    turboQuantBackend: parameters.turboQuantBackend,
+                    turboQuantOptimizationPolicy: parameters.turboQuantOptimizationPolicy
+                )
+
+                #expect(cache[0] is TurboQuantKVCache)
+                let turbo = try #require(cache[0] as? TurboQuantKVCache)
+                #expect(turbo.preset == .turbo3_5)
+                #expect(turbo.optimizationPolicy == .preferThroughput)
+            }
+        }
+
         @Test func testTurboQuantDefaultsRequestVerifiedMetalBackend() {
             let availability = TurboQuantKernelAvailability.current
             let expectedBackend: TurboQuantBackend =

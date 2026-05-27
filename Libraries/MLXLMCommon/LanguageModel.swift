@@ -266,7 +266,7 @@ extension LanguageModel where Self: KVCacheDimensionProvider {
         // The number of heads per layer (kvHeads[i]) is not used for cache creation
         let numLayers = kvHeads.count
 
-        if parameters?.kvCacheStrategy == .turboQuant {
+        if parameters?.kvCacheStrategy.createsTurboQuantCacheImmediately == true {
             let preset = parameters?.turboQuantPreset ?? .turbo3_5
             let backend = parameters?.turboQuantBackend ?? .metalPolarQJL
             let groupSize = parameters?.kvGroupSize ?? 64

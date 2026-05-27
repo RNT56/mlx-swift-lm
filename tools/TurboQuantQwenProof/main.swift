@@ -60,6 +60,9 @@ struct QwenProofThroughput: Codable {
     var speedRatioToPlain: Double
     var speedRatioToPlainP50: Double
     var speedRatioToPlainP95: Double
+    var productionTokensPerSecondP50: Double
+    var productionTokensPerSecondP95: Double
+    var productionThroughputSource: String
     var minExtendedTokensPerSecond: Double
     var passedParityGate: Bool
     var passedProductionGate: Bool
@@ -86,6 +89,7 @@ struct QwenProofResult: Codable {
     var strictGateRequired: Bool
     var certificationStatus: String
     var selectedAttentionPath: String?
+    var productionKVRoute: String?
     var precisionStatus: String
     var quality: QwenProofQuality?
     var throughput: QwenProofThroughput?
@@ -768,9 +772,17 @@ func runCase(
         let speedRatioP50 = compressedTPSP50 / max(plainTPSP50, Double.leastNonzeroMagnitude)
         let speedRatioP95 = compressedTPSP95 / max(plainTPSP95, Double.leastNonzeroMagnitude)
         let usesPlainProductionRoute = contextLength <= shortContextPlainKVThreshold
+        let productionKVRoute =
+            usesPlainProductionRoute
+            ? "rawSDPA"
+            : "turboQuantCompressed"
+        let productionTPSP50 =
+            usesPlainProductionRoute ? plainTPSP50 : compressedTPSP50
+        let productionTPSP95 =
+            usesPlainProductionRoute ? plainTPSP95 : compressedTPSP95
         let passedParityGate = usesPlainProductionRoute || speedRatioP95 >= speedParityRatio
         let passedProductionGate =
-            usesPlainProductionRoute || compressedTPSP95 >= minExtendedTokensPerSecond
+            productionTPSP95 >= minExtendedTokensPerSecond
         let throughput = QwenProofThroughput(
             compressedSeconds: compressedTiming.averageSeconds,
             compressedSecondsP50: compressedTiming.p50Seconds,
@@ -787,6 +799,9 @@ func runCase(
             speedRatioToPlain: speedRatio,
             speedRatioToPlainP50: speedRatioP50,
             speedRatioToPlainP95: speedRatioP95,
+            productionTokensPerSecondP50: productionTPSP50,
+            productionTokensPerSecondP95: productionTPSP95,
+            productionThroughputSource: usesPlainProductionRoute ? "plainRawSDPA" : "turboQuantFused",
             minExtendedTokensPerSecond: minExtendedTokensPerSecond,
             passedParityGate: passedParityGate,
             passedProductionGate: passedProductionGate
@@ -831,6 +846,7 @@ func runCase(
             strictGateRequired: strictGateRequired,
             certificationStatus: certificationStatus(for: gateScope),
             selectedAttentionPath: selectedAttentionPath,
+            productionKVRoute: productionKVRoute,
             precisionStatus: candidate?.status.rawValue ?? "unknown",
             quality: quality,
             throughput: throughput,
@@ -847,6 +863,7 @@ func runCase(
             strictGateRequired: strictGateRequired,
             certificationStatus: certificationStatus(for: gateScope),
             selectedAttentionPath: nil,
+            productionKVRoute: nil,
             precisionStatus: candidate?.status.rawValue ?? "unknown",
             quality: nil,
             throughput: nil,
@@ -988,7 +1005,7 @@ let strictPassed =
     !strictGateResults.isEmpty
     && strictGateResults.allSatisfy { $0.status == "ok" }
 let report = QwenProofReport(
-    schemaVersion: 5,
+    schemaVersion: 6,
     generatedAt: ISO8601DateFormatter().string(from: Date()),
     iterations: iterations,
     warmupIterations: warmupIterations,

@@ -1387,6 +1387,24 @@ extension MLXRuntimeSwiftTests {
             }
         }
 
+        @Test func testQwen35AndQwen36ProfilesApplyAdaptiveTurboQuantRouting() throws {
+            let profile = try #require(
+                TurboQuantProfileRegistry.bundled.profile(
+                    for: "mlx-community/Qwen3.5-2B-OptiQ-4bit",
+                    modelType: "qwen3_5",
+                    keyHeadDimension: 256,
+                    valueHeadDimension: 256
+                )
+            )
+
+            let parameters = profile.applying(to: GenerateParameters())
+
+            #expect(parameters.kvCacheStrategy == .adaptiveTurboQuant)
+            #expect(parameters.turboQuantRawSDPAThreshold == 16_384)
+            #expect(parameters.turboQuantPreset == .turbo8)
+            #expect(parameters.turboQuantOptimizationPolicy == .preferThroughput)
+        }
+
         @Test func testMemoryProfileMapsToAggressiveRuntimePreset() {
             let profile = TurboQuantProfile(
                 id: "memory-test",

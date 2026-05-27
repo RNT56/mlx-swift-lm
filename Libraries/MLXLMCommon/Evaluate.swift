@@ -114,6 +114,14 @@ public struct GenerateParameters: Sendable {
     /// Requested context length for automatic TurboQuant admission. Defaults to ``maxKVSize`` or a conservative 4k plan.
     public var turboQuantRequestedContextLength: Int?
 
+    /// Raw-SDPA token threshold used by ``KVCacheStrategy/adaptiveTurboQuant`` before converting to TurboQuant.
+    ///
+    /// Adaptive routing keeps raw KV and MLX SDPA on the hot path while this
+    /// window is admitted. If raw SDPA does not fit the sampled memory budget,
+    /// or the prompt already exceeds this threshold, routing starts directly in
+    /// compressed TurboQuant instead.
+    public var turboQuantRawSDPAThreshold: Int
+
     /// Prompt token count included in automatic admission estimates.
     public var turboQuantPromptTokenCount: Int
 
@@ -170,6 +178,7 @@ public struct GenerateParameters: Sendable {
         turboQuantPerCacheResidentBudgetBytes: Int? = nil,
         turboQuantAdmissionProfile: ModelMemoryProfile? = nil,
         turboQuantRequestedContextLength: Int? = nil,
+        turboQuantRawSDPAThreshold: Int = 16_384,
         turboQuantPromptTokenCount: Int = 0,
         turboQuantUserMode: TurboQuantUserMode = .balanced,
         turboQuantFallbackPolicy: TurboQuantFallbackPolicy = .compressedDecodeAllowed,
@@ -201,6 +210,7 @@ public struct GenerateParameters: Sendable {
         self.turboQuantPerCacheResidentBudgetBytes = turboQuantPerCacheResidentBudgetBytes
         self.turboQuantAdmissionProfile = turboQuantAdmissionProfile
         self.turboQuantRequestedContextLength = turboQuantRequestedContextLength
+        self.turboQuantRawSDPAThreshold = max(0, turboQuantRawSDPAThreshold)
         self.turboQuantPromptTokenCount = turboQuantPromptTokenCount
         self.turboQuantUserMode = turboQuantUserMode
         self.turboQuantFallbackPolicy = turboQuantFallbackPolicy
@@ -338,6 +348,76 @@ extension GenerateParameters {
         )
     }
 
+    private func applyingTurboQuantAdmission(
+        _ admission: TurboQuantAdmission,
+        layerCount: Int?
+    ) -> GenerateParameters {
+        var resolved = self
+        resolved.maxKVSize = min(
+            resolved.maxKVSize ?? admission.admittedContextLength,
+            admission.admittedContextLength
+        )
+        resolved.turboQuantPreset = admission.memoryPlan.preset
+        resolved.turboQuantValueBits = admission.memoryPlan.valueBits
+        switch admission.selectedMode {
+        case .fastest:
+            resolved.turboQuantOptimizationPolicy = .preferThroughput
+        case .balanced:
+            break
+        case .maxContext, .batterySaver:
+            resolved.turboQuantOptimizationPolicy = .preferMemory
+        }
+        if let layerCount, layerCount > 0 {
+            let residentBudget =
+                admission.memoryPlan.runtimeZones.compressedKVBytes
+                + admission.memoryPlan.runtimeZones.rawShadowBytes
+                + admission.memoryPlan.runtimeZones.fallbackReserveBytes
+            resolved.turboQuantPerCacheResidentBudgetBytes = max(1, residentBudget / layerCount)
+        }
+        return resolved
+    }
+
+    private func resolvingAdaptiveTurboQuantRoute(
+        admission: TurboQuantAdmission,
+        layerCount: Int?
+    ) -> GenerateParameters {
+        var resolved = applyingTurboQuantAdmission(admission, layerCount: layerCount)
+        let requestedContext = max(1, admission.requestedContextLength)
+        let rawThreshold = max(0, turboQuantRawSDPAThreshold)
+        let promptTokens = max(0, turboQuantPromptTokenCount)
+
+        guard rawThreshold > 0,
+            !TurboQuantRuntimeControl.enabled("TURBOQUANT_FORCE_COMPRESSED")
+        else {
+            resolved.kvCacheStrategy = .turboQuant
+            resolved.quantizedKVStart = 0
+            return resolved
+        }
+
+        let rawRouteContext = min(requestedContext, rawThreshold)
+        let rawFits = admission.memoryPlan.rawSDPAFits(contextLength: rawRouteContext)
+
+        if requestedContext <= rawThreshold, rawFits {
+            resolved.kvCacheStrategy = .mlxAffine
+            resolved.kvBits = nil
+            resolved.turboQuantPerCacheResidentBudgetBytes = nil
+            return resolved
+        }
+
+        if !rawFits || promptTokens > rawThreshold {
+            resolved.kvCacheStrategy = .turboQuant
+            resolved.quantizedKVStart = 0
+            return resolved
+        }
+
+        resolved.kvCacheStrategy = .adaptiveTurboQuant
+        resolved.quantizedKVStart =
+            quantizedKVStart > 0
+            ? min(quantizedKVStart, rawThreshold)
+            : rawThreshold
+        return resolved
+    }
+
     public func resolvedForTurboQuantRuntime(
         layerCount: Int? = nil
     ) throws -> GenerateParameters {
@@ -362,7 +442,7 @@ extension GenerateParameters {
         if TurboQuantRuntimeControl.enabled("TURBOQUANT_FORCE_FUSED") {
             resolved.turboQuantOptimizationPolicy = .preferThroughput
         }
-        guard resolved.kvCacheStrategy == .turboQuant else {
+        guard resolved.kvCacheStrategy.canUseTurboQuant else {
             return resolved
         }
         if resolved.turboQuantAdmission == nil,
@@ -375,28 +455,13 @@ extension GenerateParameters {
             guard admission.admitted else {
                 throw TurboQuantGenerationError.admissionRejected(admission.userMessage)
             }
-            resolved.maxKVSize = min(
-                resolved.maxKVSize ?? admission.admittedContextLength,
-                admission.admittedContextLength
-            )
-            resolved.turboQuantPreset = admission.memoryPlan.preset
-            resolved.turboQuantValueBits = admission.memoryPlan.valueBits
-            switch admission.selectedMode {
-            case .fastest:
-                resolved.turboQuantOptimizationPolicy = .preferThroughput
-            case .balanced:
-                break
-            case .maxContext, .batterySaver:
-                resolved.turboQuantOptimizationPolicy = .preferMemory
+            if resolved.kvCacheStrategy == .adaptiveTurboQuant {
+                return resolved.resolvingAdaptiveTurboQuantRoute(
+                    admission: admission,
+                    layerCount: layerCount
+                )
             }
-            if let layerCount, layerCount > 0 {
-                let residentBudget =
-                    admission.memoryPlan.runtimeZones.compressedKVBytes
-                    + admission.memoryPlan.runtimeZones.rawShadowBytes
-                    + admission.memoryPlan.runtimeZones.fallbackReserveBytes
-                resolved.turboQuantPerCacheResidentBudgetBytes = max(1, residentBudget / layerCount)
-            }
-            return resolved
+            return resolved.applyingTurboQuantAdmission(admission, layerCount: layerCount)
         }
         if resolved.turboQuantAdmissionPolicy == .required {
             throw TurboQuantGenerationError.admissionRequired
@@ -414,7 +479,7 @@ private func resolvedGenerationParameters(
         return attentionLayerCount > 0 ? attentionLayerCount : provider.kvHeads.count
     }
     let resolved = try parameters.resolvedForTurboQuantRuntime(layerCount: layerCount)
-    if resolved.kvCacheStrategy == .turboQuant, !(model is any ThrowingLanguageModel) {
+    if resolved.kvCacheStrategy.canUseTurboQuant, !(model is any ThrowingLanguageModel) {
         throw TurboQuantGenerationError.modelRequiresThrowingAttention(
             String(describing: type(of: model)))
     }

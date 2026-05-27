@@ -243,6 +243,110 @@ extension MLXRuntimeSwiftTests {
             #expect((resolved.turboQuantPerCacheResidentBudgetBytes ?? 0) > 0)
         }
 
+        @Test func testAdaptiveTurboQuantUsesRawSDPAWhenShortContextFits() throws {
+            let planner = Self.planner()
+            let admission = planner.admit(
+                profile: Self.profile(weightGiB: 2, layers: 32),
+                requestedContextLength: 8192,
+                userMode: .balanced,
+                fallbackPolicy: .compressedDecodeAllowed,
+                preset: .turbo3_5,
+                memorySample: Self.sample(availableGiB: 12, modelGiB: 2)
+            )
+            let parameters = GenerateParameters(
+                kvCacheStrategy: .adaptiveTurboQuant,
+                turboQuantAdmission: admission,
+                turboQuantRawSDPAThreshold: 16_384
+            )
+
+            let resolved = try parameters.resolvedForTurboQuantRuntime(layerCount: 32)
+
+            #expect(resolved.kvCacheStrategy == .mlxAffine)
+            #expect(resolved.kvBits == nil)
+            #expect(resolved.turboQuantPerCacheResidentBudgetBytes == nil)
+        }
+
+        @Test func testAdaptiveTurboQuantUsesCompressedRouteWhenShortRawSDPADoesNotFit() throws {
+            let planner = Self.planner()
+            let profile = Self.profile(weightGiB: 2, layers: 32)
+            let admission = planner.admit(
+                profile: profile,
+                requestedContextLength: 8192,
+                userMode: .balanced,
+                fallbackPolicy: .compressedDecodeAllowed,
+                preset: .turbo3_5,
+                memorySample: TurboQuantRuntimeMemorySample(
+                    availableAppMemoryBytes: Self.gib(3) + Self.mib(200),
+                    modelResidentBytes: Self.gib(2),
+                    tokenizerBytes: 0,
+                    promptBytes: 0,
+                    uiReserveBytes: 0,
+                    thermalState: .nominal
+                )
+            )
+            #expect(admission.admitted)
+            #expect(!admission.memoryPlan.rawSDPAFits(contextLength: 8192))
+            let parameters = GenerateParameters(
+                kvCacheStrategy: .adaptiveTurboQuant,
+                turboQuantAdmission: admission,
+                turboQuantRawSDPAThreshold: 16_384
+            )
+
+            let resolved = try parameters.resolvedForTurboQuantRuntime(layerCount: 32)
+
+            #expect(resolved.kvCacheStrategy == .turboQuant)
+            #expect(resolved.quantizedKVStart == 0)
+            #expect((resolved.turboQuantPerCacheResidentBudgetBytes ?? 0) > 0)
+        }
+
+        @Test func testAdaptiveTurboQuantKeepsRawWindowBeforeLongContextConversion() throws {
+            let planner = Self.planner()
+            let admission = planner.admit(
+                profile: Self.profile(weightGiB: 2, layers: 32),
+                requestedContextLength: 65_536,
+                userMode: .balanced,
+                fallbackPolicy: .compressedDecodeAllowed,
+                preset: .turbo3_5,
+                memorySample: Self.sample(availableGiB: 12, modelGiB: 2)
+            )
+            let parameters = GenerateParameters(
+                kvCacheStrategy: .adaptiveTurboQuant,
+                turboQuantAdmission: admission,
+                turboQuantRawSDPAThreshold: 16_384,
+                turboQuantPromptTokenCount: 128
+            )
+
+            let resolved = try parameters.resolvedForTurboQuantRuntime(layerCount: 32)
+
+            #expect(resolved.kvCacheStrategy == .adaptiveTurboQuant)
+            #expect(resolved.quantizedKVStart == 16_384)
+            #expect(resolved.maxKVSize == admission.admittedContextLength)
+        }
+
+        @Test func testAdaptiveTurboQuantStartsCompressedWhenPromptAlreadyExceedsRawWindow() throws {
+            let planner = Self.planner()
+            let admission = planner.admit(
+                profile: Self.profile(weightGiB: 2, layers: 32),
+                requestedContextLength: 65_536,
+                promptTokenCount: 32_768,
+                userMode: .balanced,
+                fallbackPolicy: .compressedDecodeAllowed,
+                preset: .turbo3_5,
+                memorySample: Self.sample(availableGiB: 12, modelGiB: 2)
+            )
+            let parameters = GenerateParameters(
+                kvCacheStrategy: .adaptiveTurboQuant,
+                turboQuantAdmission: admission,
+                turboQuantRawSDPAThreshold: 16_384,
+                turboQuantPromptTokenCount: 32_768
+            )
+
+            let resolved = try parameters.resolvedForTurboQuantRuntime(layerCount: 32)
+
+            #expect(resolved.kvCacheStrategy == .turboQuant)
+            #expect(resolved.quantizedKVStart == 0)
+        }
+
         private static func planner() -> TurboQuantAdmissionPlanner {
             TurboQuantAdmissionPlanner(
                 options: TurboQuantAdmissionPlanner.Options(
@@ -284,6 +388,10 @@ extension MLXRuntimeSwiftTests {
 
         private static func gib(_ value: Int) -> Int {
             value * 1024 * 1024 * 1024
+        }
+
+        private static func mib(_ value: Int) -> Int {
+            value * 1024 * 1024
         }
     }
 }

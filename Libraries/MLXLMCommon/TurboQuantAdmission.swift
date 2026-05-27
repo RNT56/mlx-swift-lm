@@ -391,6 +391,23 @@ public struct TurboQuantMemoryPlan: Codable, Equatable, Sendable {
         runtimeZones.fitsAvailableMemory
     }
 
+    public func rawSDPARuntimeBytes(contextLength: Int) -> Int {
+        let rawKVBytes = rawBytesPerToken * max(0, contextLength)
+        return runtimeZones.modelResidentBytes
+            + runtimeZones.mlxCacheBytes
+            + rawKVBytes
+            + runtimeZones.scratchBytes
+            + runtimeZones.promptAndTokenizerBytes
+            + runtimeZones.uiReserveBytes
+            + runtimeZones.safetyReserveBytes
+            + runtimeZones.rollingSummaryBytes
+    }
+
+    public func rawSDPAFits(contextLength: Int) -> Bool {
+        rawSDPARuntimeBytes(contextLength: contextLength)
+            <= runtimeZones.availableAppMemoryBytes
+    }
+
     public init(
         requestedContextLength: Int,
         admittedContextLength: Int,

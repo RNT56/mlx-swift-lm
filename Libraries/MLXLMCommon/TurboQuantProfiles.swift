@@ -1016,7 +1016,7 @@ public struct TurboQuantProfile: Codable, Equatable, Identifiable, Sendable {
 
     public func applying(to parameters: GenerateParameters) -> GenerateParameters {
         var resolved = parameters
-        resolved.kvCacheStrategy = recommendedScheme.kvCacheStrategy
+        resolved.kvCacheStrategy = isQwen35Or36Family ? .adaptiveTurboQuant : recommendedScheme.kvCacheStrategy
         resolved.kvGroupSize = groupSize
         resolved.turboQuantPreset = recommendedScheme.preset
         resolved.turboQuantBackend = backend
@@ -1119,7 +1119,7 @@ public struct TurboQuantProfile: Codable, Equatable, Identifiable, Sendable {
     }
 
     public func warmTurboQuantAttentionKernelsIfAvailable() {
-        guard recommendedScheme.kvCacheStrategy == .turboQuant,
+        guard recommendedScheme.kvCacheStrategy.canUseTurboQuant,
             !TurboQuantRuntimeControl.enabled("TURBOQUANT_DISABLE")
         else {
             return
