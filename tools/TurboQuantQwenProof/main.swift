@@ -30,6 +30,8 @@ struct QwenProofCase: Codable {
     var contextLength: Int
     var reservedCapacityLength: Int
     var blockParallelTokenBlockSize: Int?
+    var recommendedBlockParallelTokenBlockSize: Int?
+    var effectiveBlockParallelTokenBlockSize: Int?
     var queryLength: Int
 }
 
@@ -116,6 +118,7 @@ struct QwenProofReport: Codable {
     var shortContextPlainKVThreshold: Int
     var requestedReservedCapacityLength: Int?
     var requestedBlockParallelTokenBlockSize: Int?
+    var blockParallelTokenBlockPolicy: String
     var productionContexts: [Int]
     var largeContextExperimentContexts: [Int]
     var requireLargeContextExperimentGates: Bool
@@ -216,6 +219,40 @@ func roundedReservedCapacityLength(_ requiredLength: Int) -> Int {
     let compressedCapacityStep = 256
     return ((compressedCapacityStep + requiredLength - 1) / compressedCapacityStep)
         * compressedCapacityStep
+}
+
+func roundedBlockParallelTokenBlockSize(_ requested: Int, headDimension: Int) -> Int {
+    let target = max(1, min(512, max(requested, headDimension)))
+    var width = 1
+    while width < target {
+        width <<= 1
+    }
+    return width
+}
+
+func blockParallelTokenPlan(
+    contextLength: Int,
+    headDimension: Int,
+    queryLength: Int,
+    availability: TurboQuantKernelAvailability,
+    requestedBlockParallelTokenBlockSize: Int?
+) -> (recommended: Int?, effective: Int?) {
+    let recommended = turboQuantRecommendedBlockParallelTokenBlockSize(
+        logicalLength: contextLength,
+        headDimension: headDimension,
+        queryLength: queryLength,
+        kernelProfile: availability.selectedKernelProfile
+    )
+    if let requestedBlockParallelTokenBlockSize {
+        return (
+            recommended,
+            roundedBlockParallelTokenBlockSize(
+                requestedBlockParallelTokenBlockSize,
+                headDimension: headDimension
+            )
+        )
+    }
+    return (recommended, recommended)
 }
 
 func argumentStrings(_ name: String, default defaultValue: [String]) -> [String] {
@@ -512,6 +549,13 @@ func runCase(
     let caseID =
         "\(profile.id)_\(scheme.rawValue)_ctx\(contextLength)_cap\(reservedCapacityLength)_q\(queryLength)\(attentionPath.idSuffix)"
     guard let precisionProfile = profile.applyingPrecisionCandidate(scheme) else {
+        let blockPlan = blockParallelTokenPlan(
+            contextLength: contextLength,
+            headDimension: 256,
+            queryLength: queryLength,
+            availability: availability,
+            requestedBlockParallelTokenBlockSize: blockParallelTokenBlockSize
+        )
         let benchmarkCase = QwenProofCase(
             id: caseID,
             profileID: profile.id,
@@ -524,6 +568,8 @@ func runCase(
             contextLength: contextLength,
             reservedCapacityLength: reservedCapacityLength,
             blockParallelTokenBlockSize: blockParallelTokenBlockSize,
+            recommendedBlockParallelTokenBlockSize: blockPlan.recommended,
+            effectiveBlockParallelTokenBlockSize: blockPlan.effective,
             queryLength: queryLength
         )
         return QwenProofResult(
@@ -547,6 +593,13 @@ func runCase(
     let kvHeads = 4
     let queryHeads = 16
     let headDimension = 256
+    let blockPlan = blockParallelTokenPlan(
+        contextLength: contextLength,
+        headDimension: headDimension,
+        queryLength: queryLength,
+        availability: availability,
+        requestedBlockParallelTokenBlockSize: blockParallelTokenBlockSize
+    )
     let benchmarkCase = QwenProofCase(
         id: caseID,
         profileID: profile.id,
@@ -559,6 +612,8 @@ func runCase(
         contextLength: contextLength,
         reservedCapacityLength: reservedCapacityLength,
         blockParallelTokenBlockSize: blockParallelTokenBlockSize,
+        recommendedBlockParallelTokenBlockSize: blockPlan.recommended,
+        effectiveBlockParallelTokenBlockSize: blockPlan.effective,
         queryLength: queryLength
     )
 
@@ -933,7 +988,7 @@ let strictPassed =
     !strictGateResults.isEmpty
     && strictGateResults.allSatisfy { $0.status == "ok" }
 let report = QwenProofReport(
-    schemaVersion: 4,
+    schemaVersion: 5,
     generatedAt: ISO8601DateFormatter().string(from: Date()),
     iterations: iterations,
     warmupIterations: warmupIterations,
@@ -943,6 +998,8 @@ let report = QwenProofReport(
     shortContextPlainKVThreshold: shortContextPlainKVThreshold,
     requestedReservedCapacityLength: reservedCapacityOverride,
     requestedBlockParallelTokenBlockSize: blockParallelTokenBlockSize,
+    blockParallelTokenBlockPolicy:
+        "auto uses MLX.turboQuantRecommendedBlockParallelTokenBlockSize; --block-tokens overrides and is rounded to the fused kernel power-of-two threadgroup width",
     productionContexts: uniqueSorted(contexts),
     largeContextExperimentContexts: uniqueSorted(largeContextExperimentContexts),
     requireLargeContextExperimentGates: requireLargeContextExperimentGates,
