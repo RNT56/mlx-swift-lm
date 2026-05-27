@@ -34,6 +34,12 @@ public enum AttentionKVState {
         values: TurboQuantAttentionCode,
         cache: any TurboQuantCompressedKVCacheProtocol
     )
+    case hybridTurboQuant(
+        keys: MLXArray,
+        values: MLXArray,
+        selection: TurboQuantColdSelection,
+        cache: HybridTurboQuantKVCache
+    )
 
     public var keyLength: Int {
         switch self {
@@ -43,6 +49,8 @@ public enum AttentionKVState {
             keys.0.dim(-2)
         case .turboQuant(let keys, _, _):
             keys.layout.logicalLength
+        case .hybridTurboQuant(let keys, _, _, _):
+            keys.dim(2)
         }
     }
 }
@@ -59,9 +67,9 @@ private func canonicalTurboQuantInputs(
     values: MLXArray
 ) -> TurboQuantAttentionInputs {
     TurboQuantAttentionInputs(
-        queries: queries.contiguous(stream: .gpu),
-        keys: keys.contiguous(stream: .gpu),
-        values: values.contiguous(stream: .gpu)
+        queries: queries,
+        keys: keys,
+        values: values
     )
 }
 
@@ -393,14 +401,19 @@ private func turboQuantAttentionFallbackLadder(
         return output
     }
 
+    let cachedPath = cache.attentionDiagnostics.activeAttentionPath
+    let cachedOnlineAdmission =
+        stateAlreadyValidated
+        && (cachedPath == .onlineFused || cachedPath == .tiledOnlineFused)
     let canUseOnline =
         sinks == nil && cache.prefersOnlineFusedAttention
         && keyCode.layout.headDimension == valueCode.layout.headDimension
-        && MLX.turboQuantMetalSupportsOnlineFusedAttention(
-            queries: queries,
-            keyCode: keyCode,
-            mask: adjustedMask
-        )
+        && (cachedOnlineAdmission
+            || MLX.turboQuantMetalSupportsOnlineFusedAttention(
+                queries: queries,
+                keyCode: keyCode,
+                mask: adjustedMask
+            ))
 
     if canUseOnline {
         do {
@@ -691,7 +704,6 @@ public func attentionWithKVStateThrowing(
 
     case .turboQuant(let keys, let values, let cache):
         do {
-            let queries = queries.contiguous(stream: .gpu)
             return try turboQuantAttentionFallbackLadder(
                 queries: queries,
                 keyCode: keys,
@@ -707,6 +719,16 @@ public func attentionWithKVStateThrowing(
                 "compressed attention failed and compressed state could not be decoded: \(error)"
             )
         }
+
+    case .hybridTurboQuant(let keys, let values, _, _):
+        return MLXFast.scaledDotProductAttention(
+            queries: queries,
+            keys: keys,
+            values: values,
+            scale: scale,
+            mask: mask,
+            sinks: sinks
+        )
     }
 }
 
@@ -888,22 +910,35 @@ public func attentionWithCacheUpdateReturningStateThrowing(
             state
         )
     }
+    if let hybridCache = cache as? HybridTurboQuantKVCache {
+        return try turboQuantHybridAttentionThrowing(
+            queries: queries,
+            keys: keys,
+            values: values,
+            cache: hybridCache,
+            scale: scale,
+            mask: mask,
+            sinks: sinks
+        )
+    }
+    if queries.dim(2) > 1, queries.dim(2) == keys.dim(2),
+        let prefill = try turboQuantCompressedPrefillAttentionThrowing(
+            queries: queries,
+            keys: keys,
+            values: values,
+            cache: cache,
+            scale: scale,
+            mask: mask,
+            sinks: sinks
+        )
+    {
+        return prefill
+    }
     let useTurboQuantInputs = cache is TurboQuantCompressedKVCacheProtocol
     let turboQuantInputs =
         useTurboQuantInputs
         ? canonicalTurboQuantInputs(queries: queries, keys: keys, values: values)
         : TurboQuantAttentionInputs(queries: queries, keys: keys, values: values)
-    if let prefill = try turboQuantCompressedPrefillAttentionThrowing(
-        queries: turboQuantInputs.queries,
-        keys: turboQuantInputs.keys,
-        values: turboQuantInputs.values,
-        cache: cache,
-        scale: scale,
-        mask: mask,
-        sinks: sinks
-    ) {
-        return prefill
-    }
     if let turboQuantCache = cache as? TurboQuantCompressedKVCacheProtocol,
         turboQuantCache.supportsCompressedAttention(
             queries: turboQuantInputs.queries,

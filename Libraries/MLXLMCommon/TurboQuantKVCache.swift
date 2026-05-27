@@ -66,16 +66,17 @@ public enum KVCacheStrategy: String, Codable, Sendable, CaseIterable {
     case none
     case mlxAffine
     case adaptiveTurboQuant
+    case hybridTurboQuant
     case turboQuant
 }
 
 extension KVCacheStrategy {
     public var canUseTurboQuant: Bool {
-        self == .adaptiveTurboQuant || self == .turboQuant
+        self == .adaptiveTurboQuant || self == .hybridTurboQuant || self == .turboQuant
     }
 
     public var createsTurboQuantCacheImmediately: Bool {
-        self == .turboQuant
+        self == .hybridTurboQuant || self == .turboQuant
     }
 }
 

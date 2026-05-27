@@ -122,6 +122,24 @@ public struct GenerateParameters: Sendable {
     /// compressed TurboQuant instead.
     public var turboQuantRawSDPAThreshold: Int
 
+    /// Exact raw tail size used by ``KVCacheStrategy/hybridTurboQuant``. nil means runtime automatic.
+    public var turboQuantHotWindowTokens: Int?
+
+    /// Fixed cold block size used when sealing old raw KV into TurboQuant storage.
+    public var turboQuantColdBlockTokens: Int
+
+    /// Normal selected cold-token budget per decode step for hybrid TurboQuant.
+    public var turboQuantColdBudgetTokens: Int
+
+    /// Maximum selected cold-token budget used when selector confidence is low.
+    public var turboQuantMaxColdBudgetTokens: Int
+
+    /// Cold-context attention behavior for hybrid TurboQuant.
+    public var turboQuantColdAttentionMode: TurboQuantColdAttentionMode
+
+    /// Layer-level cold-context policy for hybrid TurboQuant.
+    public var turboQuantLayerPolicy: TurboQuantLayerPolicy
+
     /// Prompt token count included in automatic admission estimates.
     public var turboQuantPromptTokenCount: Int
 
@@ -179,6 +197,12 @@ public struct GenerateParameters: Sendable {
         turboQuantAdmissionProfile: ModelMemoryProfile? = nil,
         turboQuantRequestedContextLength: Int? = nil,
         turboQuantRawSDPAThreshold: Int = 16_384,
+        turboQuantHotWindowTokens: Int? = nil,
+        turboQuantColdBlockTokens: Int = 1024,
+        turboQuantColdBudgetTokens: Int = 4096,
+        turboQuantMaxColdBudgetTokens: Int = 8192,
+        turboQuantColdAttentionMode: TurboQuantColdAttentionMode = .selected,
+        turboQuantLayerPolicy: TurboQuantLayerPolicy = .auto,
         turboQuantPromptTokenCount: Int = 0,
         turboQuantUserMode: TurboQuantUserMode = .balanced,
         turboQuantFallbackPolicy: TurboQuantFallbackPolicy = .compressedDecodeAllowed,
@@ -211,6 +235,15 @@ public struct GenerateParameters: Sendable {
         self.turboQuantAdmissionProfile = turboQuantAdmissionProfile
         self.turboQuantRequestedContextLength = turboQuantRequestedContextLength
         self.turboQuantRawSDPAThreshold = max(0, turboQuantRawSDPAThreshold)
+        self.turboQuantHotWindowTokens = turboQuantHotWindowTokens.map { max(0, $0) }
+        self.turboQuantColdBlockTokens = max(1, turboQuantColdBlockTokens)
+        self.turboQuantColdBudgetTokens = max(0, turboQuantColdBudgetTokens)
+        self.turboQuantMaxColdBudgetTokens = max(
+            max(0, turboQuantColdBudgetTokens),
+            turboQuantMaxColdBudgetTokens
+        )
+        self.turboQuantColdAttentionMode = turboQuantColdAttentionMode
+        self.turboQuantLayerPolicy = turboQuantLayerPolicy
         self.turboQuantPromptTokenCount = turboQuantPromptTokenCount
         self.turboQuantUserMode = turboQuantUserMode
         self.turboQuantFallbackPolicy = turboQuantFallbackPolicy

@@ -1888,6 +1888,7 @@ private func cacheClassName(_ cache: KVCache) -> String {
     case is ChunkedKVCache: return "ChunkedKVCache"
     case is MambaCache: return "MambaCache"
     case is ArraysCache: return "ArraysCache"
+    case is HybridTurboQuantKVCache: return "HybridTurboQuantKVCache"
     case is RotatingTurboQuantKVCache: return "RotatingTurboQuantKVCache"
     case is RotatingKVCache: return "RotatingKVCache"
     case is TurboQuantKVCache: return "TurboQuantKVCache"
@@ -2106,6 +2107,12 @@ private func restoreCacheFromMetaState(
         cache.metaState = metaState
         return cache
 
+    case "HybridTurboQuantKVCache":
+        return try HybridTurboQuantKVCache.restoreFromMetaState(
+            state: state,
+            metaState: metaState
+        )
+
     case "ChunkedKVCache":
         let cache = ChunkedKVCache()
         cache.state = state
@@ -2251,6 +2258,17 @@ public func makePromptCacheWithLayerCount(
     maxKVSize: Int? = nil,
     parameters: GenerateParameters? = nil
 ) -> [KVCache] {
+    if parameters?.kvCacheStrategy == .hybridTurboQuant {
+        return (0 ..< numLayers).map { layerIndex in
+            makeHybridTurboQuantKVCache(
+                parameters: parameters,
+                maxKVSize: maxKVSize,
+                layerIndex: layerIndex,
+                layerCount: numLayers
+            )
+        }
+    }
+
     if parameters?.kvCacheStrategy.createsTurboQuantCacheImmediately == true {
         let preset = parameters?.turboQuantPreset ?? .turbo3_5
         let backend = parameters?.turboQuantBackend ?? .metalPolarQJL
@@ -2310,6 +2328,13 @@ public func makeAttentionKVCache(
             parameters?.maxKVSize ?? maxKVSize
         }
 
+    if parameters?.kvCacheStrategy == .hybridTurboQuant {
+        return makeHybridTurboQuantKVCache(
+            parameters: parameters,
+            maxKVSize: resolvedMaxKVSize
+        )
+    }
+
     if parameters?.kvCacheStrategy.createsTurboQuantCacheImmediately == true {
         let preset = parameters?.turboQuantPreset ?? .turbo3_5
         let backend = parameters?.turboQuantBackend ?? .metalPolarQJL
@@ -2348,6 +2373,37 @@ public func makeAttentionKVCache(
         return RotatingKVCache(maxSize: maxKVSize, keep: keep)
     }
     return KVCacheSimple()
+}
+
+private func makeHybridTurboQuantKVCache(
+    parameters: GenerateParameters?,
+    maxKVSize: Int?,
+    layerIndex: Int? = nil,
+    layerCount: Int? = nil
+) -> HybridTurboQuantKVCache {
+    let resolvedMaxKVSize =
+        parameters?.maxKVSize
+        ?? maxKVSize
+        ?? parameters?.turboQuantRequestedContextLength
+    return HybridTurboQuantKVCache(
+        maxSize: resolvedMaxKVSize,
+        hotWindowTokens: parameters?.turboQuantHotWindowTokens,
+        coldBlockTokens: parameters?.turboQuantColdBlockTokens ?? 1024,
+        coldBudgetTokens: parameters?.turboQuantColdBudgetTokens ?? 4096,
+        maxColdBudgetTokens: parameters?.turboQuantMaxColdBudgetTokens ?? 8192,
+        coldAttentionMode: parameters?.turboQuantColdAttentionMode ?? .selected,
+        layerPolicy: parameters?.turboQuantLayerPolicy ?? .auto,
+        preset: parameters?.turboQuantPreset ?? .turbo4v2,
+        groupSize: parameters?.kvGroupSize ?? 64,
+        backend: parameters?.turboQuantBackend ?? .metalPolarQJL,
+        optimizationPolicy: parameters?.turboQuantOptimizationPolicy ?? .auto,
+        fallbackPolicy: parameters?.turboQuantFallbackPolicy ?? .compressedDecodeAllowed,
+        seed: parameters?.turboQuantSeed ?? defaultTurboQuantSeed,
+        valueBits: parameters?.turboQuantValueBits,
+        residentBudgetBytes: parameters?.turboQuantPerCacheResidentBudgetBytes,
+        layerIndex: layerIndex,
+        layerCount: layerCount
+    )
 }
 
 /// Construct a raw-only KV cache for model paths that read cache state directly.
@@ -2665,6 +2721,7 @@ public func maybeQuantizeKVCache(
 ) {
     guard !cache.isEmpty else { return }
     if kvCacheStrategy == .none { return }
+    if kvCacheStrategy == .hybridTurboQuant { return }
     let resolvedBits = kvCacheStrategy.canUseTurboQuant ? turboQuantPreset.effectiveBits : kvBits
     guard let kvBits = resolvedBits else { return }
 

@@ -1387,7 +1387,7 @@ extension MLXRuntimeSwiftTests {
             }
         }
 
-        @Test func testQwen35AndQwen36ProfilesApplyAdaptiveTurboQuantRouting() throws {
+        @Test func testQwen35AndQwen36ProfilesApplyHybridTurboQuantRouting() throws {
             let profile = try #require(
                 TurboQuantProfileRegistry.bundled.profile(
                     for: "mlx-community/Qwen3.5-2B-OptiQ-4bit",
@@ -1399,7 +1399,7 @@ extension MLXRuntimeSwiftTests {
 
             let parameters = profile.applying(to: GenerateParameters())
 
-            #expect(parameters.kvCacheStrategy == .adaptiveTurboQuant)
+            #expect(parameters.kvCacheStrategy == .hybridTurboQuant)
             #expect(parameters.turboQuantRawSDPAThreshold == 16_384)
             #expect(parameters.turboQuantPreset == .turbo8)
             #expect(parameters.turboQuantOptimizationPolicy == .preferThroughput)
