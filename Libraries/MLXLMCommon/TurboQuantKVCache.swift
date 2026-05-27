@@ -148,6 +148,9 @@ public protocol TurboQuantCompressedKVCacheProtocol: KVCache, AnyObject {
         TurboQuantAttentionCode,
         TurboQuantAttentionCode
     )
+    func makeCompressedUpdateCheckpoint(appendingTokenCount tokenCount: Int)
+        -> TurboQuantCompressedUpdateCheckpoint
+    func restoreCompressedUpdateCheckpoint(_ checkpoint: TurboQuantCompressedUpdateCheckpoint)
 
     func recordCompressedAttentionFailure(_ message: String)
     func recordFallback(_ result: TurboQuantFallbackResult)
@@ -155,6 +158,63 @@ public protocol TurboQuantCompressedKVCacheProtocol: KVCache, AnyObject {
     func decodedCompressedState(outputDType: DType) throws -> (MLXArray, MLXArray)
     func releaseRawShadow()
     func exactRawStateIfComplete() -> (keys: MLXArray, values: MLXArray)?
+}
+
+public struct TurboQuantCompressedUpdateCheckpoint {
+    fileprivate var payload: TurboQuantCompressedUpdateCheckpointPayload
+}
+
+private enum TurboQuantCompressedUpdateCheckpointPayload {
+    case fullState(
+        offset: Int,
+        metaState: [String],
+        state: [MLXArray]
+    )
+    case rotatingFullState(
+        offset: Int,
+        writeIndex: Int,
+        metaState: [String],
+        state: [MLXArray],
+        rawFallbackState: [MLXArray]?,
+        rawFallbackMetaState: [String]?,
+        packedFallbackState: [MLXArray]?,
+        packedFallbackMetaState: [String]?,
+        packedKeys: TurboQuantPackedTensor?,
+        packedValues: TurboQuantPackedTensor?,
+        fallbackResultCount: Int,
+        lifecycle: TurboQuantCacheLifecycle,
+        lastAttentionPath: TurboQuantAttentionPath,
+        lastUnsupportedShape: String?,
+        lastDecodedTransientBytes: Int
+    )
+    case linearCompressed(
+        offset: Int,
+        compressedKeys: TurboQuantAttentionCode,
+        compressedValues: TurboQuantAttentionCode,
+        packedFallbackState: [MLXArray],
+        fallbackResultCount: Int,
+        lifecycle: TurboQuantCacheLifecycle,
+        lastAttentionPath: TurboQuantAttentionPath,
+        lastUnsupportedShape: String?,
+        lastDecodedTransientBytes: Int
+    )
+    case rotatingCompressed(
+        offset: Int,
+        writeIndex: Int,
+        compressedKeys: TurboQuantAttentionCode,
+        compressedValues: TurboQuantAttentionCode,
+        rawFallbackState: [MLXArray]?,
+        rawFallbackMetaState: [String]?,
+        packedFallbackState: [MLXArray]?,
+        packedFallbackMetaState: [String]?,
+        packedKeys: TurboQuantPackedTensor?,
+        packedValues: TurboQuantPackedTensor?,
+        fallbackResultCount: Int,
+        lifecycle: TurboQuantCacheLifecycle,
+        lastAttentionPath: TurboQuantAttentionPath,
+        lastUnsupportedShape: String?,
+        lastDecodedTransientBytes: Int
+    )
 }
 
 extension TurboQuantCompressedKVCacheProtocol {
@@ -465,7 +525,8 @@ private func validateTurboQuantCode(_ code: TurboQuantAttentionCode, context: St
     }
     if code.role == .key {
         guard code.signs.dtype == .uint32, code.signs.shape == bitsetShape,
-            code.highPrecisionMask.dtype == .uint32, code.highPrecisionMask.shape == bitsetShape,
+            code.highPrecisionMask.dtype == .uint32,
+            turboQuantCompactOrStorageShape(code.highPrecisionMask, code: code),
             code.residualSigns.dtype == .uint32,
             turboQuantCompactOrStorageShape(code.residualSigns, code: code)
         else {
@@ -697,6 +758,18 @@ private func turboQuantRequireSnapshotRank(
     }
 }
 
+private func turboQuantRequireSnapshotRankOrCompact(
+    _ array: MLXArray,
+    name: String,
+    rank: Int
+) throws {
+    guard array.shape == [1] || array.ndim == rank else {
+        throw TurboQuantRuntimeFailure.cacheLayoutInvalid(
+            "TurboQuant snapshot \(name) must be compact or rank \(rank), found \(array.ndim)"
+        )
+    }
+}
+
 private func turboQuantSnapshotImportedCodes(
     manifest: TurboQuantKVSnapshotManifest,
     ordered: [MLXArray],
@@ -723,9 +796,29 @@ private func turboQuantSnapshotImportedCodes(
 
     try turboQuantRequireSnapshotRank(keyPacked, name: "key.packedMagnitudes", rank: 5)
     try turboQuantRequireSnapshotRank(keySigns, name: "key.signs", rank: 5)
-    try turboQuantRequireSnapshotRank(keyHighMask, name: "key.highPrecisionMask", rank: 5)
+    try turboQuantRequireSnapshotRankOrCompact(
+        keyHighMask,
+        name: "key.highPrecisionMask",
+        rank: 5
+    )
+    try turboQuantRequireSnapshotRankOrCompact(
+        keyResidualSigns,
+        name: "key.residualSigns",
+        rank: 5
+    )
     try turboQuantRequireSnapshotRank(keyScales, name: "key.scales", rank: 5)
     try turboQuantRequireSnapshotRank(valuePacked, name: "value.packedMagnitudes", rank: 5)
+    try turboQuantRequireSnapshotRankOrCompact(valueSigns, name: "value.signs", rank: 5)
+    try turboQuantRequireSnapshotRankOrCompact(
+        valueHighMask,
+        name: "value.highPrecisionMask",
+        rank: 5
+    )
+    try turboQuantRequireSnapshotRankOrCompact(
+        valueResidualSigns,
+        name: "value.residualSigns",
+        rank: 5
+    )
     try turboQuantRequireSnapshotRank(valueScales, name: "value.scales", rank: 5)
 
     let keyLayout = MLX.TurboQuantAttentionLayout(
@@ -1235,6 +1328,72 @@ public final class TurboQuantKVCache: QuantizedKVCache, TurboQuantCompressedKVCa
         try enforceResidentBudget(context: context)
     }
 
+    public func makeCompressedUpdateCheckpoint(appendingTokenCount tokenCount: Int)
+        -> TurboQuantCompressedUpdateCheckpoint
+    {
+        guard let compressedKeys, let compressedValues else {
+            return TurboQuantCompressedUpdateCheckpoint(
+                payload: .fullState(
+                    offset: offset,
+                    metaState: metaState,
+                    state: state.map { $0[.ellipsis] }
+                ))
+        }
+
+        return TurboQuantCompressedUpdateCheckpoint(
+            payload: .linearCompressed(
+                offset: offset,
+                compressedKeys: compressedKeys,
+                compressedValues: compressedValues,
+                packedFallbackState: super.state.map { $0[.ellipsis] },
+                fallbackResultCount: fallbackResults.count,
+                lifecycle: cacheLifecycle,
+                lastAttentionPath: lastAttentionPath,
+                lastUnsupportedShape: lastUnsupportedShape,
+                lastDecodedTransientBytes: lastDecodedTransientBytes
+            ))
+    }
+
+    public func restoreCompressedUpdateCheckpoint(
+        _ checkpoint: TurboQuantCompressedUpdateCheckpoint
+    ) {
+        switch checkpoint.payload {
+        case .fullState(let previousOffset, let previousMetaState, let previousState):
+            metaState = previousMetaState
+            state = previousState
+            offset = previousOffset
+
+        case .linearCompressed(
+            let previousOffset,
+            let previousKeys,
+            let previousValues,
+            let previousPackedFallbackState,
+            let previousFallbackResultCount,
+            let previousLifecycle,
+            let previousAttentionPath,
+            let previousUnsupportedShape,
+            let previousDecodedTransientBytes
+        ):
+            offset = previousOffset
+            compressedKeys = previousKeys
+            compressedValues = previousValues
+            super.state = previousPackedFallbackState
+            cacheLifecycle = previousLifecycle
+            lastAttentionPath = previousAttentionPath
+            lastUnsupportedShape = previousUnsupportedShape
+            lastDecodedTransientBytes = previousDecodedTransientBytes
+            if fallbackResults.count > previousFallbackResultCount {
+                fallbackResults.removeLast(fallbackResults.count - previousFallbackResultCount)
+            }
+
+        case .rotatingCompressed:
+            break
+
+        case .rotatingFullState:
+            break
+        }
+    }
+
     private func enforceResidentBudget(context: String) throws {
         guard let residentBudgetBytes else { return }
         let residentBytes = cacheFootprint.residentBytes
@@ -1451,6 +1610,34 @@ public final class TurboQuantKVCache: QuantizedKVCache, TurboQuantCompressedKVCa
             seed: seed ^ turboQuantValueSeedSalt,
             valueBits: valueBits
         )
+        if previousOffset == 0, tokenCount > 0, compressedKeys == nil, compressedValues == nil {
+            let capacity =
+                ((compressedStep + tokenCount - 1) / compressedStep) * compressedStep
+            let encodedKeys = try MLX.turboQuantMetalEncodeAttention(
+                keys,
+                configuration: keyConfiguration,
+                capacity: capacity,
+                logicalLength: tokenCount,
+                stream: .gpu
+            )
+            let encodedValues = try MLX.turboQuantMetalEncodeAttention(
+                values,
+                configuration: valueConfiguration,
+                capacity: capacity,
+                logicalLength: tokenCount,
+                stream: .gpu
+            )
+            compressedKeys = encodedKeys
+            compressedValues = encodedValues
+            offset = tokenCount
+            lastDecodedTransientBytes = 0
+            try validateCompressedState(context: "compressed initial append")
+            cacheLifecycle = .compressedCommitted(
+                logicalLength: tokenCount,
+                capacity: capacity
+            )
+            return (encodedKeys, encodedValues)
+        }
         let encodedKeys = try MLX.turboQuantMetalEncodeAttention(
             keys,
             configuration: keyConfiguration,
@@ -1467,7 +1654,10 @@ public final class TurboQuantKVCache: QuantizedKVCache, TurboQuantCompressedKVCa
         let range = previousOffset ..< (previousOffset + tokenCount)
         currentKeys.packedMagnitudes[.ellipsis, range, 0..., 0...] = encodedKeys.packedMagnitudes
         currentKeys.signs[.ellipsis, range, 0..., 0...] = encodedKeys.signs
-        currentKeys.highPrecisionMask[.ellipsis, range, 0..., 0...] = encodedKeys.highPrecisionMask
+        if currentKeys.highPrecisionMask.ndim == 5 {
+            currentKeys.highPrecisionMask[.ellipsis, range, 0..., 0...] =
+                encodedKeys.highPrecisionMask
+        }
         if currentKeys.residualSigns.ndim == 5 {
             currentKeys.residualSigns[.ellipsis, range, 0..., 0...] = encodedKeys.residualSigns
         }
@@ -1711,14 +1901,15 @@ public final class TurboQuantKVCache: QuantizedKVCache, TurboQuantCompressedKVCa
             seed: code.seed,
             valueBits: code.valueBits
         )
+
+        func expandedBitsetPlane(_ current: MLXArray, _ padding: MLXArray) -> MLXArray {
+            current.shape == [1] ? current : concatenated([current, padding], axis: 2)
+        }
+
         let expandedSigns =
             code.role == .value
-            ? zeros.signs
-            : concatenated([code.signs, zeros.signs], axis: 2)
-        let expandedHighPrecisionMask =
-            code.role == .value
-            ? zeros.highPrecisionMask
-            : concatenated([code.highPrecisionMask, zeros.highPrecisionMask], axis: 2)
+            ? code.signs
+            : expandedBitsetPlane(code.signs, zeros.signs)
         let expanded = TurboQuantAttentionCode(
             layout: newLayout,
             preset: code.preset,
@@ -1730,8 +1921,8 @@ public final class TurboQuantKVCache: QuantizedKVCache, TurboQuantCompressedKVCa
             packedMagnitudes: concatenated(
                 [code.packedMagnitudes, zeros.packedMagnitudes], axis: 2),
             signs: expandedSigns,
-            highPrecisionMask: expandedHighPrecisionMask,
-            residualSigns: zeros.residualSigns,
+            highPrecisionMask: expandedBitsetPlane(code.highPrecisionMask, zeros.highPrecisionMask),
+            residualSigns: expandedBitsetPlane(code.residualSigns, zeros.residualSigns),
             scales: concatenated([code.scales, zeros.scales], axis: 2)
         )
         try validateExpandedCompressedCode(expanded)
@@ -1749,7 +1940,7 @@ public final class TurboQuantKVCache: QuantizedKVCache, TurboQuantCompressedKVCa
             : matchesBitsetCapacity(code.signs)
         let highMaskValid =
             code.role == .key
-            ? (code.highPrecisionMask.ndim == 5 && code.highPrecisionMask.dim(2) == capacity)
+            ? matchesBitsetCapacity(code.highPrecisionMask)
             : matchesBitsetCapacity(code.highPrecisionMask)
         guard code.packedMagnitudes.ndim == 5, code.packedMagnitudes.dim(2) == capacity,
             signsValid,
@@ -1898,6 +2089,15 @@ public final class RotatingTurboQuantKVCache: BaseKVCache, QuantizedKVCacheProto
             return packedState
         }
         guard compressedKeys != nil, compressedValues != nil else {
+            return nil
+        }
+        guard let compressedKeys, let compressedValues,
+            turboQuantSupportsPackedFallback(
+                keyCode: compressedKeys,
+                valueCode: compressedValues,
+                groupSize: groupSize
+            )
+        else {
             return nil
         }
         return materializedPackedFallbackCache().getQuantizedState()
@@ -2148,6 +2348,153 @@ public final class RotatingTurboQuantKVCache: BaseKVCache, QuantizedKVCacheProto
         try enforceResidentBudget(context: context)
     }
 
+    public func makeCompressedUpdateCheckpoint(appendingTokenCount tokenCount: Int)
+        -> TurboQuantCompressedUpdateCheckpoint
+    {
+        guard let compressedKeys, let compressedValues else {
+            return TurboQuantCompressedUpdateCheckpoint(
+                payload: .fullState(
+                    offset: offset,
+                    metaState: metaState,
+                    state: state.map { $0[.ellipsis] }
+                ))
+        }
+
+        let canHideAppendedSlots = offset + tokenCount <= maxCacheSize
+        if !canHideAppendedSlots {
+            return TurboQuantCompressedUpdateCheckpoint(
+                payload: .rotatingFullState(
+                    offset: offset,
+                    writeIndex: writeIndex,
+                    metaState: metaState,
+                    state: state.map { $0[.ellipsis] },
+                    rawFallbackState: rawFallbackCache?.state.map { $0[.ellipsis] },
+                    rawFallbackMetaState: rawFallbackCache?.metaState,
+                    packedFallbackState: packedFallbackCache?.state.map { $0[.ellipsis] },
+                    packedFallbackMetaState: packedFallbackCache?.metaState,
+                    packedKeys: packedKeys,
+                    packedValues: packedValues,
+                    fallbackResultCount: fallbackResults.count,
+                    lifecycle: cacheLifecycle,
+                    lastAttentionPath: lastAttentionPath,
+                    lastUnsupportedShape: lastUnsupportedShape,
+                    lastDecodedTransientBytes: lastDecodedTransientBytes
+                ))
+        }
+
+        return TurboQuantCompressedUpdateCheckpoint(
+            payload: .rotatingCompressed(
+                offset: offset,
+                writeIndex: writeIndex,
+                compressedKeys: compressedKeys,
+                compressedValues: compressedValues,
+                rawFallbackState: rawFallbackCache?.state.map { $0[.ellipsis] },
+                rawFallbackMetaState: rawFallbackCache?.metaState,
+                packedFallbackState: packedFallbackCache?.state.map { $0[.ellipsis] },
+                packedFallbackMetaState: packedFallbackCache?.metaState,
+                packedKeys: packedKeys,
+                packedValues: packedValues,
+                fallbackResultCount: fallbackResults.count,
+                lifecycle: cacheLifecycle,
+                lastAttentionPath: lastAttentionPath,
+                lastUnsupportedShape: lastUnsupportedShape,
+                lastDecodedTransientBytes: lastDecodedTransientBytes
+            ))
+    }
+
+    public func restoreCompressedUpdateCheckpoint(
+        _ checkpoint: TurboQuantCompressedUpdateCheckpoint
+    ) {
+        switch checkpoint.payload {
+        case .fullState(let previousOffset, let previousMetaState, let previousState):
+            metaState = previousMetaState
+            state = previousState
+            offset = previousOffset
+            writeIndex = nextWriteIndex(afterOffset: previousOffset)
+
+        case .rotatingFullState(
+            let previousOffset,
+            let previousWriteIndex,
+            let previousMetaState,
+            let previousState,
+            let previousRawFallbackState,
+            let previousRawFallbackMetaState,
+            let previousPackedFallbackState,
+            let previousPackedFallbackMetaState,
+            let previousPackedKeys,
+            let previousPackedValues,
+            let previousFallbackResultCount,
+            let previousLifecycle,
+            let previousAttentionPath,
+            let previousUnsupportedShape,
+            let previousDecodedTransientBytes
+        ):
+            metaState = previousMetaState
+            state = previousState
+            restoreRawFallbackCache(
+                state: previousRawFallbackState,
+                metaState: previousRawFallbackMetaState
+            )
+            restorePackedFallbackCache(
+                state: previousPackedFallbackState,
+                metaState: previousPackedFallbackMetaState
+            )
+            packedKeys = previousPackedKeys
+            packedValues = previousPackedValues
+            offset = previousOffset
+            writeIndex = previousWriteIndex
+            cacheLifecycle = previousLifecycle
+            lastAttentionPath = previousAttentionPath
+            lastUnsupportedShape = previousUnsupportedShape
+            lastDecodedTransientBytes = previousDecodedTransientBytes
+            if fallbackResults.count > previousFallbackResultCount {
+                fallbackResults.removeLast(fallbackResults.count - previousFallbackResultCount)
+            }
+
+        case .rotatingCompressed(
+            let previousOffset,
+            let previousWriteIndex,
+            let previousKeys,
+            let previousValues,
+            let previousRawFallbackState,
+            let previousRawFallbackMetaState,
+            let previousPackedFallbackState,
+            let previousPackedFallbackMetaState,
+            let previousPackedKeys,
+            let previousPackedValues,
+            let previousFallbackResultCount,
+            let previousLifecycle,
+            let previousAttentionPath,
+            let previousUnsupportedShape,
+            let previousDecodedTransientBytes
+        ):
+            offset = previousOffset
+            writeIndex = previousWriteIndex
+            compressedKeys = previousKeys
+            compressedValues = previousValues
+            restoreRawFallbackCache(
+                state: previousRawFallbackState,
+                metaState: previousRawFallbackMetaState
+            )
+            restorePackedFallbackCache(
+                state: previousPackedFallbackState,
+                metaState: previousPackedFallbackMetaState
+            )
+            packedKeys = previousPackedKeys
+            packedValues = previousPackedValues
+            cacheLifecycle = previousLifecycle
+            lastAttentionPath = previousAttentionPath
+            lastUnsupportedShape = previousUnsupportedShape
+            lastDecodedTransientBytes = previousDecodedTransientBytes
+            if fallbackResults.count > previousFallbackResultCount {
+                fallbackResults.removeLast(fallbackResults.count - previousFallbackResultCount)
+            }
+
+        case .linearCompressed:
+            break
+        }
+    }
+
     private func enforceResidentBudget(context: String) throws {
         guard let residentBudgetBytes else { return }
         let residentBytes = cacheFootprint.residentBytes
@@ -2297,6 +2644,48 @@ public final class RotatingTurboQuantKVCache: BaseKVCache, QuantizedKVCacheProto
             seed: seed ^ turboQuantValueSeedSalt,
             valueBits: valueBits
         )
+        if previousOffset == 0, tokenCount > 0, tokenCount <= maxCacheSize,
+            compressedKeys == nil, compressedValues == nil
+        {
+            let logicalLength = min(tokenCount, maxCacheSize)
+            let pinnedPrefixLength = pinnedPrefixLength(forLogicalLength: logicalLength)
+            let encodedKeys = try MLX.turboQuantMetalEncodeAttention(
+                keys,
+                configuration: keyConfiguration,
+                capacity: maxCacheSize,
+                logicalLength: logicalLength,
+                ringOffset: 0,
+                pinnedPrefixLength: pinnedPrefixLength
+            )
+            let encodedValues = try MLX.turboQuantMetalEncodeAttention(
+                values,
+                configuration: valueConfiguration,
+                capacity: maxCacheSize,
+                logicalLength: logicalLength,
+                ringOffset: 0,
+                pinnedPrefixLength: pinnedPrefixLength
+            )
+            if shouldMaintainExactRawShadow {
+                _ = materializedExactRawShadowCache().update(keys: keys, values: values)
+            }
+            offset = tokenCount
+            writeIndex = nextWriteIndex(afterOffset: offset)
+            compressedKeys = encodedKeys
+            compressedValues = encodedValues
+            packedKeys = nil
+            packedValues = nil
+            packedFallbackCache = nil
+            lastDecodedTransientBytes = 0
+            if !shouldMaintainExactRawShadow {
+                releaseRawShadow()
+            }
+            try validateCompressedState(context: "rotating compressed initial append")
+            cacheLifecycle = .compressedCommitted(
+                logicalLength: logicalLength,
+                capacity: maxCacheSize
+            )
+            return (encodedKeys, encodedValues)
+        }
         let encodedKeys = try MLX.turboQuantMetalEncodeAttention(
             keys,
             configuration: keyConfiguration
@@ -2315,8 +2704,10 @@ public final class RotatingTurboQuantKVCache: BaseKVCache, QuantizedKVCacheProto
             currentKeys.packedMagnitudes[.ellipsis, target, 0..., 0...] =
                 encodedKeys.packedMagnitudes
             currentKeys.signs[.ellipsis, target, 0..., 0...] = encodedKeys.signs
-            currentKeys.highPrecisionMask[.ellipsis, target, 0..., 0...] =
-                encodedKeys.highPrecisionMask
+            if currentKeys.highPrecisionMask.ndim == 5 {
+                currentKeys.highPrecisionMask[.ellipsis, target, 0..., 0...] =
+                    encodedKeys.highPrecisionMask
+            }
             if currentKeys.residualSigns.ndim == 5 {
                 currentKeys.residualSigns[.ellipsis, target, 0..., 0...] =
                     encodedKeys.residualSigns
@@ -2346,8 +2737,10 @@ public final class RotatingTurboQuantKVCache: BaseKVCache, QuantizedKVCacheProto
                     encodedKeys.packedMagnitudes[.ellipsis, source, 0..., 0...]
                 currentKeys.signs[.ellipsis, target, 0..., 0...] =
                     encodedKeys.signs[.ellipsis, source, 0..., 0...]
-                currentKeys.highPrecisionMask[.ellipsis, target, 0..., 0...] =
-                    encodedKeys.highPrecisionMask[.ellipsis, source, 0..., 0...]
+                if currentKeys.highPrecisionMask.ndim == 5 {
+                    currentKeys.highPrecisionMask[.ellipsis, target, 0..., 0...] =
+                        encodedKeys.highPrecisionMask[.ellipsis, source, 0..., 0...]
+                }
                 if currentKeys.residualSigns.ndim == 5 {
                     currentKeys.residualSigns[.ellipsis, target, 0..., 0...] =
                         encodedKeys.residualSigns[.ellipsis, source, 0..., 0...]
@@ -2870,6 +3263,58 @@ public final class RotatingTurboQuantKVCache: BaseKVCache, QuantizedKVCacheProto
     private func rawFallbackWriteIndex(forOffset offset: Int) -> Int {
         if offset <= maxCacheSize { return min(offset, maxCacheSize) }
         return nextWriteIndex(afterOffset: offset)
+    }
+
+    private func rotatingCacheParameters(from metaState: [String]?) -> (
+        keep: Int, maxSize: Int, step: Int
+    ) {
+        guard let metaState, metaState.count >= 3 else {
+            return (keep, maxCacheSize, step)
+        }
+        return (
+            Int(metaState[0]) ?? keep,
+            Int(metaState[1]) ?? maxCacheSize,
+            Int(metaState[2]) ?? step
+        )
+    }
+
+    private func restoreRawFallbackCache(state: [MLXArray]?, metaState: [String]?) {
+        guard let state else {
+            rawFallbackCache = nil
+            return
+        }
+        let parameters = rotatingCacheParameters(from: metaState)
+        let cache = RotatingKVCache(
+            maxSize: parameters.maxSize,
+            keep: parameters.keep,
+            step: parameters.step
+        )
+        cache.state = state
+        if let metaState {
+            cache.metaState = metaState
+        }
+        rawFallbackCache = cache
+    }
+
+    private func restorePackedFallbackCache(state: [MLXArray]?, metaState: [String]?) {
+        guard let state else {
+            packedFallbackCache = nil
+            return
+        }
+        let parameters = rotatingCacheParameters(from: metaState)
+        let cache = RotatingQuantizedKVCache(
+            maxSize: parameters.maxSize,
+            keep: parameters.keep,
+            step: parameters.step,
+            groupSize: groupSize,
+            bits: bits,
+            mode: mode
+        )
+        cache.state = state
+        if let metaState {
+            cache.metaState = metaState
+        }
+        packedFallbackCache = cache
     }
 
     private func materializedRawFallbackCache() -> RotatingKVCache {

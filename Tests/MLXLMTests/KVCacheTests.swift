@@ -1302,7 +1302,7 @@ extension MLXRuntimeSwiftTests {
             #expect(expanded.1.layout.capacity == 512)
             #expect(expanded.1.packedMagnitudes.dim(2) == 512)
             #expect(expanded.0.signs.dim(2) == 512)
-            #expect(expanded.0.highPrecisionMask.dim(2) == 512)
+            #expect(expanded.0.highPrecisionMask.shape == [1])
             #expect(expanded.0.residualSigns.shape == [1])
             #expect(expanded.1.signs.shape == [1])
             #expect(expanded.1.highPrecisionMask.shape == [1])

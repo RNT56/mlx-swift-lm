@@ -65,6 +65,18 @@ private func canonicalTurboQuantInputs(
     )
 }
 
+private func supportsPackedQuantizedAttention(
+    keys: MLXArray,
+    values: MLXArray,
+    cache: any QuantizedKVCacheProtocol
+) -> Bool {
+    cache.groupSize > 0
+        && keys.ndim == 4
+        && values.ndim == 4
+        && keys.dim(3).isMultiple(of: cache.groupSize)
+        && values.dim(3).isMultiple(of: cache.groupSize)
+}
+
 public func attentionKeyLengthAfterUpdate(cache: KVCache?, keys: MLXArray) -> Int {
     let updatedLength = (cache?.offset ?? 0) + keys.dim(2)
     if let maxSize = cache?.maxSize {
@@ -114,7 +126,7 @@ public func withTurboQuantCompressedCacheUpdateThrowing<T>(
         throws -> T
 ) throws -> T? {
     let canonical = canonicalTurboQuantInputs(queries: queries, keys: keys, values: values)
-    guard var turboQuantCache = cache as? TurboQuantCompressedKVCacheProtocol,
+    guard let turboQuantCache = cache as? TurboQuantCompressedKVCacheProtocol,
         turboQuantCache.supportsCompressedAttention(
             queries: canonical.queries,
             keys: canonical.keys,
@@ -125,16 +137,8 @@ public func withTurboQuantCompressedCacheUpdateThrowing<T>(
         return nil
     }
 
-    let previousOffset = turboQuantCache.offset
-    let previousState = turboQuantCache.state.map { $0[.ellipsis] }
-    let previousMetaState = turboQuantCache.metaState
-    func restorePreviousState() {
-        turboQuantCache.metaState = previousMetaState
-        turboQuantCache.state = previousState
-        if let baseCache = turboQuantCache as? BaseKVCache {
-            baseCache.offset = previousOffset
-        }
-    }
+    let checkpoint = turboQuantCache.makeCompressedUpdateCheckpoint(
+        appendingTokenCount: canonical.keys.dim(2))
     do {
         let (compressedKeys, compressedValues) = try turboQuantCache.updateCompressed(
             keys: canonical.keys,
@@ -142,7 +146,7 @@ public func withTurboQuantCompressedCacheUpdateThrowing<T>(
         )
         return try body(compressedKeys, compressedValues, turboQuantCache)
     } catch {
-        restorePreviousState()
+        turboQuantCache.restoreCompressedUpdateCheckpoint(checkpoint)
         turboQuantCache.recordCompressedAttentionFailure(String(describing: error))
         throw turboQuantRuntimeFailure(error)
     }
@@ -196,7 +200,8 @@ private func turboQuantPackedUpdateFallbackAfterFailure(
     failure: Error
 ) -> (output: MLXArray, state: AttentionKVState)? {
     guard cache.fallbackPolicy == .packedAllowed || cache.fallbackPolicy == .compressedDecodeAllowed,
-        let quantizedCache = cache as? any QuantizedKVCacheProtocol
+        let quantizedCache = cache as? any QuantizedKVCacheProtocol,
+        supportsPackedQuantizedAttention(keys: keys, values: values, cache: quantizedCache)
     else {
         return nil
     }
@@ -548,7 +553,7 @@ private func turboQuantCompressedPrefillAttentionThrowing(
         return nil
     }
     let canonical = canonicalTurboQuantInputs(queries: queries, keys: keys, values: values)
-    guard var turboQuantCache = cache as? TurboQuantCompressedKVCacheProtocol,
+    guard let turboQuantCache = cache as? TurboQuantCompressedKVCacheProtocol,
         turboQuantCache.supportsCompressedAttention(
             queries: canonical.queries,
             keys: canonical.keys,
@@ -560,15 +565,8 @@ private func turboQuantCompressedPrefillAttentionThrowing(
     }
 
     let previousOffset = turboQuantCache.offset
-    let previousState = turboQuantCache.state.map { $0[.ellipsis] }
-    let previousMetaState = turboQuantCache.metaState
-    func restorePreviousState() {
-        turboQuantCache.metaState = previousMetaState
-        turboQuantCache.state = previousState
-        if let baseCache = turboQuantCache as? BaseKVCache {
-            baseCache.offset = previousOffset
-        }
-    }
+    let checkpoint = turboQuantCache.makeCompressedUpdateCheckpoint(
+        appendingTokenCount: canonical.keys.dim(2))
     do {
         let (compressedKeys, compressedValues) = try turboQuantCache.updateCompressed(
             keys: canonical.keys,
@@ -622,7 +620,7 @@ private func turboQuantCompressedPrefillAttentionThrowing(
         )
         return (output, state)
     } catch {
-        restorePreviousState()
+        turboQuantCache.restoreCompressedUpdateCheckpoint(checkpoint)
         if let fallback = turboQuantPackedUpdateFallbackAfterFailure(
             queries: canonical.queries,
             keys: canonical.keys,
@@ -906,7 +904,7 @@ public func attentionWithCacheUpdateReturningStateThrowing(
     ) {
         return prefill
     }
-    if var turboQuantCache = cache as? TurboQuantCompressedKVCacheProtocol,
+    if let turboQuantCache = cache as? TurboQuantCompressedKVCacheProtocol,
         turboQuantCache.supportsCompressedAttention(
             queries: turboQuantInputs.queries,
             keys: turboQuantInputs.keys,
@@ -914,16 +912,8 @@ public func attentionWithCacheUpdateReturningStateThrowing(
             mask: mask
         )
     {
-        let previousOffset = turboQuantCache.offset
-        let previousState = turboQuantCache.state.map { $0[.ellipsis] }
-        let previousMetaState = turboQuantCache.metaState
-        func restorePreviousState() {
-            turboQuantCache.metaState = previousMetaState
-            turboQuantCache.state = previousState
-            if let baseCache = turboQuantCache as? BaseKVCache {
-                baseCache.offset = previousOffset
-            }
-        }
+        let checkpoint = turboQuantCache.makeCompressedUpdateCheckpoint(
+            appendingTokenCount: turboQuantInputs.keys.dim(2))
         do {
             let (compressedKeys, compressedValues) = try turboQuantCache.updateCompressed(
                 keys: turboQuantInputs.keys,
@@ -946,7 +936,7 @@ public func attentionWithCacheUpdateReturningStateThrowing(
             )
             return (output, state)
         } catch {
-            restorePreviousState()
+            turboQuantCache.restoreCompressedUpdateCheckpoint(checkpoint)
             if let fallback = turboQuantPackedUpdateFallbackAfterFailure(
                 queries: turboQuantInputs.queries,
                 keys: turboQuantInputs.keys,
@@ -962,6 +952,33 @@ public func attentionWithCacheUpdateReturningStateThrowing(
             turboQuantCache.recordCompressedAttentionFailure(String(describing: error))
             throw turboQuantRuntimeFailure(error)
         }
+    }
+    if let turboQuantCache = cache as? TurboQuantCompressedKVCacheProtocol,
+        let quantizedKVCache = cache as? QuantizedKVCacheProtocol,
+        !supportsPackedQuantizedAttention(
+            keys: turboQuantInputs.keys,
+            values: turboQuantInputs.values,
+            cache: quantizedKVCache
+        )
+    {
+        if cache is RotatingTurboQuantKVCache {
+            let (cachedKeys, cachedValues) = cache.update(keys: keys, values: values)
+            let state = AttentionKVState.raw(keys: cachedKeys, values: cachedValues)
+            return (
+                try attentionWithKVStateThrowing(
+                    queries: queries,
+                    state: state,
+                    scale: scale,
+                    mask: mask,
+                    sinks: sinks
+                ),
+                state
+            )
+        }
+        let reason =
+            "TurboQuant compressed attention unavailable and packed fallback does not support head dimensions k=\(turboQuantInputs.keys.dim(3)) v=\(turboQuantInputs.values.dim(3)) with group size \(quantizedKVCache.groupSize)"
+        turboQuantCache.recordCompressedAttentionFailure(reason)
+        throw TurboQuantRuntimeFailure.compressedAttentionUnavailable(reason)
     }
     if let quantizedKVCache = cache as? QuantizedKVCacheProtocol {
         let keys = useTurboQuantInputs ? turboQuantInputs.keys : keys
