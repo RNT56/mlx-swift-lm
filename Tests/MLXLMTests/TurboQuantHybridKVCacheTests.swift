@@ -124,6 +124,44 @@ extension MLXRuntimeSwiftTests {
             }
         }
 
+        @Test func testHybridDecodeUsesSegmentedSelectedColdAttentionWhenAvailable() throws {
+            guard TurboQuantKernelAvailability.current.supportsMetalPolarQJLAttention else { return }
+
+            let cache = HybridTurboQuantKVCache(
+                maxSize: 32,
+                hotWindowTokens: 4,
+                coldBlockTokens: 2,
+                coldBudgetTokens: 4,
+                maxColdBudgetTokens: 4,
+                preset: .turbo4v2,
+                groupSize: 64,
+                backend: .metalPolarQJL
+            )
+            let keys = MLXArray.ones([1, 2, 9, 64], dtype: .float32)
+            let values = MLXArray.ones([1, 2, 9, 64], dtype: .float32) * 0.75
+            _ = cache.update(keys: keys, values: values)
+            #expect(cache.coldBlockCount > 0)
+
+            let queries = MLXArray.ones([1, 2, 1, 64], dtype: .float32)
+            let nextKeys = MLXArray.ones([1, 2, 1, 64], dtype: .float32) * 0.25
+            let nextValues = MLXArray.ones([1, 2, 1, 64], dtype: .float32) * 0.5
+
+            let result = try turboQuantHybridAttentionThrowing(
+                queries: queries,
+                keys: nextKeys,
+                values: nextValues,
+                cache: cache,
+                scale: 1 / sqrt(Float(64)),
+                mask: .causal,
+                sinks: nil
+            )
+
+            #expect(result.output.shape == [1, 2, 1, 64])
+            #expect(cache.lastSelection.selectedTokenCount > 0)
+            #expect(result.state.keyLength == cache.rawHotLength)
+            #expect(cache.diagnostics.fallbackReason == nil)
+        }
+
         @Test func testHybridPromptCacheRoundTripsHotState() throws {
             let cache = HybridTurboQuantKVCache(
                 maxSize: 32,

@@ -451,6 +451,22 @@ public final class HybridTurboQuantKVCache: BaseKVCache {
         )
     }
 
+    public func selectedColdCompressedSegments(
+        selection: TurboQuantColdSelection
+    ) -> [(key: TurboQuantAttentionCode, value: TurboQuantAttentionCode)] {
+        guard !selection.selectedBlockIDs.isEmpty else { return [] }
+        let selectedIDs = Set(selection.selectedBlockIDs)
+        return coldBlocks
+            .filter { selectedIDs.contains($0.descriptor.blockID) }
+            .sorted { $0.descriptor.startToken < $1.descriptor.startToken }
+            .map { (key: $0.keyCode, value: $0.valueCode) }
+    }
+
+    public func recordFallbackReason(_ reason: String?) {
+        lastSealFailure = reason
+        refreshDiagnostics(selection: lastSelection, fallbackReason: reason)
+    }
+
     public func markAnchor(
         tokenRange: Range<Int>,
         flags: TurboQuantColdBlockAnchorFlags
@@ -960,6 +976,33 @@ func turboQuantHybridAttentionThrowing(
     cache.updateHybrid(keys: keys, values: values)
     let hot = cache.rawHotState(defaultKeys: keys, defaultValues: values)
     let selection = cache.selectColdBlocks(query: queries)
+
+    if queries.dim(2) == 1, sinks == nil {
+        let coldSegments = cache.selectedColdCompressedSegments(selection: selection)
+        if !coldSegments.isEmpty {
+            do {
+                let output = try MLX.turboQuantMetalSegmentedScaledDotProductAttention(
+                    queries: queries,
+                    rawKeys: hot.keys,
+                    rawValues: hot.values,
+                    coldSegments: coldSegments,
+                    scale: scale,
+                    outputDType: queries.dtype
+                )
+                cache.recordFallbackReason(nil)
+                let state = AttentionKVState.hybridTurboQuant(
+                    keys: hot.keys,
+                    values: hot.values,
+                    selection: selection,
+                    cache: cache
+                )
+                return (output, state)
+            } catch {
+                cache.recordFallbackReason("segmented_attention_fallback:\(error)")
+            }
+        }
+    }
+
     let selectedCold = try cache.selectedColdState(
         selection: selection,
         outputDType: hot.keys.dtype
