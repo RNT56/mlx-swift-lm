@@ -78,7 +78,7 @@ public struct TurboQuantSegmentStats {
     public var logicalTokenCount: Int
 }
 
-public struct TurboQuantHybridDiagnostics: Equatable, Codable, Sendable {
+public struct TurboQuantHybridDiagnostics: Hashable, Codable, Sendable {
     public var route: String
     public var hotTokens: Int
     public var coldBlockCount: Int
@@ -228,6 +228,32 @@ public final class HybridTurboQuantKVCache: BaseKVCache {
             compressedBytes: compressedBytes,
             rawShadowBytes: rawShadowBytes,
             lifecycle: coldBlocks.isEmpty ? .rawPrefillChunkOpen : .decodeCompressed
+        )
+    }
+
+    public func runtimeSnapshot() -> TurboQuantCacheRuntimeSnapshot {
+        let keyBytes =
+            (hotKeys?.nbytes ?? 0)
+            + coldBlocks.reduce(0) { $0 + $1.keyCode.storageByteCount }
+        let valueBytes =
+            (hotValues?.nbytes ?? 0)
+            + coldBlocks.reduce(0) { $0 + $1.valueCode.storageByteCount }
+        return TurboQuantCacheRuntimeSnapshot(
+            lifecycleDescription:
+                coldBlocks.isEmpty
+                ? "hybridRawHot(logicalLength:\(offset),hotTokens:\(rawHotLength))"
+                : "hybridSelectedCold(logicalLength:\(offset),hotTokens:\(rawHotLength),coldBlocks:\(coldBlocks.count))",
+            logicalLength: offset,
+            capacity: maxContextLength ?? offset,
+            pinnedPrefixLength: 0,
+            ringOffset: 0,
+            keyBytes: keyBytes,
+            valueBytes: valueBytes,
+            rawShadowAllocated: hotKeys != nil || hotValues != nil,
+            packedFallbackAllocated: false,
+            lastAttentionPath: diagnostics.route,
+            lastFailure: diagnostics.fallbackReason,
+            hybridDiagnostics: diagnostics
         )
     }
 

@@ -17,6 +17,7 @@ public struct TurboQuantCacheRuntimeSnapshot: Hashable, Codable, Sendable {
     public var packedFallbackAllocated: Bool
     public var lastAttentionPath: String?
     public var lastFailure: String?
+    public var hybridDiagnostics: TurboQuantHybridDiagnostics?
 
     public init(
         schemaVersion: Int = TurboQuantCacheRuntimeSnapshot.currentSchemaVersion,
@@ -30,7 +31,8 @@ public struct TurboQuantCacheRuntimeSnapshot: Hashable, Codable, Sendable {
         rawShadowAllocated: Bool,
         packedFallbackAllocated: Bool,
         lastAttentionPath: String?,
-        lastFailure: String?
+        lastFailure: String?,
+        hybridDiagnostics: TurboQuantHybridDiagnostics? = nil
     ) {
         self.schemaVersion = schemaVersion
         self.lifecycleDescription = lifecycleDescription
@@ -44,6 +46,7 @@ public struct TurboQuantCacheRuntimeSnapshot: Hashable, Codable, Sendable {
         self.packedFallbackAllocated = packedFallbackAllocated
         self.lastAttentionPath = lastAttentionPath
         self.lastFailure = lastFailure
+        self.hybridDiagnostics = hybridDiagnostics
     }
 }
 

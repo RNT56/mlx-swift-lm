@@ -1,4 +1,5 @@
 import Foundation
+import MLX
 import MLXLMCommon
 import Testing
 
@@ -50,6 +51,29 @@ struct TurboQuantCacheRuntimeSnapshotTests {
         #expect(snapshot.lifecycleDescription == "degradedPackedFallback(reason:qk unavailable)")
         #expect(snapshot.lastAttentionPath == TurboQuantAttentionPath.mlxPackedFallback.rawValue)
         #expect(snapshot.lastFailure == "qk unavailable")
+    }
+
+    @Test func hybridSnapshotCarriesSelectorDiagnostics() {
+        let cache = HybridTurboQuantKVCache(
+            maxSize: 32,
+            hotWindowTokens: 8,
+            coldBlockTokens: 4,
+            coldBudgetTokens: 4,
+            maxColdBudgetTokens: 8
+        )
+        let keys = MLXArray.ones([1, 2, 3, 64], dtype: .float32)
+        let values = MLXArray.ones([1, 2, 3, 64], dtype: .float32)
+        _ = cache.update(keys: keys, values: values)
+
+        let snapshot = cache.runtimeSnapshot()
+
+        #expect(snapshot.lifecycleDescription == "hybridRawHot(logicalLength:3,hotTokens:3)")
+        #expect(snapshot.logicalLength == 3)
+        #expect(snapshot.rawShadowAllocated)
+        #expect(snapshot.lastAttentionPath == "hybrid_raw_hot")
+        #expect(snapshot.hybridDiagnostics?.hotTokens == 3)
+        #expect(snapshot.hybridDiagnostics?.coldBudgetTokens == 0)
+        #expect(snapshot.hybridDiagnostics?.maxColdBudgetTokens == 8)
     }
 
     @Test func rotatingSnapshotReportsCapacityAndPinnedPrefix() {
