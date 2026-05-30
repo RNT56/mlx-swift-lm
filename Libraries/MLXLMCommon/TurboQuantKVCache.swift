@@ -1663,6 +1663,10 @@ public final class TurboQuantKVCache: QuantizedKVCache, TurboQuantCompressedKVCa
 
         var currentKeys = compressedKeys!
         var currentValues = compressedValues!
+        // 3A (audit 1.3): drop the stored references (struct copy → refcount 2) so the slice-update
+        // writes below donate in place instead of reallocating each plane. Restored at the reassign.
+        compressedKeys = nil
+        compressedValues = nil
         let range = previousOffset ..< (previousOffset + tokenCount)
         currentKeys.packedMagnitudes[.ellipsis, range, 0..., 0...] = encodedKeys.packedMagnitudes
         currentKeys.signs[.ellipsis, range, 0..., 0...] = encodedKeys.signs
@@ -2710,6 +2714,14 @@ public final class RotatingTurboQuantKVCache: BaseKVCache, QuantizedKVCacheProto
 
         var currentKeys = compressedKeys!
         var currentValues = compressedValues!
+        // 3A (audit 1.3): TurboQuantAttentionCode is a struct, so the copy above gives every
+        // packed plane refcount 2 (currentKeys + compressedKeys), which forces MLX to reallocate
+        // a fresh full-capacity buffer for each plane on the slice-update writes below — O(context)
+        // bytes/token, a prime OOM suspect. Releasing the stored references here drops them to
+        // refcount 1 so the writes donate in place. Restored at the reassign below; verified that
+        // nothing between reads compressedKeys/compressedValues.
+        compressedKeys = nil
+        compressedValues = nil
         let physicalStart = physicalSlot(forAbsoluteToken: offset)
         if tokenCount > 0, physicalStart + tokenCount <= maxCacheSize {
             let target = physicalStart ..< (physicalStart + tokenCount)
