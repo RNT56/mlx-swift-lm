@@ -490,7 +490,7 @@ func qualityGate(
         passed = finite && kl <= 0.02 && p95 <= 0.20 && cosine >= 0.995
     case .turbo4v2, .turbo3_5:
         passed = finite && kl <= 0.05 && p95 <= 0.50 && cosine >= 0.990
-    case .disabled, .turbo3, .turbo2_5:
+    case .disabled, .turbo2_5:
         passed = false
     }
     return QwenProofQuality(

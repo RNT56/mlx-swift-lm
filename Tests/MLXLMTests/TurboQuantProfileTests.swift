@@ -14,9 +14,26 @@ extension MLXRuntimeSwiftTests {
             #expect(TurboQuantScheme(normalizing: "turbo4v2") == .turbo4v2)
             #expect(TurboQuantScheme(normalizing: "turbo-4-v2") == .turbo4v2)
             #expect(TurboQuantScheme(normalizing: "turbo3.5") == .turbo3_5)
-            #expect(TurboQuantScheme(normalizing: "turbo3") == .turbo3)
+            // `turbo3` is a removed legacy alias (it advertised 3.0b but executed
+            // the 2.5b turbo2_5 codec). The string still decodes to its honest scheme.
+            #expect(TurboQuantScheme(normalizing: "turbo3") == .turbo2_5)
             #expect(TurboQuantScheme(normalizing: "off") == .disabled)
             #expect(TurboQuantScheme(normalizing: "unknown") == nil)
+        }
+
+        /// Every advertised scheme must execute a codec whose magnitude bit-width
+        /// matches what it claims. The removed `.turbo3` alias violated this
+        /// (advertised 3.0 key bits, executed the 2.5-bit `turbo2_5` preset); this
+        /// invariant fails closed if any scheme re-introduces such a mismatch.
+        @Test func testSchemeKeyBitsMatchExecutedPresetMagnitude() {
+            for scheme in TurboQuantScheme.allCases {
+                guard let keyBits = scheme.defaultKeyBits else {
+                    // Only the disabled (plain-affine) scheme advertises no key bits.
+                    #expect(scheme == .disabled)
+                    continue
+                }
+                #expect(keyBits == Double(scheme.preset.targetMagnitudeBits))
+            }
         }
 
         @Test func testProfileStatusSeparatesGuardedAndCertifiedStates() {
@@ -1374,7 +1391,6 @@ extension MLXRuntimeSwiftTests {
                 #expect(turbo35.optimizationPolicy == .preferThroughput)
                 #expect(turbo35.fallbackPolicy == .compressedDecodeAllowed)
 
-                #expect(candidates[.turbo3] == nil)
                 #expect(candidates[.turbo2_5] == nil)
 
                 let guardedProfile = try #require(profile.applyingPrecisionCandidate(.turbo4v2))
@@ -1410,7 +1426,7 @@ extension MLXRuntimeSwiftTests {
                 id: "memory-test",
                 modelPatterns: ["*memory-test*"],
                 supportedKeyHeadDimensions: [128],
-                recommendedScheme: .turbo3,
+                recommendedScheme: .turbo2_5,
                 fallbackScheme: .turbo4v2,
                 keyBits: 2.5,
                 valueBits: 2,

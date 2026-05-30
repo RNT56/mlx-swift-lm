@@ -11,7 +11,6 @@ public enum TurboQuantScheme: String, Codable, Sendable, CaseIterable {
     case turbo8
     case turbo4v2
     case turbo3_5
-    case turbo3
     case turbo2_5
 
     public init?(normalizing value: String) {
@@ -31,9 +30,10 @@ public enum TurboQuantScheme: String, Codable, Sendable, CaseIterable {
             self = .turbo4v2
         case "turbo3_5", "turbo35", "turbo_3_5":
             self = .turbo3_5
-        case "turbo3", "turbo_3":
-            self = .turbo3
-        case "turbo2_5", "turbo25", "turbo_2_5":
+        // Legacy alias: `turbo3` advertised 3.0 key bits but always executed the
+        // turbo2_5 (2.5-bit) codec. Removed as a distinct case; the string still
+        // decodes to its real, honest scheme so persisted configs keep parsing.
+        case "turbo3", "turbo_3", "turbo2_5", "turbo25", "turbo_2_5":
             self = .turbo2_5
         default:
             return nil
@@ -69,7 +69,7 @@ public enum TurboQuantScheme: String, Codable, Sendable, CaseIterable {
             .turbo4v2
         case .turbo3_5:
             .turbo3_5
-        case .turbo3, .turbo2_5:
+        case .turbo2_5:
             .turbo2_5
         }
     }
@@ -82,7 +82,7 @@ public enum TurboQuantScheme: String, Codable, Sendable, CaseIterable {
             8
         case .turbo4v2, .turbo3_5:
             4
-        case .turbo3, .turbo2_5:
+        case .turbo2_5:
             2
         }
     }
@@ -97,8 +97,6 @@ public enum TurboQuantScheme: String, Codable, Sendable, CaseIterable {
             4
         case .turbo3_5:
             3.5
-        case .turbo3:
-            3
         case .turbo2_5:
             2.5
         }
@@ -110,7 +108,7 @@ public enum TurboQuantScheme: String, Codable, Sendable, CaseIterable {
             .auto
         case .turbo4v2, .turbo3_5:
             .conservative
-        case .turbo3, .turbo2_5:
+        case .turbo2_5:
             .preferMemory
         }
     }
@@ -119,7 +117,7 @@ public enum TurboQuantScheme: String, Codable, Sendable, CaseIterable {
         switch self {
         case .disabled, .turbo8:
             false
-        case .turbo4v2, .turbo3_5, .turbo3, .turbo2_5:
+        case .turbo4v2, .turbo3_5, .turbo2_5:
             true
         }
     }

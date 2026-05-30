@@ -191,5 +191,10 @@ guessed TurboQuant format.
 ``TurboQuantScheme/turbo4v2`` maps to the `.turbo4v2` runtime preset with
 4-bit key magnitudes and 4-bit values. It is the balanced default profile
 scheme. ``TurboQuantScheme/turbo3_5`` maps to mixed 3/4-bit key magnitudes and
-4-bit values. ``TurboQuantScheme/turbo3`` maps to the more memory-oriented
-`.turbo2_5` runtime preset and should be reserved for memory-pressure profiles.
+4-bit values. ``TurboQuantScheme/turbo2_5`` is the most memory-oriented scheme
+(2.5-bit key magnitudes, 2-bit values) and should be reserved for
+memory-pressure profiles.
+
+> Note: A former `turbo3` alias advertised 3.0-bit keys but always executed the
+> 2.5-bit `turbo2_5` codec. It has been removed; the legacy `"turbo3"` string
+> still decodes to `turbo2_5` so persisted configurations keep parsing.
