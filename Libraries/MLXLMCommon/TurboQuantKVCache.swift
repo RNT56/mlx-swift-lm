@@ -3,6 +3,52 @@
 import Foundation
 import MLX
 
+// MARK: - 4.1 fallback-materialization OOM guard
+//
+// The compressed→raw fallback decode materializes the *full* context at once, on the path that
+// fires precisely because the compressed kernel failed under memory pressure. Decoding to fp16
+// (done at the call sites) halves the spike; this guard turns a remaining hard MLX allocation
+// abort (process crash / jetsam) into a recoverable error so generation can degrade cleanly.
+
+/// Available process memory: `os_proc_available_memory()` on iOS is the true headroom before jetsam;
+/// macOS falls back to total system memory (a loose bound — the guard mainly protects iOS).
+func turboQuantAvailableProcessMemoryBytes() -> Int {
+    #if os(iOS) || os(tvOS) || os(visionOS)
+        if #available(iOS 13.0, tvOS 13.0, visionOS 1.0, *) {
+            let value = UInt64(os_proc_available_memory())
+            return value > UInt64(Int.max) ? Int.max : Int(value)
+        }
+    #endif
+    return ModelFitPlanner.currentSystemMemoryBytes()
+}
+
+/// Fraction of available memory kept free during a fallback decode. **On-device tuning constant** —
+/// raise on thermally/jetsam-constrained devices; this is the single knob for the guard.
+private let turboQuantFallbackReserveFraction = 0.15
+
+/// Estimated bytes a full fallback decode of these codes will allocate at `dtype`.
+private func turboQuantDecodedFallbackBytes(
+    _ keys: TurboQuantAttentionCode, _ values: TurboQuantAttentionCode, dtype: DType
+) -> Int {
+    let perElement = dtype == .float32 ? 4 : 2
+    let keyElems = keys.layout.logicalShape.reduce(1, *)
+    let valueElems = values.layout.logicalShape.reduce(1, *)
+    return (keyElems + valueElems) * perElement
+}
+
+/// Throw a recoverable error before a full-context fallback decode that would not safely fit.
+private func turboQuantGuardFallbackMaterialization(
+    keys: TurboQuantAttentionCode, values: TurboQuantAttentionCode, dtype: DType
+) throws {
+    let needed = turboQuantDecodedFallbackBytes(keys, values, dtype: dtype)
+    let available = turboQuantAvailableProcessMemoryBytes()
+    let usable = available - Int(Double(available) * turboQuantFallbackReserveFraction)
+    guard usable >= needed else {
+        throw TurboQuantRuntimeFailure.decodedFallbackUnavailable(
+            "fallback decode needs ~\(needed / 1_048_576) MB but only ~\(max(0, usable) / 1_048_576) MB is safely available")
+    }
+}
+
 public typealias TurboQuantPreset = MLX.TurboQuantPreset
 public typealias TurboQuantBackend = MLX.TurboQuantBackend
 public typealias TurboQuantKernelAvailability = MLX.TurboQuantKernelAvailability
@@ -1422,6 +1468,10 @@ public final class TurboQuantKVCache: QuantizedKVCache, TurboQuantCompressedKVCa
         guard let compressedKeys, let compressedValues else {
             throw TurboQuantCacheError.compressedStorageInvalid("decode compressed state missing")
         }
+        // 4.1: gate the full-context materialization so a decode under memory pressure degrades
+        // (recoverable error) instead of aborting the process with a hard allocation failure.
+        try turboQuantGuardFallbackMaterialization(
+            keys: compressedKeys, values: compressedValues, dtype: outputDType)
         cacheLifecycle = .decodeCompressed
         let decodedKeys = try MLX.turboQuantMetalDecodeAttention(
             compressedKeys,
@@ -1452,11 +1502,11 @@ public final class TurboQuantKVCache: QuantizedKVCache, TurboQuantCompressedKVCa
             ),
             let decodedKeys = try? MLX.turboQuantMetalDecodeAttention(
                 compressedKeys,
-                outputDType: .float32
+                outputDType: .float16  // 4.1: fp16 scratch halves the fallback materialization spike
             ),
             let decodedValues = try? MLX.turboQuantMetalDecodeAttention(
                 compressedValues,
-                outputDType: .float32
+                outputDType: .float16  // 4.1: fp16 scratch halves the fallback materialization spike
             )
         else {
             return nil
@@ -2529,6 +2579,9 @@ public final class RotatingTurboQuantKVCache: BaseKVCache, QuantizedKVCacheProto
                 "decode rotating compressed state missing"
             )
         }
+        // 4.1: gate the full-context materialization (recoverable instead of a crash under pressure).
+        try turboQuantGuardFallbackMaterialization(
+            keys: compressedKeys, values: compressedValues, dtype: outputDType)
         cacheLifecycle = .decodeCompressed
         let decodedKeys = try MLX.turboQuantMetalDecodeAttention(
             compressedKeys,
@@ -3350,11 +3403,11 @@ public final class RotatingTurboQuantKVCache: BaseKVCache, QuantizedKVCacheProto
             do {
                 let decodedKeys = try MLX.turboQuantMetalDecodeAttention(
                     compressedKeys,
-                    outputDType: .float32
+                    outputDType: .float16  // 4.1: fp16 scratch halves the fallback materialization spike
                 )
                 let decodedValues = try MLX.turboQuantMetalDecodeAttention(
                     compressedValues,
-                    outputDType: .float32
+                    outputDType: .float16  // 4.1: fp16 scratch halves the fallback materialization spike
                 )
                 rawCache.state = [decodedKeys, decodedValues]
             } catch {
@@ -3422,11 +3475,11 @@ public final class RotatingTurboQuantKVCache: BaseKVCache, QuantizedKVCacheProto
             ),
             let decodedKeys = try? MLX.turboQuantMetalDecodeAttention(
                 compressedKeys,
-                outputDType: .float32
+                outputDType: .float16  // 4.1: fp16 scratch halves the fallback materialization spike
             ),
             let decodedValues = try? MLX.turboQuantMetalDecodeAttention(
                 compressedValues,
-                outputDType: .float32
+                outputDType: .float16  // 4.1: fp16 scratch halves the fallback materialization spike
             )
         {
             cache.setUnquantizedState(
