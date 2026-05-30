@@ -34,6 +34,9 @@ let package = Package(
         .library(
             name: "IntegrationTestHelpers",
             targets: ["IntegrationTestHelpers"]),
+        .library(
+            name: "TurboQuantBench",
+            targets: ["TurboQuantBench"]),
         .executable(
             name: "TurboQuantModelBenchmark",
             targets: ["TurboQuantModelBenchmark"]),
@@ -121,6 +124,14 @@ let package = Package(
             path: "Libraries/IntegrationTestHelpers",
             exclude: ["README.md"]
         ),
+        .target(
+            name: "TurboQuantBench",
+            dependencies: [
+                "MLXLMCommon",
+                .product(name: "MLX", package: "mlx-swift"),
+            ],
+            path: "Libraries/TurboQuantBench"
+        ),
         .executableTarget(
             name: "TurboQuantModelBenchmark",
             dependencies: [
@@ -147,6 +158,7 @@ let package = Package(
                 "MLXLLM",
                 "MLXVLM",
                 "MLXEmbedders",
+                "TurboQuantBench",
             ],
             path: "Tests/MLXLMTests",
             exclude: [
