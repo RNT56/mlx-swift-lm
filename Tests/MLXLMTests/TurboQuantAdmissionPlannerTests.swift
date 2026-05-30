@@ -357,6 +357,43 @@ extension MLXRuntimeSwiftTests {
             )
         }
 
+        @Test func testPrefersPlainFP16WhenItFits() {
+            // 8K FP16 KV (~0.8 GB @24 layers) + 2 GB weights fits 12 GB easily → plain SDPA.
+            let admission = Self.planner().admit(
+                profile: Self.profile(weightGiB: 2, layers: 24),
+                requestedContextLength: 8192,
+                userMode: .balanced,
+                memorySample: Self.sample(availableGiB: 12, modelGiB: 2)
+            )
+            #expect(admission.admitted)
+            #expect(admission.recommendsPlainKVCache)  // FP16 fits → faster full-precision path
+            #expect(admission.admittedContextLength == 8192)
+        }
+
+        @Test func testFallsToTurboQuantWhenFP16TooLarge() {
+            // 64K FP16 KV (~6.4 GB @24 layers) + 2 GB weights exceeds 8 GB; compressed fits.
+            let admission = Self.planner().admit(
+                profile: Self.profile(weightGiB: 2, layers: 24),
+                requestedContextLength: 65536,
+                userMode: .balanced,
+                memorySample: Self.sample(availableGiB: 8, modelGiB: 2)
+            )
+            #expect(admission.admitted)
+            #expect(!admission.recommendsPlainKVCache)  // FP16 won't fit → compressed
+        }
+
+        @Test func testMaxContextSkipsPlainEvenWhenFP16Fits() {
+            // FP16 would fit, but .maxContext deliberately uses compression to reach further.
+            let admission = Self.planner().admit(
+                profile: Self.profile(weightGiB: 2, layers: 24),
+                requestedContextLength: 8192,
+                userMode: .maxContext,
+                memorySample: Self.sample(availableGiB: 12, modelGiB: 2)
+            )
+            #expect(admission.admitted)
+            #expect(!admission.recommendsPlainKVCache)
+        }
+
         private static func profile(weightGiB: Int, layers: Int) -> ModelMemoryProfile {
             ModelMemoryProfile(
                 modelID: "synthetic-worker6-\(weightGiB)gib",

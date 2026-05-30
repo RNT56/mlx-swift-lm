@@ -449,6 +449,10 @@ public struct TurboQuantAdmission: Codable, Equatable, Sendable {
     public var admitted: Bool
     public var requestedContextLength: Int
     public var admittedContextLength: Int
+    /// When true, the admitted context fits an uncompressed FP16 KV cache within the live memory
+    /// budget, so the runtime should use plain SDPA (faster + higher quality) rather than the
+    /// compressed codec. Set only when FP16 fits at the admitted length and the mode permits it.
+    public var recommendsPlainKVCache: Bool
     public var requestedMode: TurboQuantUserMode
     public var selectedMode: TurboQuantUserMode
     public var memoryPlan: TurboQuantMemoryPlan
@@ -469,11 +473,13 @@ public struct TurboQuantAdmission: Codable, Equatable, Sendable {
         memoryPlan: TurboQuantMemoryPlan,
         downgradeReasons: [TurboQuantAdmissionDowngrade] = [],
         rejectedPaths: [RejectedPath] = [],
-        userMessage: String
+        userMessage: String,
+        recommendsPlainKVCache: Bool = false
     ) {
         self.admitted = admitted
         self.requestedContextLength = max(1, requestedContextLength)
         self.admittedContextLength = max(0, admittedContextLength)
+        self.recommendsPlainKVCache = recommendsPlainKVCache
         self.requestedMode = requestedMode
         self.selectedMode = selectedMode
         self.memoryPlan = memoryPlan
@@ -582,6 +588,20 @@ public struct TurboQuantAdmissionPlanner: Sendable {
             groupSize: groupSize,
             sample: sample
         )
+        // Prefer plain FP16 KV when it fits the live budget at the full requested context: it is
+        // strictly faster and higher quality than the compressed codec. Because FP16 KV is larger
+        // than compressed, "FP16 fits" implies "compressed fits", so this is the right first check.
+        // `.maxContext` skips it — reaching as far as possible via compression is the point there.
+        if userMode != .maxContext, plan.rawSDPAFits(contextLength: requestedContext) {
+            return admittedResult(
+                requestedContextLength: requestedContext,
+                requestedMode: userMode,
+                plan: plan,
+                downgrades: downgrades,
+                recommendsPlainKVCache: true
+            )
+        }
+
         if plan.fitsRuntimeBudget {
             return admittedResult(
                 requestedContextLength: requestedContext,
@@ -1076,7 +1096,8 @@ public struct TurboQuantAdmissionPlanner: Sendable {
         requestedContextLength: Int,
         requestedMode: TurboQuantUserMode,
         plan: TurboQuantMemoryPlan,
-        downgrades: [TurboQuantAdmissionDowngrade]
+        downgrades: [TurboQuantAdmissionDowngrade],
+        recommendsPlainKVCache: Bool = false
     ) -> TurboQuantAdmission {
         let contextPart =
             plan.admittedContextLength == requestedContextLength
@@ -1095,8 +1116,10 @@ public struct TurboQuantAdmissionPlanner: Sendable {
             memoryPlan: plan,
             downgradeReasons: downgrades,
             rejectedPaths: [],
-            userMessage:
-                "TurboQuant can run \(contextPart) in \(plan.effectiveMode.rawValue) mode. \(downgradePart)"
+            userMessage: recommendsPlainKVCache
+                ? "Plain FP16 attention fits \(contextPart); using full precision (faster). \(downgradePart)"
+                : "TurboQuant can run \(contextPart) in \(plan.effectiveMode.rawValue) mode. \(downgradePart)",
+            recommendsPlainKVCache: recommendsPlainKVCache
         )
     }
 
