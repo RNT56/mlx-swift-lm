@@ -141,6 +141,59 @@ extension MLXRuntimeSwiftTests {
             #expect(!materializeRecurrentKVCacheState([attention]))
         }
 
+        @Test func testNoneStrategyStaysPlainWithoutMemoryPressure() throws {
+            // 2A: a plain-FP16 (.none) cache must stay plain when there is no memory pressure
+            // (the admission chose FP16 because it fit). No watermark → never spills.
+            try Device.withDefaultDevice(.cpu) {
+                var cache: [KVCache] = [KVCacheSimple()]
+                let keys = MLXArray.ones([1, 8, 16, 64], dtype: .bfloat16)
+                let values = MLXArray.ones([1, 8, 16, 64], dtype: .bfloat16)
+                _ = cache[0].update(keys: keys, values: values)
+
+                maybeQuantizeKVCache(
+                    cache: &cache,
+                    kvBits: nil,
+                    kvGroupSize: 64,
+                    quantizedKVStart: 0,
+                    kvCacheStrategy: .none,
+                    turboQuantPreset: .turbo3_5,
+                    turboQuantBackend: .metalPolarQJL,
+                    spillMemoryWatermarkBytes: nil
+                )
+
+                #expect(cache[0] is KVCacheSimple)
+            }
+        }
+
+        @Test func testMemoryWatermarkSpillsNoneCacheToCompressed() throws {
+            // 2A: under live memory pressure, even a .none (plain FP16) cache spills to compressed
+            // mid-generation, and the static token threshold is bypassed. Int.max watermark forces
+            // "available memory < watermark" deterministically.
+            guard TurboQuantKernelAvailability.current.supportsMetalPolarQJLCodec else { return }
+            try Device.withDefaultDevice(.cpu) {
+                var cache: [KVCache] = [KVCacheSimple()]
+                let keys = MLXArray.ones([1, 8, 16, 64], dtype: .bfloat16)
+                let values = MLXArray.ones([1, 8, 16, 64], dtype: .bfloat16)
+                _ = cache[0].update(keys: keys, values: values)
+
+                maybeQuantizeKVCache(
+                    cache: &cache,
+                    kvBits: nil,
+                    kvGroupSize: 64,
+                    quantizedKVStart: 1_000_000,  // far above offset (16) — only the watermark can spill
+                    kvCacheStrategy: .none,        // plain FP16 — would normally never quantize
+                    turboQuantPreset: .turbo3_5,
+                    turboQuantBackend: .metalPolarQJL,
+                    turboQuantSeed: 0xDEAD_BEEF_0000_0017,
+                    spillMemoryWatermarkBytes: Int.max
+                )
+
+                #expect(cache[0] is TurboQuantKVCache)
+                let turbo = try #require(cache[0] as? TurboQuantKVCache)
+                #expect(turbo.preset == .turbo3_5)
+            }
+        }
+
         @Test func testTurboQuantCacheStrategyConvertsSimpleCache() throws {
             guard TurboQuantKernelAvailability.current.supportsMetalPolarQJLCodec else { return }
 

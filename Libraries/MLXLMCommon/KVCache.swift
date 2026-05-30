@@ -2717,13 +2717,26 @@ public func maybeQuantizeKVCache(
     turboQuantFallbackPolicy: TurboQuantFallbackPolicy = .compressedDecodeAllowed,
     turboQuantSeed: UInt64? = nil,
     turboQuantValueBits: Int? = nil,
-    turboQuantResidentBudgetBytes: Int? = nil
+    turboQuantResidentBudgetBytes: Int? = nil,
+    spillMemoryWatermarkBytes: Int? = nil
 ) {
     guard !cache.isEmpty else { return }
-    if kvCacheStrategy == .none { return }
     if kvCacheStrategy == .hybridTurboQuant { return }
-    let resolvedBits = kvCacheStrategy.canUseTurboQuant ? turboQuantPreset.effectiveBits : kvBits
+    // 2A spill: when live available memory falls below the watermark, re-encode the FP16 cache to
+    // compressed mid-generation — even a plain-FP16 (.none) cache that fit at admission but outgrew
+    // its projection. This converts an impending OOM into a graceful precision/throughput tradeoff.
+    // The watermark is an on-device tuning constant; nil disables memory-triggered spilling.
+    let underMemoryPressure: Bool = {
+        guard let watermark = spillMemoryWatermarkBytes, watermark > 0 else { return false }
+        return turboQuantAvailableProcessMemoryBytes() < watermark
+    }()
+    if kvCacheStrategy == .none && !underMemoryPressure { return }
+    let spillToTurboQuant =
+        kvCacheStrategy.canUseTurboQuant || (kvCacheStrategy == .none && underMemoryPressure)
+    let resolvedBits = spillToTurboQuant ? turboQuantPreset.effectiveBits : kvBits
     guard let kvBits = resolvedBits else { return }
+    // Under memory pressure, spill immediately — ignore the static token threshold.
+    let effectiveQuantizedKVStart = underMemoryPressure ? 0 : quantizedKVStart
 
     func isReadyForQuantization(_ item: KVCache) -> Bool {
         if let list = item as? CacheList {
@@ -2736,10 +2749,10 @@ public func maybeQuantizeKVCache(
             return false
         }
         if item is KVCacheSimple {
-            return item.offset > quantizedKVStart
+            return item.offset > effectiveQuantizedKVStart
         }
         if item is RotatingKVCache {
-            return item.offset > quantizedKVStart
+            return item.offset > effectiveQuantizedKVStart
         }
         return false
     }
@@ -2756,7 +2769,7 @@ public func maybeQuantizeKVCache(
             return item
         }
         if let simpleCache = item as? KVCacheSimple {
-            if kvCacheStrategy.canUseTurboQuant {
+            if spillToTurboQuant {
                 return simpleCache.toTurboQuant(
                     preset: turboQuantPreset,
                     groupSize: kvGroupSize,
@@ -2770,7 +2783,7 @@ public func maybeQuantizeKVCache(
             }
             return simpleCache.toQuantized(groupSize: kvGroupSize, bits: kvBits)
         }
-        if kvCacheStrategy.canUseTurboQuant, let rotatingCache = item as? RotatingKVCache {
+        if spillToTurboQuant, let rotatingCache = item as? RotatingKVCache {
             return rotatingCache.toTurboQuant(
                 preset: turboQuantPreset,
                 groupSize: kvGroupSize,

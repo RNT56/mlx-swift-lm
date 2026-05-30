@@ -84,6 +84,12 @@ public struct GenerateParameters: Sendable {
     /// Strategy used to construct and dynamically convert KV caches.
     public var kvCacheStrategy: KVCacheStrategy
 
+    /// 2A spill: when set, the generate loop re-encodes the FP16 KV cache to compressed
+    /// mid-generation if live available process memory falls below this many bytes — even a
+    /// plain-FP16 (`.none`) cache that fit at admission but outgrew its projection. nil disables
+    /// memory-triggered spilling. The threshold is an on-device tuning constant (jetsam-dependent).
+    public var spillMemoryWatermarkBytes: Int?
+
     /// TurboQuant preset used when ``kvCacheStrategy`` is ``KVCacheStrategy/turboQuant``.
     public var turboQuantPreset: TurboQuantPreset
 
@@ -216,7 +222,8 @@ public struct GenerateParameters: Sendable {
         presenceContextSize: Int = 20,
         frequencyPenalty: Float? = nil,
         frequencyContextSize: Int = 20,
-        prefillStepSize: Int = 512
+        prefillStepSize: Int = 512,
+        spillMemoryWatermarkBytes: Int? = nil
     ) {
         self.maxTokens = maxTokens
         self.maxKVSize = maxKVSize
@@ -224,6 +231,7 @@ public struct GenerateParameters: Sendable {
         self.kvGroupSize = kvGroupSize
         self.quantizedKVStart = quantizedKVStart
         self.kvCacheStrategy = kvCacheStrategy
+        self.spillMemoryWatermarkBytes = spillMemoryWatermarkBytes
         self.turboQuantPreset = turboQuantPreset
         self.turboQuantBackend = turboQuantBackend
         self.turboQuantOptimizationPolicy = turboQuantOptimizationPolicy
@@ -866,6 +874,7 @@ public struct TokenIterator: TokenIteratorProtocol {
     let kvGroupSize: Int
     let quantizedKVStart: Int
     let kvCacheStrategy: KVCacheStrategy
+    let spillMemoryWatermarkBytes: Int?
     let turboQuantPreset: TurboQuantPreset
     let turboQuantBackend: TurboQuantBackend
     let turboQuantOptimizationPolicy: TurboQuantOptimizationPolicy
@@ -906,6 +915,7 @@ public struct TokenIterator: TokenIteratorProtocol {
         self.kvGroupSize = runtimeParameters.kvGroupSize
         self.quantizedKVStart = runtimeParameters.quantizedKVStart
         self.kvCacheStrategy = runtimeParameters.kvCacheStrategy
+        self.spillMemoryWatermarkBytes = runtimeParameters.spillMemoryWatermarkBytes
         self.turboQuantPreset = runtimeParameters.turboQuantPreset
         self.turboQuantBackend = runtimeParameters.turboQuantBackend
         self.turboQuantOptimizationPolicy = runtimeParameters.turboQuantOptimizationPolicy
@@ -948,6 +958,7 @@ public struct TokenIterator: TokenIteratorProtocol {
         self.kvGroupSize = runtimeParameters.kvGroupSize
         self.quantizedKVStart = runtimeParameters.quantizedKVStart
         self.kvCacheStrategy = runtimeParameters.kvCacheStrategy
+        self.spillMemoryWatermarkBytes = runtimeParameters.spillMemoryWatermarkBytes
         self.turboQuantPreset = runtimeParameters.turboQuantPreset
         self.turboQuantBackend = runtimeParameters.turboQuantBackend
         self.turboQuantOptimizationPolicy = runtimeParameters.turboQuantOptimizationPolicy
@@ -992,6 +1003,7 @@ public struct TokenIterator: TokenIteratorProtocol {
         self.kvGroupSize = runtimeCacheParameters?.kvGroupSize ?? 64
         self.quantizedKVStart = runtimeCacheParameters?.quantizedKVStart ?? 0
         self.kvCacheStrategy = runtimeCacheParameters?.kvCacheStrategy ?? .none
+        self.spillMemoryWatermarkBytes = runtimeCacheParameters?.spillMemoryWatermarkBytes
         self.turboQuantPreset = runtimeCacheParameters?.turboQuantPreset ?? .turbo3_5
         self.turboQuantBackend = runtimeCacheParameters?.turboQuantBackend ?? .metalPolarQJL
         self.turboQuantOptimizationPolicy =
@@ -1069,7 +1081,8 @@ public struct TokenIterator: TokenIteratorProtocol {
             turboQuantFallbackPolicy: turboQuantFallbackPolicy,
             turboQuantSeed: turboQuantSeed,
             turboQuantValueBits: turboQuantValueBits,
-            turboQuantResidentBudgetBytes: turboQuantResidentBudgetBytes
+            turboQuantResidentBudgetBytes: turboQuantResidentBudgetBytes,
+            spillMemoryWatermarkBytes: spillMemoryWatermarkBytes
         )
         if materializeRecurrentKVCacheState(cache) {
             requiresSynchronousGenerationEval = true
@@ -1235,7 +1248,8 @@ public struct SpeculativeTokenIterator: TokenIteratorProtocol {
                 turboQuantSeed: mainRuntimeParameters.turboQuantSeed,
                 turboQuantValueBits: mainRuntimeParameters.turboQuantValueBits,
                 turboQuantResidentBudgetBytes: mainRuntimeParameters
-                    .turboQuantPerCacheResidentBudgetBytes
+                    .turboQuantPerCacheResidentBudgetBytes,
+                spillMemoryWatermarkBytes: mainRuntimeParameters.spillMemoryWatermarkBytes
             )
         }
 
@@ -1593,7 +1607,8 @@ public struct MTPTokenIterator: TokenIteratorProtocol {
                 turboQuantSeed: runtimeParameters.turboQuantSeed,
                 turboQuantValueBits: runtimeParameters.turboQuantValueBits,
                 turboQuantResidentBudgetBytes: runtimeParameters
-                    .turboQuantPerCacheResidentBudgetBytes
+                    .turboQuantPerCacheResidentBudgetBytes,
+                spillMemoryWatermarkBytes: runtimeParameters.spillMemoryWatermarkBytes
             )
         }
 
