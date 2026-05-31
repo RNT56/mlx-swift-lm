@@ -7,6 +7,7 @@ public enum TurboQuantBenchmarkSuiteID: String, Codable, Sendable, CaseIterable 
     case longContextNeedleV1 = "long-context-needle-v1"
     case snapshotRoundtripV1 = "snapshot-roundtrip-v1"
     case mobileMemoryAcceptanceV1 = "mobile-memory-acceptance-v1"
+    case realModelInferenceV1 = "real-model-inference-v1"
 }
 
 public struct TurboQuantQualityGateReport: Hashable, Codable, Sendable {

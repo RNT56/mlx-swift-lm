@@ -6,14 +6,15 @@ import TurboQuantBench
 
 extension MLXRuntimeSwiftTests {
 
-    /// On-device A-series attention benchmark.
+    /// On-device A-series synthetic attention benchmark.
     ///
     /// By default this runs a fast single-point smoke sweep so every test run still
     /// exercises (and regression-guards) the harness + Metal kernels. Set the
     /// environment variable `TQ_BENCH=1` to run the full context-length × scheme
     /// matrix at the production Qwen3.5-2B geometry — the run that, executed on a
-    /// physical A-series device, yields the production-faithful throughput / quality
-    /// / memory numbers the overhaul plan gates everything else on.
+    /// physical A-series device, yields smoke/regression throughput and memory numbers.
+    /// Release parity gates now require real model inference evidence, not this
+    /// synthetic attention-shape sweep.
     ///
     /// Run the full matrix on a connected iPhone:
     ///
