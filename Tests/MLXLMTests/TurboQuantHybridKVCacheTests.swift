@@ -204,7 +204,93 @@ extension MLXRuntimeSwiftTests {
             #expect(defaultSelection.selectorEscalation == .none)
             #expect(defaultSelection.reasonFlags.contains("low_confidence_exhaustive_disabled"))
             #expect(exhaustiveSelection.selectorEscalation == .exhaustive)
+            #expect(exhaustiveSelection.reasonFlags.contains("quality_guard_exhaustive"))
             #expect(exhaustiveSelection.requiresExhaustiveFallback)
+        }
+
+        @Test func testHybridLayerPolicyBudgetsEarlyMiddleFinalAndCustomLayers() {
+            let auto = HybridTurboQuantKVCache(
+                hotWindowTokens: 16,
+                coldBlockTokens: 4,
+                coldBudgetTokens: 4096,
+                maxColdBudgetTokens: 8192,
+                layerPolicy: .auto
+            )
+            #expect(auto.coldBudgetForLayer(layerIndex: 0, layerCount: 8, defaultBudget: 4096) == 0)
+            #expect(auto.coldBudgetForLayer(layerIndex: 4, layerCount: 8, defaultBudget: 4096) == 2048)
+            #expect(auto.coldBudgetForLayer(layerIndex: 5, layerCount: 8, defaultBudget: 4096) == 0)
+            #expect(auto.coldBudgetForLayer(layerIndex: 6, layerCount: 8, defaultBudget: 4096) == 4096)
+
+            let all = HybridTurboQuantKVCache(
+                hotWindowTokens: 16,
+                coldBlockTokens: 4,
+                coldBudgetTokens: 4096,
+                maxColdBudgetTokens: 8192,
+                layerPolicy: .all
+            )
+            #expect(all.coldBudgetForLayer(layerIndex: 0, layerCount: 8, defaultBudget: 4096) == 4096)
+
+            let finalQuarter = HybridTurboQuantKVCache(
+                hotWindowTokens: 16,
+                coldBlockTokens: 4,
+                coldBudgetTokens: 4096,
+                maxColdBudgetTokens: 8192,
+                layerPolicy: .finalQuarter
+            )
+            #expect(finalQuarter.coldBudgetForLayer(layerIndex: 1, layerCount: 8, defaultBudget: 4096) == 0)
+            #expect(finalQuarter.coldBudgetForLayer(layerIndex: 4, layerCount: 8, defaultBudget: 4096) == 0)
+            #expect(finalQuarter.coldBudgetForLayer(layerIndex: 6, layerCount: 8, defaultBudget: 4096) == 4096)
+
+            let custom = HybridTurboQuantKVCache(
+                hotWindowTokens: 16,
+                coldBlockTokens: 4,
+                coldBudgetTokens: 4096,
+                maxColdBudgetTokens: 8192,
+                layerPolicy: .custom([1: 1024, 6: 3072])
+            )
+            #expect(custom.coldBudgetForLayer(layerIndex: nil, layerCount: 8, defaultBudget: 4096) == 4096)
+            #expect(custom.coldBudgetForLayer(layerIndex: 1, layerCount: 8, defaultBudget: 4096) == 1024)
+            #expect(custom.coldBudgetForLayer(layerIndex: 3, layerCount: 8, defaultBudget: 4096) == 0)
+            #expect(custom.coldBudgetForLayer(layerIndex: 6, layerCount: 8, defaultBudget: 4096) == 3072)
+        }
+
+        @Test func testHybridSelectedModeExhaustiveFallbackDiagnosticsAreExplicit() throws {
+            guard TurboQuantKernelAvailability.current.supportsMetalPolarQJLCodec else { return }
+
+            Device.withDefaultDevice(.cpu) {
+                let cache = HybridTurboQuantKVCache(
+                    maxSize: 32,
+                    hotWindowTokens: 4,
+                    coldBlockTokens: 2,
+                    coldBudgetTokens: 2,
+                    maxColdBudgetTokens: 2,
+                    preset: .turbo4v2,
+                    groupSize: 64,
+                    backend: .metalPolarQJL,
+                    selectorPolicy: TurboQuantColdSelectorPolicy(
+                        nearestBlockCount: 1,
+                        minimumConfidence: 0.95,
+                        allowMaxBudgetEscalation: false,
+                        allowExhaustiveEscalation: true
+                    )
+                )
+                _ = cache.update(
+                    keys: tokenRamp(start: 0, count: 9),
+                    values: tokenRamp(start: 0, count: 9, scale: 2)
+                )
+
+                let selection = cache.selectColdBlocks()
+
+                #expect(selection.selectorEscalation == .exhaustive)
+                #expect(selection.requiresExhaustiveFallback)
+                #expect(cache.diagnostics.route == "hybrid_exhaustive_cold")
+                #expect(cache.diagnostics.fullScanFallbackCount == 1)
+                #expect(
+                    cache.diagnostics.fallbackReason?.contains(
+                        "selected_mode_exhaustive_fallback"
+                    ) == true
+                )
+            }
         }
 
         @Test func testHybridSelectorUsesQuerySummaryWhenAvailable() throws {
@@ -284,11 +370,12 @@ extension MLXRuntimeSwiftTests {
                 _ = cache.update(keys: keys, values: values)
 
                 #expect(cache.offset == 9)
-                #expect(cache.coldBlockCount == 2)
-                #expect(cache.coldTokenCount == 4)
-                #expect(cache.rawHotLength == 5)
-                #expect(cache.coldBlockDescriptors.map(\.startToken) == [0, 2])
-                #expect(cache.coldBlockDescriptors.map(\.endToken) == [2, 4])
+                #expect(cache.coldBlockCount == 3)
+                #expect(cache.coldTokenCount == 6)
+                #expect(cache.rawHotLength == 3)
+                #expect(cache.rawHotLength <= cache.hotWindowTokens)
+                #expect(cache.coldBlockDescriptors.map(\.startToken) == [0, 2, 4])
+                #expect(cache.coldBlockDescriptors.map(\.endToken) == [2, 4, 6])
                 #expect(cache.coldBlockDescriptors.allSatisfy { $0.maxKeyNormEstimate > 0 })
             }
         }
@@ -313,16 +400,17 @@ extension MLXRuntimeSwiftTests {
                         keys: tokenRamp(start: token, count: 1),
                         values: tokenRamp(start: token, count: 1, scale: 2)
                     )
+                    #expect(cache.rawHotLength <= cache.hotWindowTokens)
                 }
 
                 let state = cache.state
                 #expect(cache.offset == 12)
-                #expect(cache.coldBlockDescriptors.map(\.startToken) == [0, 2, 4])
-                #expect(cache.coldBlockDescriptors.map(\.endToken) == [2, 4, 6])
-                #expect(cache.rawHotLength == 6)
+                #expect(cache.coldBlockDescriptors.map(\.startToken) == [0, 2, 4, 6])
+                #expect(cache.coldBlockDescriptors.map(\.endToken) == [2, 4, 6, 8])
+                #expect(cache.rawHotLength == 4)
                 #expect(state.count >= 2)
-                #expect(allClose(state[0], tokenRamp(start: 6, count: 6)).item(Bool.self))
-                #expect(allClose(state[1], tokenRamp(start: 6, count: 6, scale: 2)).item(Bool.self))
+                #expect(allClose(state[0], tokenRamp(start: 8, count: 4)).item(Bool.self))
+                #expect(allClose(state[1], tokenRamp(start: 8, count: 4, scale: 2)).item(Bool.self))
             }
         }
 
@@ -347,8 +435,8 @@ extension MLXRuntimeSwiftTests {
                 )
 
                 #expect(cache.offset == 6)
-                #expect(cache.rawHotLength == 2)
-                #expect(cache.coldBlockDescriptors.map(\.startToken) == [0, 2])
+                #expect(cache.rawHotLength == 0)
+                #expect(cache.coldBlockDescriptors.map(\.startToken) == [0, 2, 4])
 
                 let trimmed = cache.trim(3)
 
@@ -357,6 +445,41 @@ extension MLXRuntimeSwiftTests {
                 #expect(cache.rawHotLength == 0)
                 #expect(cache.coldBlockDescriptors.map(\.startToken) == [0])
                 #expect(cache.coldBlockDescriptors.map(\.endToken) == [2])
+            }
+        }
+
+        @Test func testHybridCheckpointRestoreRestoresSelectionAfterTrimRollback() throws {
+            guard TurboQuantKernelAvailability.current.supportsMetalPolarQJLCodec else { return }
+
+            Device.withDefaultDevice(.cpu) {
+                let cache = HybridTurboQuantKVCache(
+                    maxSize: 16,
+                    hotWindowTokens: 4,
+                    coldBlockTokens: 2,
+                    coldBudgetTokens: 2,
+                    maxColdBudgetTokens: 2,
+                    preset: .turbo4v2,
+                    groupSize: 64,
+                    backend: .metalPolarQJL
+                )
+                _ = cache.update(
+                    keys: tokenRamp(start: 0, count: 9),
+                    values: tokenRamp(start: 0, count: 9, scale: 2)
+                )
+                let selection = cache.selectColdBlocks()
+                let checkpoint = cache.makeCompressedUpdateCheckpoint(appendingTokenCount: 0)
+
+                _ = cache.trim(5)
+
+                #expect(cache.lastSelection.isEmpty)
+
+                cache.restoreCompressedUpdateCheckpoint(checkpoint)
+
+                #expect(cache.offset == 9)
+                #expect(cache.rawHotLength == 3)
+                #expect(cache.coldBlockDescriptors.map(\.startToken) == [0, 2, 4])
+                #expect(cache.lastSelection == selection)
+                #expect(cache.diagnostics.selectedColdBlocks == selection.selectedBlockIDs)
             }
         }
 
@@ -480,6 +603,17 @@ extension MLXRuntimeSwiftTests {
                 result.state.keyLength == cache.rawHotLength + cache.lastSelection.selectedTokenCount
             )
             #expect(cache.diagnostics.fallbackReason == nil)
+            #expect(cache.diagnostics.route == "hybrid_selected_segmented_attention")
+            #expect(cache.runtimeSnapshot().selectedPath == "hybrid_selected_segmented_attention")
+
+            let stateOutput = try attentionWithKVStateThrowing(
+                queries: queries,
+                state: result.state,
+                scale: 1 / sqrt(Float(64)),
+                mask: .causal
+            )
+            #expect(stateOutput.shape == [1, 2, 1, 64])
+            #expect(cache.diagnostics.route == "hybrid_selected_segmented_attention")
         }
 
         @Test func testHybridPromptCacheRoundTripsHotState() throws {

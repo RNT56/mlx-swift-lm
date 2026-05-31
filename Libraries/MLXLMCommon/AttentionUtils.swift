@@ -791,15 +791,74 @@ public func attentionWithKVStateThrowing(
             )
         }
 
-    case .hybridTurboQuant(let keys, let values, _, _):
-        return MLXFast.scaledDotProductAttention(
+    case .hybridTurboQuant(let keys, let values, let selection, let cache):
+        let keysAreRawHot = keys.dim(2) == cache.rawHotLength
+        var segmentedFallbackReason: String?
+        if queries.dim(2) == 1, sinks == nil, keysAreRawHot {
+            let coldSegments = cache.selectedColdCompressedSegments(selection: selection)
+            if !coldSegments.isEmpty {
+                do {
+                    let output = try MLX.turboQuantMetalSegmentedScaledDotProductAttention(
+                        queries: queries,
+                        rawKeys: keys,
+                        rawValues: values,
+                        coldSegments: coldSegments,
+                        scale: scale,
+                        outputDType: queries.dtype,
+                        sparseVThreshold: cache.sparseValuePolicy.resolvedThreshold(
+                            runtimeMode: .capacityTurboQuant,
+                            contextLength: cache.offset
+                        )
+                    )
+                    cache.recordFallbackReason(nil)
+                    cache.recordAttentionRoute(
+                        cache.segmentedAttentionRoute(selection: selection),
+                        selection: selection
+                    )
+                    return output
+                } catch {
+                    segmentedFallbackReason = "selected_segmented_attention_state_fallback:\(error)"
+                    cache.recordFallbackReason(segmentedFallbackReason)
+                }
+            }
+        }
+
+        let attentionKeys: MLXArray
+        let attentionValues: MLXArray
+        if keysAreRawHot,
+            let selectedCold = try cache.selectedColdState(
+                selection: selection,
+                outputDType: keys.dtype
+            )
+        {
+            attentionKeys = concatenated([selectedCold.keys, keys], axis: 2)
+            attentionValues = concatenated([selectedCold.values, values], axis: 2)
+        } else {
+            attentionKeys = keys
+            attentionValues = values
+        }
+
+        let adjustedMask = turboQuantHybridMask(
+            original: mask,
+            queryLength: queries.dim(2),
+            keyLength: attentionKeys.dim(2)
+        )
+        let output = MLXFast.scaledDotProductAttention(
             queries: queries,
-            keys: keys,
-            values: values,
+            keys: attentionKeys,
+            values: attentionValues,
             scale: scale,
-            mask: mask,
+            mask: adjustedMask,
             sinks: sinks
         )
+        if segmentedFallbackReason == nil {
+            cache.recordFallbackReason(nil)
+        }
+        cache.recordAttentionRoute(
+            cache.decodedAttentionRoute(selection: selection),
+            selection: selection
+        )
+        return output
     }
 }
 

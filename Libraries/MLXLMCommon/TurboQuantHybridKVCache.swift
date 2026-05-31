@@ -420,10 +420,12 @@ private struct TurboQuantHybridCheckpoint {
     var hotKeys: MLXArray?
     var hotValues: MLXArray?
     var blocks: [TurboQuantColdBlock]
+    var lastSelection: TurboQuantColdSelection
     var selectorPolicy: TurboQuantColdSelectorPolicy
     var selectorHints: [TurboQuantColdSelectorHint]
     var nextBlockID: Int
     var fullScanFallbackCount: Int
+    var lastSealFailure: String?
     var diagnostics: TurboQuantHybridDiagnostics
 }
 
@@ -1119,7 +1121,8 @@ public final class HybridTurboQuantKVCache: BaseKVCache {
             hotStartToken = offset
         }
         refreshRecency()
-        refreshDiagnostics(selection: .empty, fallbackReason: lastSealFailure)
+        lastSelection = .empty
+        refreshDiagnostics(selection: lastSelection, fallbackReason: lastSealFailure)
         return trimmed
     }
 
@@ -1181,10 +1184,12 @@ public final class HybridTurboQuantKVCache: BaseKVCache {
             hotKeys: hotKeys,
             hotValues: hotValues,
             blocks: coldBlocks,
+            lastSelection: lastSelection,
             selectorPolicy: selectorPolicy,
             selectorHints: selectorHints,
             nextBlockID: nextBlockID,
             fullScanFallbackCount: fullScanFallbackCount,
+            lastSealFailure: lastSealFailure,
             diagnostics: diagnostics
         )
     }
@@ -1196,10 +1201,12 @@ public final class HybridTurboQuantKVCache: BaseKVCache {
         hotKeys = checkpoint.hotKeys
         hotValues = checkpoint.hotValues
         coldBlocks = checkpoint.blocks
+        lastSelection = checkpoint.lastSelection
         selectorPolicy = checkpoint.selectorPolicy
         selectorHints = checkpoint.selectorHints
         nextBlockID = checkpoint.nextBlockID
         fullScanFallbackCount = checkpoint.fullScanFallbackCount
+        lastSealFailure = checkpoint.lastSealFailure
         diagnostics = checkpoint.diagnostics
     }
 
@@ -1341,7 +1348,7 @@ public final class HybridTurboQuantKVCache: BaseKVCache {
             appendHot(keys: keys, values: values)
             return
         }
-        let maxResidentTokens = max(1, hotWindowTokens + coldBlockTokens)
+        let maxBufferedHotTokens = max(1, hotWindowTokens + coldBlockTokens)
         var consumed = 0
         while consumed < tokenCount {
             do {
@@ -1358,7 +1365,7 @@ public final class HybridTurboQuantKVCache: BaseKVCache {
             }
             let remaining = tokenCount - consumed
             let currentHot = rawHotLength
-            let room = max(1, maxResidentTokens - currentHot)
+            let room = max(1, maxBufferedHotTokens - currentHot)
             let chunkCount = min(remaining, room)
             let chunkRange = consumed ..< (consumed + chunkCount)
             appendHot(
@@ -1397,18 +1404,16 @@ public final class HybridTurboQuantKVCache: BaseKVCache {
         offset += keys.dim(2)
     }
 
-    private func sealReadyColdBlocks(sealAtCapacity: Bool) throws {
+    private func sealReadyColdBlocks(sealAtCapacity _: Bool) throws {
         guard canSealColdBlocks else {
             return
         }
-        let maxResidentTokens = hotWindowTokens + coldBlockTokens
+        let maxResidentTokens = max(1, hotWindowTokens)
         while let hotKeys, let hotValues,
             hotKeys.dim(2) >= coldBlockTokens
         {
             let hotLength = hotKeys.dim(2)
-            let shouldSeal =
-                hotLength > maxResidentTokens
-                || (sealAtCapacity && hotLength == maxResidentTokens)
+            let shouldSeal = hotLength > maxResidentTokens
             guard shouldSeal else { break }
             let blockKeys = hotKeys[.ellipsis, ..<coldBlockTokens, 0...]
             let blockValues = hotValues[.ellipsis, ..<coldBlockTokens, 0...]
@@ -1552,10 +1557,12 @@ public final class HybridTurboQuantKVCache: BaseKVCache {
 
     private func refreshDiagnostics(
         selection: TurboQuantColdSelection,
-        fallbackReason: String?
+        fallbackReason: String?,
+        route: String? = nil
     ) {
+        let route = route ?? defaultAttentionRoute(selection: selection)
         diagnostics = TurboQuantHybridDiagnostics(
-            route: coldBlocks.isEmpty ? "hybrid_raw_hot" : "hybrid_selected_cold",
+            route: route,
             hotTokens: rawHotLength,
             coldBlockCount: coldBlocks.count,
             selectedColdTokens: selection.selectedTokenCount,
@@ -1570,13 +1577,73 @@ public final class HybridTurboQuantKVCache: BaseKVCache {
             selectorReasonFlags: selection.reasonFlags,
             coldBudgetTokens: selection.selectedTokenBudget,
             maxColdBudgetTokens: maxColdBudgetTokens,
-            fallbackReason: fallbackReason,
+            fallbackReason: diagnosticFallbackReason(
+                selection: selection,
+                runtimeFallbackReason: fallbackReason
+            ),
             fullScanFallbackCount: fullScanFallbackCount,
             lastLayerColdBudget: selection.selectedTokenBudget
         )
     }
 
-    private func coldBudgetForLayer(
+    private func defaultAttentionRoute(selection: TurboQuantColdSelection) -> String {
+        if coldBlocks.isEmpty || selection.selectedBlockIDs.isEmpty {
+            return "hybrid_raw_hot"
+        }
+        if selection.selectorEscalation == .exhaustive || coldAttentionMode == .exhaustive {
+            return "hybrid_exhaustive_cold"
+        }
+        return "hybrid_selected_cold"
+    }
+
+    func segmentedAttentionRoute(selection: TurboQuantColdSelection) -> String {
+        if selection.selectorEscalation == .exhaustive || coldAttentionMode == .exhaustive {
+            return "hybrid_exhaustive_segmented_attention"
+        }
+        return "hybrid_selected_segmented_attention"
+    }
+
+    func decodedAttentionRoute(selection: TurboQuantColdSelection) -> String {
+        if selection.selectorEscalation == .exhaustive || coldAttentionMode == .exhaustive {
+            return "hybrid_exhaustive_decoded_sdpa"
+        }
+        if selection.selectedBlockIDs.isEmpty {
+            return "hybrid_raw_hot"
+        }
+        return "hybrid_selected_decoded_sdpa"
+    }
+
+    func recordAttentionRoute(
+        _ route: String,
+        selection: TurboQuantColdSelection? = nil,
+        fallbackReason: String? = nil
+    ) {
+        refreshDiagnostics(
+            selection: selection ?? lastSelection,
+            fallbackReason: fallbackReason ?? lastSealFailure,
+            route: route
+        )
+    }
+
+    private func diagnosticFallbackReason(
+        selection: TurboQuantColdSelection,
+        runtimeFallbackReason: String?
+    ) -> String? {
+        var reasons = [String]()
+        if let runtimeFallbackReason, !runtimeFallbackReason.isEmpty {
+            reasons.append(runtimeFallbackReason)
+        }
+        if coldAttentionMode == .selected, selection.selectorEscalation == .exhaustive {
+            let flags = selection.reasonFlags.isEmpty
+                ? "unknown"
+                : selection.reasonFlags.joined(separator: ",")
+            reasons.append("selected_mode_exhaustive_fallback:\(flags)")
+        }
+        guard !reasons.isEmpty else { return nil }
+        return Self.uniqueReasonFlags(reasons).joined(separator: "; ")
+    }
+
+    func coldBudgetForLayer(
         layerIndex: Int?,
         layerCount: Int?,
         defaultBudget: Int
@@ -1817,6 +1884,7 @@ func turboQuantHybridAttentionThrowing(
     cache.updateHybrid(keys: keys, values: values)
     let hot = cache.rawHotState(defaultKeys: keys, defaultValues: values)
     let selection = cache.selectColdBlocks(query: queries)
+    var segmentedFallbackReason: String?
 
     if queries.dim(2) == 1, sinks == nil {
         let coldSegments = cache.selectedColdCompressedSegments(selection: selection)
@@ -1835,6 +1903,10 @@ func turboQuantHybridAttentionThrowing(
                     )
                 )
                 cache.recordFallbackReason(nil)
+                cache.recordAttentionRoute(
+                    cache.segmentedAttentionRoute(selection: selection),
+                    selection: selection
+                )
                 let state = AttentionKVState.hybridTurboQuant(
                     keys: hot.keys,
                     values: hot.values,
@@ -1843,7 +1915,8 @@ func turboQuantHybridAttentionThrowing(
                 )
                 return (output, state)
             } catch {
-                cache.recordFallbackReason("segmented_attention_fallback:\(error)")
+                segmentedFallbackReason = "selected_segmented_attention_fallback:\(error)"
+                cache.recordFallbackReason(segmentedFallbackReason)
             }
         }
     }
@@ -1876,6 +1949,13 @@ func turboQuantHybridAttentionThrowing(
         mask: adjustedMask,
         sinks: sinks
     )
+    if segmentedFallbackReason == nil {
+        cache.recordFallbackReason(nil)
+    }
+    cache.recordAttentionRoute(
+        cache.decodedAttentionRoute(selection: selection),
+        selection: selection
+    )
     let state = AttentionKVState.hybridTurboQuant(
         keys: attentionKeys,
         values: attentionValues,
@@ -1885,7 +1965,7 @@ func turboQuantHybridAttentionThrowing(
     return (output, state)
 }
 
-private func turboQuantHybridMask(
+func turboQuantHybridMask(
     original: MLXFast.ScaledDotProductAttentionMaskMode,
     queryLength: Int,
     keyLength: Int
