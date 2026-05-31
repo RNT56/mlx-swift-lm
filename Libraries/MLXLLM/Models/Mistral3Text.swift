@@ -401,12 +401,14 @@ public class Mistral3TextModel: Module, LLMModel, KVCacheDimensionProvider,
     /// Sliding window attention layers use RotatingKVCache,
     /// full attention layers use standard KVCacheSimple.
     public func newCache(parameters: GenerateParameters?) -> [KVCache] {
-        return model.layers.map { layer in
+        return model.layers.enumerated().map { layerIndex, layer in
             if layer.useSliding, let slidingWindow = args.slidingWindow {
                 return makeAttentionKVCache(
-                    parameters: parameters, maxKVSize: slidingWindow, keep: 0)
+                    parameters: parameters, maxKVSize: slidingWindow, keep: 0,
+                    layerIndex: layerIndex, layerCount: model.layers.count)
             } else {
-                return makeAttentionKVCache(parameters: parameters)
+                return makeAttentionKVCache(
+                    parameters: parameters, layerIndex: layerIndex, layerCount: model.layers.count)
             }
         }
     }

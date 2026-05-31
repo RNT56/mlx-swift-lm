@@ -84,6 +84,9 @@ public struct GenerateParameters: Sendable {
     /// Strategy used to construct and dynamically convert KV caches.
     public var kvCacheStrategy: KVCacheStrategy
 
+    /// First-class KV codec selected by profile metadata. Old profiles default to Polar/QJL.
+    public var kvCodec: TurboQuantKVCodec
+
     /// 2A spill: when set, the generate loop re-encodes the FP16 KV cache to compressed
     /// mid-generation if live available process memory falls below this many bytes — even a
     /// plain-FP16 (`.none`) cache that fit at admission but outgrew its projection. nil disables
@@ -104,6 +107,27 @@ public struct GenerateParameters: Sendable {
 
     /// Bit width for TurboQuant values. Defaults to the preset recommendation.
     public var turboQuantValueBits: Int?
+
+    /// Requested first-class TurboQuant runtime route.
+    public var turboQuantRuntimeMode: TurboQuantRuntimeMode
+
+    /// Runtime route selected after admission. nil means not resolved yet.
+    public var turboQuantResolvedRuntimeMode: TurboQuantRuntimeMode?
+
+    /// First-class K/V precision policy. nil preserves the legacy preset + value-bits path.
+    public var turboQuantPrecisionPolicy: TurboQuantKVPrecisionPolicy?
+
+    /// Precision policy after profile/admission defaults have been applied.
+    public var turboQuantResolvedPrecisionPolicy: TurboQuantKVPrecisionPolicy?
+
+    /// Sparse value-decode policy for capacity TurboQuant attention.
+    public var turboQuantSparseValuePolicy: TurboQuantSparseValuePolicy
+
+    /// Sparse value-decode policy after runtime/admission gates have been applied.
+    public var turboQuantResolvedSparseValuePolicy: TurboQuantSparseValuePolicy?
+
+    /// Reason the requested runtime mode could not be honored exactly.
+    public var turboQuantRuntimeFallbackReason: String?
 
     /// Admission behavior for TurboQuant caches during generation.
     public var turboQuantAdmissionPolicy: TurboQuantAdmissionPolicy
@@ -145,6 +169,12 @@ public struct GenerateParameters: Sendable {
 
     /// Layer-level cold-context policy for hybrid TurboQuant.
     public var turboQuantLayerPolicy: TurboQuantLayerPolicy
+
+    /// Budgeted cold-block selector policy for hybrid TurboQuant.
+    public var turboQuantColdSelectorPolicy: TurboQuantColdSelectorPolicy
+
+    /// Host-provided lexical/semantic/anchor hints for hybrid TurboQuant cold blocks.
+    public var turboQuantColdSelectorHints: [TurboQuantColdSelectorHint]
 
     /// Prompt token count included in automatic admission estimates.
     public var turboQuantPromptTokenCount: Int
@@ -192,11 +222,19 @@ public struct GenerateParameters: Sendable {
         kvGroupSize: Int = 64,
         quantizedKVStart: Int = 0,
         kvCacheStrategy: KVCacheStrategy = .mlxAffine,
+        kvCodec: TurboQuantKVCodec = .polarQJL,
         turboQuantPreset: TurboQuantPreset = .turbo3_5,
         turboQuantBackend: TurboQuantBackend = .metalPolarQJL,
         turboQuantOptimizationPolicy: TurboQuantOptimizationPolicy = .auto,
         turboQuantSeed: UInt64? = nil,
         turboQuantValueBits: Int? = nil,
+        turboQuantRuntimeMode: TurboQuantRuntimeMode = .auto,
+        turboQuantResolvedRuntimeMode: TurboQuantRuntimeMode? = nil,
+        turboQuantPrecisionPolicy: TurboQuantKVPrecisionPolicy? = nil,
+        turboQuantResolvedPrecisionPolicy: TurboQuantKVPrecisionPolicy? = nil,
+        turboQuantSparseValuePolicy: TurboQuantSparseValuePolicy = .profileDefault,
+        turboQuantResolvedSparseValuePolicy: TurboQuantSparseValuePolicy? = nil,
+        turboQuantRuntimeFallbackReason: String? = nil,
         turboQuantAdmissionPolicy: TurboQuantAdmissionPolicy = .automatic,
         turboQuantAdmission: TurboQuantAdmission? = nil,
         turboQuantPerCacheResidentBudgetBytes: Int? = nil,
@@ -209,6 +247,8 @@ public struct GenerateParameters: Sendable {
         turboQuantMaxColdBudgetTokens: Int = 8192,
         turboQuantColdAttentionMode: TurboQuantColdAttentionMode = .selected,
         turboQuantLayerPolicy: TurboQuantLayerPolicy = .auto,
+        turboQuantColdSelectorPolicy: TurboQuantColdSelectorPolicy = .automatic,
+        turboQuantColdSelectorHints: [TurboQuantColdSelectorHint] = [],
         turboQuantPromptTokenCount: Int = 0,
         turboQuantUserMode: TurboQuantUserMode = .balanced,
         turboQuantFallbackPolicy: TurboQuantFallbackPolicy = .compressedDecodeAllowed,
@@ -231,12 +271,20 @@ public struct GenerateParameters: Sendable {
         self.kvGroupSize = kvGroupSize
         self.quantizedKVStart = quantizedKVStart
         self.kvCacheStrategy = kvCacheStrategy
+        self.kvCodec = kvCodec
         self.spillMemoryWatermarkBytes = spillMemoryWatermarkBytes
         self.turboQuantPreset = turboQuantPreset
         self.turboQuantBackend = turboQuantBackend
         self.turboQuantOptimizationPolicy = turboQuantOptimizationPolicy
         self.turboQuantSeed = turboQuantSeed
         self.turboQuantValueBits = turboQuantValueBits
+        self.turboQuantRuntimeMode = turboQuantRuntimeMode
+        self.turboQuantResolvedRuntimeMode = turboQuantResolvedRuntimeMode
+        self.turboQuantPrecisionPolicy = turboQuantPrecisionPolicy
+        self.turboQuantResolvedPrecisionPolicy = turboQuantResolvedPrecisionPolicy
+        self.turboQuantSparseValuePolicy = turboQuantSparseValuePolicy
+        self.turboQuantResolvedSparseValuePolicy = turboQuantResolvedSparseValuePolicy
+        self.turboQuantRuntimeFallbackReason = turboQuantRuntimeFallbackReason
         self.turboQuantAdmissionPolicy = turboQuantAdmissionPolicy
         self.turboQuantAdmission = turboQuantAdmission
         self.turboQuantPerCacheResidentBudgetBytes = turboQuantPerCacheResidentBudgetBytes
@@ -252,6 +300,8 @@ public struct GenerateParameters: Sendable {
         )
         self.turboQuantColdAttentionMode = turboQuantColdAttentionMode
         self.turboQuantLayerPolicy = turboQuantLayerPolicy
+        self.turboQuantColdSelectorPolicy = turboQuantColdSelectorPolicy
+        self.turboQuantColdSelectorHints = turboQuantColdSelectorHints.filter { !$0.isEmpty }
         self.turboQuantPromptTokenCount = turboQuantPromptTokenCount
         self.turboQuantUserMode = turboQuantUserMode
         self.turboQuantFallbackPolicy = turboQuantFallbackPolicy
@@ -358,12 +408,31 @@ public enum TurboQuantGenerationError: Error, CustomStringConvertible, Equatable
 }
 
 extension GenerateParameters {
+    public var effectiveTurboQuantPrecisionPolicy: TurboQuantKVPrecisionPolicy {
+        turboQuantResolvedPrecisionPolicy
+            ?? turboQuantPrecisionPolicy
+            ?? TurboQuantKVPrecisionPolicy.legacy(
+                preset: turboQuantPreset,
+                valueBits: turboQuantValueBits
+            )
+    }
+
+    public var effectiveTurboQuantSparseValuePolicy: TurboQuantSparseValuePolicy {
+        turboQuantResolvedSparseValuePolicy ?? turboQuantSparseValuePolicy
+    }
+
     private func automaticTurboQuantAdmission(layerCount: Int?) -> TurboQuantAdmission {
         let requestedContext =
             turboQuantRequestedContextLength
             ?? maxKVSize
             ?? maxTokens
             ?? 4096
+        let precisionPolicy =
+            turboQuantPrecisionPolicy
+            ?? TurboQuantKVPrecisionPolicy.legacy(
+                preset: turboQuantPreset,
+                valueBits: turboQuantValueBits
+            )
         let profile =
             turboQuantAdmissionProfile
             ?? ModelMemoryProfile(
@@ -383,23 +452,113 @@ extension GenerateParameters {
             promptTokenCount: turboQuantPromptTokenCount,
             userMode: turboQuantUserMode,
             fallbackPolicy: turboQuantFallbackPolicy,
-            preset: turboQuantPreset,
-            valueBits: turboQuantValueBits,
+            preset: precisionPolicy.compressedKeyPreset,
+            valueBits: precisionPolicy.resolvedValueBits ?? turboQuantValueBits,
+            precisionPolicy: precisionPolicy,
             groupSize: kvGroupSize
         )
+    }
+
+    private func resolvingTurboQuantRuntimeMode(
+        admission: TurboQuantAdmission
+    ) throws -> (
+        mode: TurboQuantRuntimeMode,
+        route: TurboQuantRuntimeRoute,
+        fallbackReason: String?
+    ) {
+        let requestedContext = max(1, admission.requestedContextLength)
+        let rawThreshold = max(0, turboQuantRawSDPAThreshold)
+        let rawFits = admission.memoryPlan.rawSDPAFits(contextLength: requestedContext)
+        let thresholdRawFits =
+            rawThreshold > 0
+            && admission.memoryPlan.rawSDPAFits(contextLength: min(requestedContext, rawThreshold))
+        let throughputFits = admission.memoryPlan.throughputFits(contextLength: requestedContext)
+
+        func throughputOrCapacity(_ reason: String?) throws -> (
+            TurboQuantRuntimeMode,
+            TurboQuantRuntimeRoute,
+            String?
+        ) {
+            if throughputFits {
+                return (.throughputTurboQuant, .throughputTurboQuantNativeSDPA, reason)
+            }
+            if turboQuantRuntimeMode == .throughputTurboQuant,
+                turboQuantAdmissionPolicy == .required
+            {
+                throw TurboQuantGenerationError.admissionRejected(
+                    "throughputTurboQuant requires decoded active KV plus compressed backing, but the admitted memory plan does not fit both"
+                )
+            }
+            return (
+                .capacityTurboQuant,
+                .capacityTurboQuantCompressed,
+                reason ?? "decoded active KV did not fit; using capacity TurboQuant"
+            )
+        }
+
+        switch turboQuantRuntimeMode {
+        case .rawPreferred:
+            if rawFits {
+                return (.rawPreferred, .rawSDPA, nil)
+            }
+            return try throughputOrCapacity("rawPreferred requested but raw KV did not fit")
+
+        case .throughputTurboQuant:
+            return try throughputOrCapacity(nil)
+
+        case .capacityTurboQuant:
+            return (.capacityTurboQuant, .capacityTurboQuantCompressed, nil)
+
+        case .auto:
+            if kvCacheStrategy == .adaptiveTurboQuant,
+                requestedContext <= rawThreshold,
+                thresholdRawFits
+            {
+                return (.rawPreferred, .rawSDPA, nil)
+            }
+            return try throughputOrCapacity(nil)
+        }
     }
 
     private func applyingTurboQuantAdmission(
         _ admission: TurboQuantAdmission,
         layerCount: Int?
-    ) -> GenerateParameters {
+    ) throws -> GenerateParameters {
         var resolved = self
+        var admission = admission
+        let precisionPolicy =
+            turboQuantPrecisionPolicy
+            ?? TurboQuantKVPrecisionPolicy.legacy(
+                preset: admission.memoryPlan.preset,
+                valueBits: admission.memoryPlan.valueBits
+            )
+        let runtimeSelection = try resolvingTurboQuantRuntimeMode(admission: admission)
+        admission.memoryPlan.requestedRuntimeMode = turboQuantRuntimeMode
+        admission.memoryPlan.resolvedRuntimeMode = runtimeSelection.mode
+        admission.memoryPlan.precisionPolicy = precisionPolicy
+        admission.memoryPlan.sparseValuePolicy = turboQuantSparseValuePolicy
+        admission.memoryPlan.runtimeFallbackReason = runtimeSelection.fallbackReason
+        admission.memoryPlan.decodedActiveKVBytes =
+            runtimeSelection.route == .throughputTurboQuantNativeSDPA
+            ? admission.memoryPlan.rawBytesPerToken * admission.memoryPlan.admittedContextLength
+            : 0
         resolved.maxKVSize = min(
             resolved.maxKVSize ?? admission.admittedContextLength,
             admission.admittedContextLength
         )
-        resolved.turboQuantPreset = admission.memoryPlan.preset
-        resolved.turboQuantValueBits = admission.memoryPlan.valueBits
+        resolved.turboQuantPreset = precisionPolicy.compressedKeyPreset
+        resolved.turboQuantValueBits = precisionPolicy.resolvedValueBits ?? admission.memoryPlan.valueBits
+        resolved.turboQuantResolvedPrecisionPolicy = precisionPolicy
+        resolved.turboQuantResolvedRuntimeMode = runtimeSelection.mode
+        resolved.turboQuantResolvedSparseValuePolicy =
+            turboQuantSparseValuePolicy.resolvedThreshold(
+                runtimeMode: runtimeSelection.mode,
+                contextLength: admission.admittedContextLength
+            ) == nil
+            ? .off
+            : turboQuantSparseValuePolicy
+        resolved.turboQuantRuntimeFallbackReason = runtimeSelection.fallbackReason
+        resolved.turboQuantAdmission = admission
         switch admission.selectedMode {
         case .fastest:
             resolved.turboQuantOptimizationPolicy = .preferThroughput
@@ -413,50 +572,25 @@ extension GenerateParameters {
                 admission.memoryPlan.runtimeZones.compressedKVBytes
                 + admission.memoryPlan.runtimeZones.rawShadowBytes
                 + admission.memoryPlan.runtimeZones.fallbackReserveBytes
+                + (admission.memoryPlan.decodedActiveKVBytes ?? 0)
             resolved.turboQuantPerCacheResidentBudgetBytes = max(1, residentBudget / layerCount)
         }
+        if runtimeSelection.route == .rawSDPA {
+            resolved.kvCacheStrategy = .mlxAffine
+            resolved.kvBits = nil
+            resolved.turboQuantPerCacheResidentBudgetBytes = nil
+            return resolved
+        }
+        resolved.kvCacheStrategy = .turboQuant
+        resolved.quantizedKVStart = 0
         return resolved
     }
 
     private func resolvingAdaptiveTurboQuantRoute(
         admission: TurboQuantAdmission,
         layerCount: Int?
-    ) -> GenerateParameters {
-        var resolved = applyingTurboQuantAdmission(admission, layerCount: layerCount)
-        let requestedContext = max(1, admission.requestedContextLength)
-        let rawThreshold = max(0, turboQuantRawSDPAThreshold)
-        let promptTokens = max(0, turboQuantPromptTokenCount)
-
-        guard rawThreshold > 0,
-            !TurboQuantRuntimeControl.enabled("TURBOQUANT_FORCE_COMPRESSED")
-        else {
-            resolved.kvCacheStrategy = .turboQuant
-            resolved.quantizedKVStart = 0
-            return resolved
-        }
-
-        let rawRouteContext = min(requestedContext, rawThreshold)
-        let rawFits = admission.memoryPlan.rawSDPAFits(contextLength: rawRouteContext)
-
-        if requestedContext <= rawThreshold, rawFits {
-            resolved.kvCacheStrategy = .mlxAffine
-            resolved.kvBits = nil
-            resolved.turboQuantPerCacheResidentBudgetBytes = nil
-            return resolved
-        }
-
-        if !rawFits || promptTokens > rawThreshold {
-            resolved.kvCacheStrategy = .turboQuant
-            resolved.quantizedKVStart = 0
-            return resolved
-        }
-
-        resolved.kvCacheStrategy = .adaptiveTurboQuant
-        resolved.quantizedKVStart =
-            quantizedKVStart > 0
-            ? min(quantizedKVStart, rawThreshold)
-            : rawThreshold
-        return resolved
+    ) throws -> GenerateParameters {
+        try applyingTurboQuantAdmission(admission, layerCount: layerCount)
     }
 
     public func resolvedForTurboQuantRuntime(
@@ -497,12 +631,12 @@ extension GenerateParameters {
                 throw TurboQuantGenerationError.admissionRejected(admission.userMessage)
             }
             if resolved.kvCacheStrategy == .adaptiveTurboQuant {
-                return resolved.resolvingAdaptiveTurboQuantRoute(
+                return try resolved.resolvingAdaptiveTurboQuantRoute(
                     admission: admission,
                     layerCount: layerCount
                 )
             }
-            return resolved.applyingTurboQuantAdmission(admission, layerCount: layerCount)
+            return try resolved.applyingTurboQuantAdmission(admission, layerCount: layerCount)
         }
         if resolved.turboQuantAdmissionPolicy == .required {
             throw TurboQuantGenerationError.admissionRequired
@@ -874,6 +1008,7 @@ public struct TokenIterator: TokenIteratorProtocol {
     let kvGroupSize: Int
     let quantizedKVStart: Int
     let kvCacheStrategy: KVCacheStrategy
+    let kvCodec: TurboQuantKVCodec
     let spillMemoryWatermarkBytes: Int?
     let turboQuantPreset: TurboQuantPreset
     let turboQuantBackend: TurboQuantBackend
@@ -915,6 +1050,7 @@ public struct TokenIterator: TokenIteratorProtocol {
         self.kvGroupSize = runtimeParameters.kvGroupSize
         self.quantizedKVStart = runtimeParameters.quantizedKVStart
         self.kvCacheStrategy = runtimeParameters.kvCacheStrategy
+        self.kvCodec = runtimeParameters.kvCodec
         self.spillMemoryWatermarkBytes = runtimeParameters.spillMemoryWatermarkBytes
         self.turboQuantPreset = runtimeParameters.turboQuantPreset
         self.turboQuantBackend = runtimeParameters.turboQuantBackend
@@ -958,6 +1094,7 @@ public struct TokenIterator: TokenIteratorProtocol {
         self.kvGroupSize = runtimeParameters.kvGroupSize
         self.quantizedKVStart = runtimeParameters.quantizedKVStart
         self.kvCacheStrategy = runtimeParameters.kvCacheStrategy
+        self.kvCodec = runtimeParameters.kvCodec
         self.spillMemoryWatermarkBytes = runtimeParameters.spillMemoryWatermarkBytes
         self.turboQuantPreset = runtimeParameters.turboQuantPreset
         self.turboQuantBackend = runtimeParameters.turboQuantBackend
@@ -1003,6 +1140,7 @@ public struct TokenIterator: TokenIteratorProtocol {
         self.kvGroupSize = runtimeCacheParameters?.kvGroupSize ?? 64
         self.quantizedKVStart = runtimeCacheParameters?.quantizedKVStart ?? 0
         self.kvCacheStrategy = runtimeCacheParameters?.kvCacheStrategy ?? .none
+        self.kvCodec = runtimeCacheParameters?.kvCodec ?? .polarQJL
         self.spillMemoryWatermarkBytes = runtimeCacheParameters?.spillMemoryWatermarkBytes
         self.turboQuantPreset = runtimeCacheParameters?.turboQuantPreset ?? .turbo3_5
         self.turboQuantBackend = runtimeCacheParameters?.turboQuantBackend ?? .metalPolarQJL
@@ -1075,6 +1213,7 @@ public struct TokenIterator: TokenIteratorProtocol {
             kvGroupSize: kvGroupSize,
             quantizedKVStart: quantizedKVStart,
             kvCacheStrategy: kvCacheStrategy,
+            kvCodec: kvCodec,
             turboQuantPreset: turboQuantPreset,
             turboQuantBackend: turboQuantBackend,
             turboQuantOptimizationPolicy: turboQuantOptimizationPolicy,
@@ -1241,6 +1380,7 @@ public struct SpeculativeTokenIterator: TokenIteratorProtocol {
                 kvGroupSize: mainRuntimeParameters.kvGroupSize,
                 quantizedKVStart: mainRuntimeParameters.quantizedKVStart,
                 kvCacheStrategy: mainRuntimeParameters.kvCacheStrategy,
+                kvCodec: mainRuntimeParameters.kvCodec,
                 turboQuantPreset: mainRuntimeParameters.turboQuantPreset,
                 turboQuantBackend: mainRuntimeParameters.turboQuantBackend,
                 turboQuantOptimizationPolicy: mainRuntimeParameters.turboQuantOptimizationPolicy,
@@ -1600,6 +1740,7 @@ public struct MTPTokenIterator: TokenIteratorProtocol {
                 kvGroupSize: runtimeParameters.kvGroupSize,
                 quantizedKVStart: runtimeParameters.quantizedKVStart,
                 kvCacheStrategy: runtimeParameters.kvCacheStrategy,
+                kvCodec: runtimeParameters.kvCodec,
                 turboQuantPreset: runtimeParameters.turboQuantPreset,
                 turboQuantBackend: runtimeParameters.turboQuantBackend,
                 turboQuantOptimizationPolicy: runtimeParameters.turboQuantOptimizationPolicy,

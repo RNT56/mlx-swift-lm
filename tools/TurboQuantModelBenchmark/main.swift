@@ -2,6 +2,12 @@ import Foundation
 import MLX
 import MLXLMCommon
 
+enum BenchmarkCodec: String {
+    case polarQJL = "polar_qjl"
+    case affineInt4 = "affine_int4"
+    case raw
+}
+
 struct BenchmarkModelConfig: Codable {
     var family: String
     var hiddenSize: Int
@@ -15,12 +21,15 @@ struct BenchmarkModelConfig: Codable {
 }
 
 struct BenchmarkTurboQuantConfig: Codable {
+    var codec: String
     var layoutVersion: Int
     var path: String?
+    var backend: String
     var preset: String
     var keyBits: Double
     var valueBits: Int
     var groupSize: Int
+    var scaleBiasBytes: Int?
     var fallbackPolicy: String
     var kernelProfile: String
     var actualBytesPerToken: Double?
@@ -102,6 +111,26 @@ func argumentValues(_ name: String, default defaultValue: [Int]) -> [Int] {
     }
     let values = arguments[index + 1].split(separator: ",").compactMap { Int($0) }
     return values.isEmpty ? defaultValue : values
+}
+
+func argumentString(_ name: String, default defaultValue: String) -> String {
+    let arguments = CommandLine.arguments
+    guard let index = arguments.firstIndex(of: name), arguments.indices.contains(index + 1) else {
+        return defaultValue
+    }
+    return arguments[index + 1]
+}
+
+func argumentCodec(_ name: String, default defaultValue: BenchmarkCodec) -> BenchmarkCodec {
+    let raw = argumentString(name, default: defaultValue.rawValue)
+    switch raw {
+    case "raw":
+        return .raw
+    case "affine_int4", "affineInt4", "affine-int4":
+        return .affineInt4
+    default:
+        return .polarQJL
+    }
 }
 
 func hasFlag(_ name: String) -> Bool {
@@ -239,7 +268,8 @@ func attentionMask(_ name: String) -> MLXFast.ScaledDotProductAttentionMaskMode 
 func qualityGate(
     candidate: MLXArray,
     reference: MLXArray,
-    prefillExact: Bool
+    prefillExact: Bool,
+    codec: BenchmarkCodec = .polarQJL
 ) -> TurboQuantQualityGateReport {
     eval(candidate, reference)
     let candidateValues = candidate.asArray(Float.self)
@@ -282,6 +312,17 @@ func qualityGate(
         && top1MatchRate >= 0.95
         && klDivergenceMean <= 0.05
         && p95MaxAbsError <= 0.5
+    if codec == .affineInt4 {
+        return .evaluatedAffineInt4(
+            benchmarkSuiteID: .fallbackEquivalenceV1,
+            deterministicTop1MatchRate: top1MatchRate,
+            logitKLDivergenceMean: klDivergenceMean,
+            logitMaxAbsErrorP95: p95MaxAbsError,
+            attentionOutputCosineMean: cosineMean,
+            noNaNOrInf: noNaNOrInf,
+            snapshotRoundtripEquivalent: nil
+        )
+    }
     return .evaluated(
         benchmarkSuiteID: .fallbackEquivalenceV1,
         deterministicTop1MatchRate: top1MatchRate,
@@ -445,9 +486,10 @@ func aggregateQualityGate(_ results: [BenchmarkResult]) -> TurboQuantQualityGate
 func runCase(
     _ benchmarkCase: BenchmarkCase,
     iterations: Int,
+    codec: BenchmarkCodec,
     availability: TurboQuantKernelAvailability
 ) throws -> BenchmarkResult {
-    guard availability.supportsMetalPolarQJLAttention else {
+    guard codec != .polarQJL || availability.supportsMetalPolarQJLAttention else {
         return skipped(benchmarkCase, reason: "Metal attention unavailable or probe failed")
     }
     guard benchmarkCase.mask == "causal" || benchmarkCase.mask == "none" else {
@@ -475,6 +517,113 @@ func runCase(
         [batch, queryHeads, queryLength, headDim]
     )
     let scale = 1 / sqrt(Float(headDim))
+
+    if codec == .raw {
+        let (decodeLatency, output) = try timed(iterations: iterations) {
+            MLXFast.scaledDotProductAttention(
+                queries: queries,
+                keys: keys,
+                values: valuesArray,
+                scale: scale,
+                mask: attentionMask(benchmarkCase.mask)
+            )
+        }
+        return BenchmarkResult(
+            id: benchmarkCase.id,
+            status: "ok",
+            benchmarkCase: benchmarkCase,
+            shape: output.shape,
+            latencySeconds: decodeLatency,
+            memory: BenchmarkMemoryMetrics(
+                compressedKeyBytes: keys.nbytes,
+                compressedValueBytes: valuesArray.nbytes
+            ),
+            throughput: BenchmarkThroughputMetrics(
+                decodeTokensPerSecond: Double(queryLength) / max(decodeLatency, .leastNonzeroMagnitude),
+                prefillTokensPerSecond: nil,
+                firstTokenLatencySeconds: queryLength == 1 ? decodeLatency : nil
+            ),
+            quality: qualityGate(candidate: output, reference: output, prefillExact: true),
+            selectedPath: .baseline,
+            fallbackReason: nil,
+            error: nil
+        )
+    }
+
+    if codec == .affineInt4 {
+        let groupSize = TurboQuantKVCodec.affineInt4DefaultGroupSize
+        let qKeys = quantized(
+            keys,
+            groupSize: groupSize,
+            bits: TurboQuantKVCodec.affineInt4Bits,
+            mode: .affine
+        )
+        let qValues = quantized(
+            valuesArray,
+            groupSize: groupSize,
+            bits: TurboQuantKVCodec.affineInt4Bits,
+            mode: .affine
+        )
+        let keyTuple = (qKeys.wq, qKeys.scales, qKeys.biases)
+        let valueTuple = (qValues.wq, qValues.scales, qValues.biases)
+        guard supportsNativeAffineInt4ScaledDotProductAttention(
+            queries: queries,
+            quantizedKeys: keyTuple,
+            quantizedValues: valueTuple,
+            mask: attentionMask(benchmarkCase.mask),
+            groupSize: groupSize
+        ) else {
+            return skipped(benchmarkCase, reason: "native affine int4 SDPA unsupported")
+        }
+        let prefillLatency = Date.timeIntervalSinceReferenceDate
+        let (decodeLatency, output) = try timed(iterations: iterations) {
+            try affineInt4NativeScaledDotProductAttention(
+                queries: queries,
+                quantizedKeys: keyTuple,
+                quantizedValues: valueTuple,
+                scale: scale,
+                mask: attentionMask(benchmarkCase.mask),
+                groupSize: groupSize
+            )
+        }
+        let reference = MLXFast.scaledDotProductAttention(
+            queries: queries,
+            keys: keys,
+            values: valuesArray,
+            scale: scale,
+            mask: attentionMask(benchmarkCase.mask)
+        )
+        let quality = qualityGate(
+            candidate: output,
+            reference: reference,
+            prefillExact: true,
+            codec: .affineInt4
+        )
+        return BenchmarkResult(
+            id: benchmarkCase.id,
+            status: "ok",
+            benchmarkCase: benchmarkCase,
+            shape: output.shape,
+            latencySeconds: decodeLatency,
+            memory: BenchmarkMemoryMetrics(
+                compressedKeyBytes: qKeys.wq.nbytes + qKeys.scales.nbytes
+                    + (qKeys.biases?.nbytes ?? 0),
+                compressedValueBytes: qValues.wq.nbytes + qValues.scales.nbytes
+                    + (qValues.biases?.nbytes ?? 0)
+            ),
+            throughput: BenchmarkThroughputMetrics(
+                decodeTokensPerSecond: Double(queryLength) / max(decodeLatency, .leastNonzeroMagnitude),
+                prefillTokensPerSecond: Double(context)
+                    / max(Date.timeIntervalSinceReferenceDate - prefillLatency, .leastNonzeroMagnitude),
+                firstTokenLatencySeconds: queryLength == 1 ? decodeLatency : nil
+            ),
+            quality: quality,
+            selectedPath: .affineInt4Native,
+            fallbackReason: nil,
+            error: nil
+        )
+    }
+
     let cache: any TurboQuantCompressedKVCacheProtocol
     switch benchmarkCase.cacheLayout {
     case "ring":
@@ -557,6 +706,7 @@ func runCase(
 }
 
 let iterations = argumentValue("--iterations", default: 10)
+let codec = argumentCodec("--codec", default: .polarQJL)
 let releaseMatrix = hasFlag("--release-matrix")
 let headDims = argumentValues("--head-dims", default: [64, 80, 96, 128, 192, 256])
 let contexts = argumentValues(
@@ -577,7 +727,12 @@ var results = [BenchmarkResult]()
 for benchmarkCase in cases {
     do {
         results.append(
-            try runCase(benchmarkCase, iterations: iterations, availability: availability))
+            try runCase(
+                benchmarkCase,
+                iterations: iterations,
+                codec: codec,
+                availability: availability
+            ))
     } catch {
         results.append(failed(benchmarkCase, error: "\(error)"))
     }
@@ -639,12 +794,20 @@ let report = BenchmarkReport(
     supportsMetalAttention: availability.supportsMetalPolarQJLAttention,
     modelConfig: modelConfig,
     turboQuant: BenchmarkTurboQuantConfig(
+        codec: codec.rawValue,
         layoutVersion: TurboQuantAttentionLayout.currentVersion,
         path: firstSelectedPath?.rawValue,
+        backend: codec == .affineInt4 ? TurboQuantBackend.mlxPacked.rawValue : "metalPolarQJL",
         preset: TurboQuantPreset.turbo4v2.rawValue,
         keyBits: Double(TurboQuantPreset.turbo4v2.targetMagnitudeBits),
-        valueBits: TurboQuantPreset.turbo4v2.defaultValueBits,
-        groupSize: 64,
+        valueBits: codec == .affineInt4
+            ? TurboQuantKVCodec.affineInt4Bits : TurboQuantPreset.turbo4v2.defaultValueBits,
+        groupSize: codec == .affineInt4 ? TurboQuantKVCodec.affineInt4DefaultGroupSize : 64,
+        scaleBiasBytes: codec == .affineInt4
+            ? (cases.first.map {
+                4 * 2 * 2 * $0.contextLength * max(1, $0.headDim / TurboQuantKVCodec.affineInt4DefaultGroupSize)
+            })
+            : nil,
         fallbackPolicy: "compressedDecodeAllowed",
         kernelProfile: availability.selectedKernelProfile.rawValue,
         actualBytesPerToken: firstActualBytesPerToken

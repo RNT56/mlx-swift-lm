@@ -554,8 +554,10 @@ public class GLM4MoELiteModel: Module, LLMModel, KVCacheDimensionProvider, Throw
     }
 
     public func newCache(parameters: GenerateParameters?) -> [KVCache] {
-        (0 ..< configuration.hiddenLayers).map { _ in
-            makeAttentionKVCache(parameters: parameters)
+        (0 ..< configuration.hiddenLayers).map { layerIndex in
+            makeAttentionKVCache(
+                parameters: parameters, layerIndex: layerIndex,
+                layerCount: configuration.hiddenLayers)
         }
     }
 

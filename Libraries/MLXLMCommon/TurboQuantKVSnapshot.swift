@@ -55,7 +55,7 @@ public struct TurboQuantKVSnapshotArrayDescriptor: Hashable, Codable, Sendable {
 }
 
 public struct TurboQuantKVSnapshotManifest: Hashable, Codable, Sendable {
-    public static let currentSchemaVersion = 1
+    public static let currentSchemaVersion = 2
 
     public var schemaVersion: Int
     public var snapshotID: UUID
@@ -77,9 +77,12 @@ public struct TurboQuantKVSnapshotManifest: Hashable, Codable, Sendable {
     public var createdAt: Date
 
     public var cacheKind: String
+    public var kvCodec: TurboQuantKVCodec
     public var preset: String
     public var requestedBackend: String
     public var activeBackend: String
+    public var quantizationMode: String
+    public var keyBits: Int
     public var groupSize: Int
     public var valueBits: Int
     public var seed: UInt64
@@ -92,6 +95,16 @@ public struct TurboQuantKVSnapshotManifest: Hashable, Codable, Sendable {
     public var valueHeadDimension: Int
     public var rotatingKeep: Int?
     public var rotatingStep: Int?
+    public var requestedRuntimeMode: TurboQuantRuntimeMode?
+    public var resolvedRuntimeMode: TurboQuantRuntimeMode?
+    public var precisionPolicy: TurboQuantKVPrecisionPolicy?
+    public var sparseValuePolicy: TurboQuantSparseValuePolicy?
+    public var boundaryPolicy: TurboQuantBoundaryPolicy?
+    public var boundaryProtectedLayerCount: Int
+    public var boundaryProtectionReason: String?
+    public var runtimeFallbackReason: String?
+    public var selectedPath: String?
+    public var fallbackReason: String?
     public var arrays: [TurboQuantKVSnapshotArrayDescriptor]
 
     public init(
@@ -108,9 +121,12 @@ public struct TurboQuantKVSnapshotManifest: Hashable, Codable, Sendable {
         encryptionKeyID: String,
         createdAt: Date = Date(),
         cacheKind: String,
+        kvCodec: TurboQuantKVCodec = .polarQJL,
         preset: String,
         requestedBackend: String,
         activeBackend: String,
+        quantizationMode: String = QuantizationMode.affine.rawValue,
+        keyBits: Int? = nil,
         groupSize: Int,
         valueBits: Int,
         seed: UInt64 = 0x9E37_79B9_7F4A_7C15,
@@ -123,6 +139,16 @@ public struct TurboQuantKVSnapshotManifest: Hashable, Codable, Sendable {
         valueHeadDimension: Int,
         rotatingKeep: Int? = nil,
         rotatingStep: Int? = nil,
+        requestedRuntimeMode: TurboQuantRuntimeMode? = nil,
+        resolvedRuntimeMode: TurboQuantRuntimeMode? = nil,
+        precisionPolicy: TurboQuantKVPrecisionPolicy? = nil,
+        sparseValuePolicy: TurboQuantSparseValuePolicy? = nil,
+        boundaryPolicy: TurboQuantBoundaryPolicy? = nil,
+        boundaryProtectedLayerCount: Int = 0,
+        boundaryProtectionReason: String? = nil,
+        runtimeFallbackReason: String? = nil,
+        selectedPath: String? = nil,
+        fallbackReason: String? = nil,
         arrays: [TurboQuantKVSnapshotArrayDescriptor]
     ) {
         self.schemaVersion = schemaVersion
@@ -144,9 +170,12 @@ public struct TurboQuantKVSnapshotManifest: Hashable, Codable, Sendable {
         self.encryptionKeyID = encryptionKeyID
         self.createdAt = createdAt
         self.cacheKind = cacheKind
+        self.kvCodec = kvCodec
         self.preset = preset
         self.requestedBackend = requestedBackend
         self.activeBackend = activeBackend
+        self.quantizationMode = quantizationMode
+        self.keyBits = keyBits ?? (TurboQuantPreset(rawValue: preset)?.effectiveBits ?? valueBits)
         self.groupSize = groupSize
         self.valueBits = valueBits
         self.seed = seed
@@ -159,7 +188,173 @@ public struct TurboQuantKVSnapshotManifest: Hashable, Codable, Sendable {
         self.valueHeadDimension = valueHeadDimension
         self.rotatingKeep = rotatingKeep
         self.rotatingStep = rotatingStep
+        self.requestedRuntimeMode = requestedRuntimeMode
+        self.resolvedRuntimeMode = resolvedRuntimeMode
+        self.precisionPolicy =
+            precisionPolicy
+            ?? TurboQuantKVPrecisionPolicy.legacy(
+                preset: TurboQuantPreset(rawValue: preset) ?? .turbo3_5,
+                valueBits: valueBits
+            )
+        self.sparseValuePolicy = sparseValuePolicy
+        self.boundaryPolicy = boundaryPolicy ?? self.precisionPolicy?.boundary
+        self.boundaryProtectedLayerCount = max(0, boundaryProtectedLayerCount)
+        self.boundaryProtectionReason = boundaryProtectionReason
+        self.runtimeFallbackReason = runtimeFallbackReason
+        self.selectedPath = selectedPath
+        self.fallbackReason = fallbackReason ?? runtimeFallbackReason
         self.arrays = arrays
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case schemaVersion
+        case snapshotID
+        case conversationID
+        case modelID
+        case modelRevision
+        case tokenizerHash
+        case profileHash
+        case turboQuantLayoutVersion
+        case ropeConfigHash
+        case tokenPrefixHash
+        case fallbackContractHash
+        case logicalLength
+        case pinnedPrefixLength
+        case compressedKeyBytes
+        case compressedValueBytes
+        case blobByteCount
+        case encryptionKeyID
+        case createdAt
+        case cacheKind
+        case kvCodec
+        case preset
+        case requestedBackend
+        case activeBackend
+        case quantizationMode
+        case keyBits
+        case groupSize
+        case valueBits
+        case seed
+        case mode
+        case capacity
+        case ringOffset
+        case batchSize
+        case kvHeadCount
+        case keyHeadDimension
+        case valueHeadDimension
+        case rotatingKeep
+        case rotatingStep
+        case requestedRuntimeMode
+        case resolvedRuntimeMode
+        case precisionPolicy
+        case sparseValuePolicy
+        case boundaryPolicy
+        case boundaryProtectedLayerCount
+        case boundaryProtectionReason
+        case runtimeFallbackReason
+        case selectedPath
+        case fallbackReason
+        case arrays
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        let identity = TurboQuantKVSnapshotIdentity(
+            modelID: try container.decode(String.self, forKey: .modelID),
+            modelRevision: try container.decodeIfPresent(String.self, forKey: .modelRevision),
+            tokenizerHash: try container.decode(String.self, forKey: .tokenizerHash),
+            profileHash: try container.decode(String.self, forKey: .profileHash),
+            ropeConfigHash: try container.decode(String.self, forKey: .ropeConfigHash),
+            tokenPrefixHash: try container.decode(String.self, forKey: .tokenPrefixHash),
+            fallbackContractHash: try container.decodeIfPresent(
+                String.self,
+                forKey: .fallbackContractHash
+            )
+        )
+        let preset = try container.decode(String.self, forKey: .preset)
+        let valueBits = try container.decode(Int.self, forKey: .valueBits)
+        self.init(
+            schemaVersion: try container.decodeIfPresent(Int.self, forKey: .schemaVersion) ?? 1,
+            snapshotID: try container.decode(UUID.self, forKey: .snapshotID),
+            conversationID: try container.decode(UUID.self, forKey: .conversationID),
+            identity: identity,
+            turboQuantLayoutVersion: try container.decode(
+                Int.self,
+                forKey: .turboQuantLayoutVersion
+            ),
+            logicalLength: try container.decode(Int.self, forKey: .logicalLength),
+            pinnedPrefixLength: try container.decode(Int.self, forKey: .pinnedPrefixLength),
+            compressedKeyBytes: try container.decode(Int64.self, forKey: .compressedKeyBytes),
+            compressedValueBytes: try container.decode(
+                Int64.self,
+                forKey: .compressedValueBytes
+            ),
+            blobByteCount: try container.decode(Int64.self, forKey: .blobByteCount),
+            encryptionKeyID: try container.decode(String.self, forKey: .encryptionKeyID),
+            createdAt: try container.decode(Date.self, forKey: .createdAt),
+            cacheKind: try container.decode(String.self, forKey: .cacheKind),
+            kvCodec: try container.decodeIfPresent(TurboQuantKVCodec.self, forKey: .kvCodec)
+                ?? .polarQJL,
+            preset: preset,
+            requestedBackend: try container.decode(String.self, forKey: .requestedBackend),
+            activeBackend: try container.decode(String.self, forKey: .activeBackend),
+            quantizationMode: try container.decodeIfPresent(String.self, forKey: .quantizationMode)
+                ?? (try container.decodeIfPresent(String.self, forKey: .mode)
+                    ?? QuantizationMode.affine.rawValue),
+            keyBits: try container.decodeIfPresent(Int.self, forKey: .keyBits),
+            groupSize: try container.decode(Int.self, forKey: .groupSize),
+            valueBits: valueBits,
+            seed: try container.decodeIfPresent(UInt64.self, forKey: .seed)
+                ?? defaultTurboQuantSeed,
+            mode: try container.decodeIfPresent(String.self, forKey: .mode)
+                ?? QuantizationMode.affine.rawValue,
+            capacity: try container.decode(Int.self, forKey: .capacity),
+            ringOffset: try container.decode(Int.self, forKey: .ringOffset),
+            batchSize: try container.decode(Int.self, forKey: .batchSize),
+            kvHeadCount: try container.decode(Int.self, forKey: .kvHeadCount),
+            keyHeadDimension: try container.decode(Int.self, forKey: .keyHeadDimension),
+            valueHeadDimension: try container.decode(Int.self, forKey: .valueHeadDimension),
+            rotatingKeep: try container.decodeIfPresent(Int.self, forKey: .rotatingKeep),
+            rotatingStep: try container.decodeIfPresent(Int.self, forKey: .rotatingStep),
+            requestedRuntimeMode: try container.decodeIfPresent(
+                TurboQuantRuntimeMode.self,
+                forKey: .requestedRuntimeMode
+            ),
+            resolvedRuntimeMode: try container.decodeIfPresent(
+                TurboQuantRuntimeMode.self,
+                forKey: .resolvedRuntimeMode
+            ),
+            precisionPolicy: try container.decodeIfPresent(
+                TurboQuantKVPrecisionPolicy.self,
+                forKey: .precisionPolicy
+            ),
+            sparseValuePolicy: try container.decodeIfPresent(
+                TurboQuantSparseValuePolicy.self,
+                forKey: .sparseValuePolicy
+            ),
+            boundaryPolicy: try container.decodeIfPresent(
+                TurboQuantBoundaryPolicy.self,
+                forKey: .boundaryPolicy
+            ),
+            boundaryProtectedLayerCount: try container.decodeIfPresent(
+                Int.self,
+                forKey: .boundaryProtectedLayerCount
+            ) ?? 0,
+            boundaryProtectionReason: try container.decodeIfPresent(
+                String.self,
+                forKey: .boundaryProtectionReason
+            ),
+            runtimeFallbackReason: try container.decodeIfPresent(
+                String.self,
+                forKey: .runtimeFallbackReason
+            ),
+            selectedPath: try container.decodeIfPresent(String.self, forKey: .selectedPath),
+            fallbackReason: try container.decodeIfPresent(String.self, forKey: .fallbackReason),
+            arrays: try container.decode(
+                [TurboQuantKVSnapshotArrayDescriptor].self,
+                forKey: .arrays
+            )
+        )
     }
 
     public var identity: TurboQuantKVSnapshotIdentity {
@@ -226,7 +421,7 @@ extension TurboQuantKVSnapshotManifest {
         expectedCacheKind: String? = nil,
         expectedLayoutVersion: Int = TurboQuantAttentionLayout.currentVersion
     ) throws {
-        guard schemaVersion == Self.currentSchemaVersion else {
+        guard schemaVersion >= 1, schemaVersion <= Self.currentSchemaVersion else {
             throw TurboQuantKVSnapshotError.invalidSchemaVersion(schemaVersion)
         }
         try validateIdentity(expectedIdentity)

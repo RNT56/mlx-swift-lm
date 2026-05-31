@@ -493,7 +493,9 @@ public class LFM2MoEModel: Module, LLMModel, KVCacheDimensionProvider {
     public func newCache(parameters: GenerateParameters?) -> [KVCache] {
         (0 ..< configuration.hiddenLayers).map { layerIdx in
             if configuration.fullAttnIdxs.contains(layerIdx) {
-                makeAttentionKVCache(parameters: parameters)
+                makeAttentionKVCache(
+                    parameters: parameters, layerIndex: layerIdx,
+                    layerCount: configuration.hiddenLayers)
             } else {
                 MambaCache()
             }

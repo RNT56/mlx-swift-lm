@@ -164,6 +164,41 @@ public struct TurboQuantQualityGateReport: Hashable, Codable, Sendable {
         )
     }
 
+    public static func evaluatedAffineInt4(
+        benchmarkSuiteID: TurboQuantBenchmarkSuiteID = .tinyDeterministicLogitsV1,
+        deterministicTop1MatchRate: Double,
+        logitKLDivergenceMean: Double,
+        logitMaxAbsErrorP95: Double,
+        perplexityDeltaPercent: Double? = nil,
+        retrievalNeedlePassRate: Double? = nil,
+        taskEvalDeltaPercent: Double? = nil,
+        attentionOutputCosineMean: Double? = nil,
+        noNaNOrInf: Bool,
+        snapshotRoundtripEquivalent: Bool? = nil,
+        top1Threshold: Double = 0.95,
+        klThreshold: Double = 0.05,
+        p95MaxAbsErrorThreshold: Double = 0.5
+    ) -> TurboQuantQualityGateReport {
+        evaluated(
+            benchmarkSuiteID: benchmarkSuiteID,
+            deterministicTop1MatchRate: deterministicTop1MatchRate,
+            logitKLDivergenceMean: logitKLDivergenceMean,
+            logitMaxAbsErrorP95: logitMaxAbsErrorP95,
+            perplexityDeltaPercent: perplexityDeltaPercent,
+            retrievalNeedlePassRate: retrievalNeedlePassRate,
+            taskEvalDeltaPercent: taskEvalDeltaPercent,
+            attentionOutputCosineMean: attentionOutputCosineMean,
+            noNaNOrInf: noNaNOrInf,
+            fallbackEquivalent: true,
+            prefillExact: true,
+            snapshotRoundtripEquivalent: snapshotRoundtripEquivalent,
+            profileQualityThresholdOverride: "affine_int4_native_lossy",
+            top1Threshold: top1Threshold,
+            klThreshold: klThreshold,
+            p95MaxAbsErrorThreshold: p95MaxAbsErrorThreshold
+        )
+    }
+
     public static func failed(
         benchmarkSuiteID: TurboQuantBenchmarkSuiteID = .tinyDeterministicLogitsV1,
         reason: String

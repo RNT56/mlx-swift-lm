@@ -1090,7 +1090,8 @@ public class LFM2VL: Module, VLMModel, KVCacheDimensionProvider {
         let textConfig = config.textConfiguration
         return (0 ..< textConfig.hiddenLayers).map { layerIdx in
             if textConfig.fullAttnIdxs.contains(layerIdx) {
-                makeAttentionKVCache(parameters: parameters)
+                makeAttentionKVCache(
+                    parameters: parameters, layerIndex: layerIdx, layerCount: textConfig.hiddenLayers)
             } else {
                 MambaCache()
             }

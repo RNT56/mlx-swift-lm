@@ -18,6 +18,75 @@ public enum TurboQuantLayerPolicy: Codable, Sendable, Equatable {
     case custom([Int: Int])
 }
 
+public enum TurboQuantColdSelectorEscalation: String, Codable, Sendable, Hashable {
+    case none
+    case maxBudget
+    case exhaustive
+}
+
+public struct TurboQuantColdSelectorPolicy: Hashable, Codable, Sendable {
+    public var nearestBlockCount: Int
+    public var semanticWeight: Float
+    public var lexicalWeight: Float
+    public var keyNormWeight: Float
+    public var recencyWeight: Float
+    public var minimumConfidence: Float
+    public var allowMaxBudgetEscalation: Bool
+    public var allowExhaustiveEscalation: Bool
+
+    public init(
+        nearestBlockCount: Int = 2,
+        semanticWeight: Float = 100,
+        lexicalWeight: Float = 10,
+        keyNormWeight: Float = 1,
+        recencyWeight: Float = 0.25,
+        minimumConfidence: Float = 0.35,
+        allowMaxBudgetEscalation: Bool = true,
+        allowExhaustiveEscalation: Bool = false
+    ) {
+        self.nearestBlockCount = max(0, nearestBlockCount)
+        self.semanticWeight = max(0, semanticWeight)
+        self.lexicalWeight = max(0, lexicalWeight)
+        self.keyNormWeight = max(0, keyNormWeight)
+        self.recencyWeight = max(0, recencyWeight)
+        self.minimumConfidence = max(0, min(1, minimumConfidence))
+        self.allowMaxBudgetEscalation = allowMaxBudgetEscalation
+        self.allowExhaustiveEscalation = allowExhaustiveEscalation
+    }
+
+    public static let automatic = TurboQuantColdSelectorPolicy()
+}
+
+public struct TurboQuantColdSelectorHint: Hashable, Codable, Sendable {
+    public var startToken: Int
+    public var endToken: Int
+    public var lexicalScore: Float
+    public var semanticScore: Float
+    public var anchorFlags: TurboQuantColdBlockAnchorFlags
+    public var sourceID: String?
+
+    public init(
+        startToken: Int,
+        endToken: Int,
+        lexicalScore: Float = 0,
+        semanticScore: Float = 0,
+        anchorFlags: TurboQuantColdBlockAnchorFlags = [],
+        sourceID: String? = nil
+    ) {
+        self.startToken = max(0, min(startToken, endToken))
+        self.endToken = max(0, max(startToken, endToken))
+        self.lexicalScore = max(0, lexicalScore)
+        self.semanticScore = max(0, semanticScore)
+        self.anchorFlags = anchorFlags
+        self.sourceID = sourceID
+    }
+
+    public var isEmpty: Bool {
+        startToken >= endToken
+            || (lexicalScore == 0 && semanticScore == 0 && anchorFlags.isEmpty)
+    }
+}
+
 public struct TurboQuantColdBlockAnchorFlags: OptionSet, Hashable, Codable, Sendable {
     public let rawValue: Int
 
@@ -40,8 +109,93 @@ public struct TurboQuantColdBlockDescriptor: Hashable, Codable, Sendable {
     public var logicalTokenCount: Int
     public var recencyRank: Int
     public var anchorFlags: TurboQuantColdBlockAnchorFlags
+    public var keyMeanSummary: [Float]
     public var maxKeyNormEstimate: Float
+    public var scoreUpperBoundEstimate: Float
+    public var lexicalScore: Float
+    public var semanticScore: Float
     public var relevanceScore: Float
+
+    private enum CodingKeys: String, CodingKey {
+        case blockID
+        case startToken
+        case endToken
+        case compressedSlotStart
+        case compressedSlotEnd
+        case logicalTokenCount
+        case recencyRank
+        case anchorFlags
+        case keyMeanSummary
+        case maxKeyNormEstimate
+        case scoreUpperBoundEstimate
+        case lexicalScore
+        case semanticScore
+        case relevanceScore
+    }
+
+    public init(
+        blockID: Int,
+        startToken: Int,
+        endToken: Int,
+        compressedSlotStart: Int,
+        compressedSlotEnd: Int,
+        logicalTokenCount: Int,
+        recencyRank: Int,
+        anchorFlags: TurboQuantColdBlockAnchorFlags,
+        keyMeanSummary: [Float] = [],
+        maxKeyNormEstimate: Float,
+        scoreUpperBoundEstimate: Float? = nil,
+        lexicalScore: Float = 0,
+        semanticScore: Float = 0,
+        relevanceScore: Float
+    ) {
+        self.blockID = blockID
+        self.startToken = startToken
+        self.endToken = endToken
+        self.compressedSlotStart = compressedSlotStart
+        self.compressedSlotEnd = compressedSlotEnd
+        self.logicalTokenCount = max(0, logicalTokenCount)
+        self.recencyRank = max(0, recencyRank)
+        self.anchorFlags = anchorFlags
+        self.keyMeanSummary = keyMeanSummary
+        self.maxKeyNormEstimate = max(0, maxKeyNormEstimate)
+        self.scoreUpperBoundEstimate = max(0, scoreUpperBoundEstimate ?? maxKeyNormEstimate)
+        self.lexicalScore = max(0, lexicalScore)
+        self.semanticScore = max(0, semanticScore)
+        self.relevanceScore = relevanceScore
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        let maxKeyNormEstimate =
+            try container.decodeIfPresent(Float.self, forKey: .maxKeyNormEstimate) ?? 0
+        self.init(
+            blockID: try container.decode(Int.self, forKey: .blockID),
+            startToken: try container.decode(Int.self, forKey: .startToken),
+            endToken: try container.decode(Int.self, forKey: .endToken),
+            compressedSlotStart: try container.decode(Int.self, forKey: .compressedSlotStart),
+            compressedSlotEnd: try container.decode(Int.self, forKey: .compressedSlotEnd),
+            logicalTokenCount: try container.decode(Int.self, forKey: .logicalTokenCount),
+            recencyRank: try container.decodeIfPresent(Int.self, forKey: .recencyRank) ?? 0,
+            anchorFlags: try container.decodeIfPresent(
+                TurboQuantColdBlockAnchorFlags.self,
+                forKey: .anchorFlags
+            ) ?? [],
+            keyMeanSummary: try container.decodeIfPresent(
+                [Float].self,
+                forKey: .keyMeanSummary
+            ) ?? [],
+            maxKeyNormEstimate: maxKeyNormEstimate,
+            scoreUpperBoundEstimate: try container.decodeIfPresent(
+                Float.self,
+                forKey: .scoreUpperBoundEstimate
+            ) ?? maxKeyNormEstimate,
+            lexicalScore: try container.decodeIfPresent(Float.self, forKey: .lexicalScore) ?? 0,
+            semanticScore: try container.decodeIfPresent(Float.self, forKey: .semanticScore) ?? 0,
+            relevanceScore: try container.decodeIfPresent(Float.self, forKey: .relevanceScore)
+                ?? 0
+        )
+    }
 
     public var isAnchor: Bool {
         !anchorFlags.isEmpty
@@ -52,15 +206,58 @@ public struct TurboQuantColdSelection: Hashable, Codable, Sendable {
     public var selectedBlockIDs: [Int]
     public var selectedTokenBudget: Int
     public var selectedTokenCount: Int
+    public var anchorTokenCount: Int
+    public var budgetedTokenCount: Int
+    public var anchorOverflowTokens: Int
     public var confidence: Float
+    public var initialConfidence: Float
+    public var finalConfidence: Float
+    public var selectorEscalation: TurboQuantColdSelectorEscalation
     public var reasonFlags: [String]
     public var requiresExhaustiveFallback: Bool
+
+    public init(
+        selectedBlockIDs: [Int],
+        selectedTokenBudget: Int,
+        selectedTokenCount: Int,
+        anchorTokenCount: Int = 0,
+        budgetedTokenCount: Int? = nil,
+        anchorOverflowTokens: Int = 0,
+        confidence: Float,
+        initialConfidence: Float? = nil,
+        finalConfidence: Float? = nil,
+        selectorEscalation: TurboQuantColdSelectorEscalation = .none,
+        reasonFlags: [String],
+        requiresExhaustiveFallback: Bool
+    ) {
+        self.selectedBlockIDs = selectedBlockIDs
+        self.selectedTokenBudget = max(0, selectedTokenBudget)
+        self.selectedTokenCount = max(0, selectedTokenCount)
+        self.anchorTokenCount = max(0, anchorTokenCount)
+        self.budgetedTokenCount = max(
+            0,
+            budgetedTokenCount ?? max(0, selectedTokenCount - anchorTokenCount)
+        )
+        self.anchorOverflowTokens = max(0, anchorOverflowTokens)
+        self.confidence = max(0, min(1, confidence))
+        self.initialConfidence = max(0, min(1, initialConfidence ?? confidence))
+        self.finalConfidence = max(0, min(1, finalConfidence ?? confidence))
+        self.selectorEscalation = selectorEscalation
+        self.reasonFlags = reasonFlags
+        self.requiresExhaustiveFallback = requiresExhaustiveFallback
+    }
 
     public static let empty = TurboQuantColdSelection(
         selectedBlockIDs: [],
         selectedTokenBudget: 0,
         selectedTokenCount: 0,
+        anchorTokenCount: 0,
+        budgetedTokenCount: 0,
+        anchorOverflowTokens: 0,
         confidence: 1,
+        initialConfidence: 1,
+        finalConfidence: 1,
+        selectorEscalation: .none,
         reasonFlags: ["empty"],
         requiresExhaustiveFallback: false
     )
@@ -83,13 +280,132 @@ public struct TurboQuantHybridDiagnostics: Hashable, Codable, Sendable {
     public var hotTokens: Int
     public var coldBlockCount: Int
     public var selectedColdTokens: Int
+    public var selectedBudgetedColdTokens: Int
+    public var anchorColdTokens: Int
+    public var anchorOverflowTokens: Int
     public var selectedColdBlocks: [Int]
     public var selectorConfidence: Float
+    public var selectorInitialConfidence: Float
+    public var selectorFinalConfidence: Float
+    public var selectorEscalation: TurboQuantColdSelectorEscalation
+    public var selectorReasonFlags: [String]
     public var coldBudgetTokens: Int
     public var maxColdBudgetTokens: Int
     public var fallbackReason: String?
     public var fullScanFallbackCount: Int
     public var lastLayerColdBudget: Int?
+
+    public init(
+        route: String,
+        hotTokens: Int,
+        coldBlockCount: Int,
+        selectedColdTokens: Int,
+        selectedBudgetedColdTokens: Int = 0,
+        anchorColdTokens: Int = 0,
+        anchorOverflowTokens: Int = 0,
+        selectedColdBlocks: [Int],
+        selectorConfidence: Float,
+        selectorInitialConfidence: Float? = nil,
+        selectorFinalConfidence: Float? = nil,
+        selectorEscalation: TurboQuantColdSelectorEscalation = .none,
+        selectorReasonFlags: [String] = [],
+        coldBudgetTokens: Int,
+        maxColdBudgetTokens: Int,
+        fallbackReason: String?,
+        fullScanFallbackCount: Int,
+        lastLayerColdBudget: Int?
+    ) {
+        self.route = route
+        self.hotTokens = max(0, hotTokens)
+        self.coldBlockCount = max(0, coldBlockCount)
+        self.selectedColdTokens = max(0, selectedColdTokens)
+        self.selectedBudgetedColdTokens = max(0, selectedBudgetedColdTokens)
+        self.anchorColdTokens = max(0, anchorColdTokens)
+        self.anchorOverflowTokens = max(0, anchorOverflowTokens)
+        self.selectedColdBlocks = selectedColdBlocks
+        self.selectorConfidence = max(0, min(1, selectorConfidence))
+        self.selectorInitialConfidence = max(
+            0,
+            min(1, selectorInitialConfidence ?? selectorConfidence)
+        )
+        self.selectorFinalConfidence = max(
+            0,
+            min(1, selectorFinalConfidence ?? selectorConfidence)
+        )
+        self.selectorEscalation = selectorEscalation
+        self.selectorReasonFlags = selectorReasonFlags
+        self.coldBudgetTokens = max(0, coldBudgetTokens)
+        self.maxColdBudgetTokens = max(0, maxColdBudgetTokens)
+        self.fallbackReason = fallbackReason
+        self.fullScanFallbackCount = max(0, fullScanFallbackCount)
+        self.lastLayerColdBudget = lastLayerColdBudget.map { max(0, $0) }
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case route
+        case hotTokens
+        case coldBlockCount
+        case selectedColdTokens
+        case selectedBudgetedColdTokens
+        case anchorColdTokens
+        case anchorOverflowTokens
+        case selectedColdBlocks
+        case selectorConfidence
+        case selectorInitialConfidence
+        case selectorFinalConfidence
+        case selectorEscalation
+        case selectorReasonFlags
+        case coldBudgetTokens
+        case maxColdBudgetTokens
+        case fallbackReason
+        case fullScanFallbackCount
+        case lastLayerColdBudget
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        try self.init(
+            route: container.decode(String.self, forKey: .route),
+            hotTokens: container.decode(Int.self, forKey: .hotTokens),
+            coldBlockCount: container.decode(Int.self, forKey: .coldBlockCount),
+            selectedColdTokens: container.decode(Int.self, forKey: .selectedColdTokens),
+            selectedBudgetedColdTokens: container.decodeIfPresent(
+                Int.self,
+                forKey: .selectedBudgetedColdTokens
+            ) ?? 0,
+            anchorColdTokens: container.decodeIfPresent(
+                Int.self,
+                forKey: .anchorColdTokens
+            ) ?? 0,
+            anchorOverflowTokens: container.decodeIfPresent(
+                Int.self,
+                forKey: .anchorOverflowTokens
+            ) ?? 0,
+            selectedColdBlocks: container.decode([Int].self, forKey: .selectedColdBlocks),
+            selectorConfidence: container.decode(Float.self, forKey: .selectorConfidence),
+            selectorInitialConfidence: container.decodeIfPresent(
+                Float.self,
+                forKey: .selectorInitialConfidence
+            ),
+            selectorFinalConfidence: container.decodeIfPresent(
+                Float.self,
+                forKey: .selectorFinalConfidence
+            ),
+            selectorEscalation: container.decodeIfPresent(
+                TurboQuantColdSelectorEscalation.self,
+                forKey: .selectorEscalation
+            ) ?? .none,
+            selectorReasonFlags: container.decodeIfPresent(
+                [String].self,
+                forKey: .selectorReasonFlags
+            ) ?? [],
+            coldBudgetTokens: container.decode(Int.self, forKey: .coldBudgetTokens),
+            maxColdBudgetTokens: container.decode(Int.self, forKey: .maxColdBudgetTokens),
+            fallbackReason: container.decodeIfPresent(String.self, forKey: .fallbackReason),
+            fullScanFallbackCount: container.decode(Int.self, forKey: .fullScanFallbackCount),
+            lastLayerColdBudget: container.decodeIfPresent(Int.self, forKey: .lastLayerColdBudget)
+        )
+    }
 }
 
 private struct TurboQuantColdBlock {
@@ -100,9 +416,12 @@ private struct TurboQuantColdBlock {
 
 private struct TurboQuantHybridCheckpoint {
     var offset: Int
+    var hotStartToken: Int
     var hotKeys: MLXArray?
     var hotValues: MLXArray?
     var blocks: [TurboQuantColdBlock]
+    var selectorPolicy: TurboQuantColdSelectorPolicy
+    var selectorHints: [TurboQuantColdSelectorHint]
     var nextBlockID: Int
     var fullScanFallbackCount: Int
     var diagnostics: TurboQuantHybridDiagnostics
@@ -121,19 +440,28 @@ public final class HybridTurboQuantKVCache: BaseKVCache {
     public let residentBudgetBytes: Int?
     public let layerIndex: Int?
     public let layerCount: Int?
+    public let sparseValuePolicy: TurboQuantSparseValuePolicy
     public private(set) var hotWindowTokens: Int
     public private(set) var coldBlockTokens: Int
     public private(set) var coldBudgetTokens: Int
     public private(set) var maxColdBudgetTokens: Int
     public var coldAttentionMode: TurboQuantColdAttentionMode
     public var layerPolicy: TurboQuantLayerPolicy
+    public var selectorPolicy: TurboQuantColdSelectorPolicy
 
     private var hotKeys: MLXArray?
     private var hotValues: MLXArray?
+    private var hotStartToken = 0
     private var coldBlocks: [TurboQuantColdBlock] = []
+    public private(set) var selectorHints: [TurboQuantColdSelectorHint] = []
     private var nextBlockID = 0
     private var fullScanFallbackCount = 0
     private var lastSealFailure: String?
+
+    private var canSealColdBlocks: Bool {
+        activeBackend == .metalPolarQJL
+            && TurboQuantKernelAvailability.current.supportsMetalPolarQJLCodec
+    }
 
     public private(set) var lastSelection: TurboQuantColdSelection = .empty
     public private(set) var diagnostics: TurboQuantHybridDiagnostics
@@ -155,7 +483,10 @@ public final class HybridTurboQuantKVCache: BaseKVCache {
         valueBits: Int? = nil,
         residentBudgetBytes: Int? = nil,
         layerIndex: Int? = nil,
-        layerCount: Int? = nil
+        layerCount: Int? = nil,
+        sparseValuePolicy: TurboQuantSparseValuePolicy = .off,
+        selectorPolicy: TurboQuantColdSelectorPolicy = .automatic,
+        selectorHints: [TurboQuantColdSelectorHint] = []
     ) {
         self.maxContextLength = maxSize
         self.hotWindowTokens = Self.resolvedHotWindowTokens(
@@ -181,13 +512,23 @@ public final class HybridTurboQuantKVCache: BaseKVCache {
         self.residentBudgetBytes = residentBudgetBytes
         self.layerIndex = layerIndex
         self.layerCount = layerCount
+        self.sparseValuePolicy = sparseValuePolicy
+        self.selectorPolicy = selectorPolicy
+        self.selectorHints = selectorHints.filter { !$0.isEmpty }
         self.diagnostics = TurboQuantHybridDiagnostics(
             route: "hybrid",
             hotTokens: 0,
             coldBlockCount: 0,
             selectedColdTokens: 0,
+            selectedBudgetedColdTokens: 0,
+            anchorColdTokens: 0,
+            anchorOverflowTokens: 0,
             selectedColdBlocks: [],
             selectorConfidence: 1,
+            selectorInitialConfidence: 1,
+            selectorFinalConfidence: 1,
+            selectorEscalation: .none,
+            selectorReasonFlags: ["empty"],
             coldBudgetTokens: self.coldBudgetTokens,
             maxColdBudgetTokens: self.maxColdBudgetTokens,
             fallbackReason: nil,
@@ -253,7 +594,14 @@ public final class HybridTurboQuantKVCache: BaseKVCache {
             packedFallbackAllocated: false,
             lastAttentionPath: diagnostics.route,
             lastFailure: diagnostics.fallbackReason,
-            hybridDiagnostics: diagnostics
+            kvCodec: .polarQJL,
+            selectedPath: diagnostics.route,
+            fallbackReason: diagnostics.fallbackReason,
+            hybridDiagnostics: diagnostics,
+            sparseValuePolicy: sparseValuePolicy,
+            boundaryPolicy: nil,
+            boundaryProtectedLayerCount: 0,
+            boundaryProtectionReason: nil
         )
     }
 
@@ -277,6 +625,7 @@ public final class HybridTurboQuantKVCache: BaseKVCache {
             hotKeys = nil
             hotValues = nil
             coldBlocks.removeAll()
+            selectorHints.removeAll()
             offset = 0
             nextBlockID = 0
             refreshDiagnostics(selection: .empty, fallbackReason: nil)
@@ -285,10 +634,19 @@ public final class HybridTurboQuantKVCache: BaseKVCache {
 
     public override var metaState: [String] {
         get {
-            [
-                "HybridTurboQuantKVCache.v1",
+            let maxContextLengthString = maxContextLength.map(String.init) ?? "None"
+            let valueBitsString = valueBits.map(String.init) ?? "None"
+            let layerIndexString = layerIndex.map(String.init) ?? "None"
+            let layerCountString = layerCount.map(String.init) ?? "None"
+            let sparseValuePolicyString = String(describing: sparseValuePolicy)
+            let selectorPolicyString = HybridTurboQuantKVCache.encodedMetadata(selectorPolicy)
+            let hotStateCount = hotKeys == nil ? 0 : 2
+            let coldBlockCount = coldBlocks.count
+            var entries = [
+                "HybridTurboQuantKVCache.v3",
                 "offset=\(offset)",
-                "maxSize=\(maxContextLength.map(String.init) ?? "None")",
+                "hotStartToken=\(hotStartToken)",
+                "maxSize=\(maxContextLengthString)",
                 "hotWindowTokens=\(hotWindowTokens)",
                 "coldBlockTokens=\(coldBlockTokens)",
                 "coldBudgetTokens=\(coldBudgetTokens)",
@@ -299,23 +657,23 @@ public final class HybridTurboQuantKVCache: BaseKVCache {
                 "activeBackend=\(activeBackend.rawValue)",
                 "groupSize=\(groupSize)",
                 "seed=\(seed)",
-                "valueBits=\(valueBits.map(String.init) ?? "None")",
-                "layerIndex=\(layerIndex.map(String.init) ?? "None")",
-                "layerCount=\(layerCount.map(String.init) ?? "None")",
-                "hotStateCount=\(hotKeys == nil ? 0 : 2)",
-                "coldBlockCount=\(coldBlocks.count)",
-            ] + coldBlocks.map { block in
-                let descriptor = block.descriptor
-                return [
-                    descriptor.blockID,
-                    descriptor.startToken,
-                    descriptor.endToken,
-                    descriptor.compressedSlotStart,
-                    descriptor.compressedSlotEnd,
-                    descriptor.logicalTokenCount,
-                    descriptor.anchorFlags.rawValue,
-                ].map(String.init).joined(separator: ":")
-            }
+                "valueBits=\(valueBitsString)",
+                "layerIndex=\(layerIndexString)",
+                "layerCount=\(layerCountString)",
+                "sparseValuePolicy=\(sparseValuePolicyString)",
+                "selectorPolicy=\(selectorPolicyString)",
+                "hotStateCount=\(hotStateCount)",
+                "coldBlockCount=\(coldBlockCount)",
+            ]
+            entries.append(
+                contentsOf: selectorHints.map { hint in
+                    "selectorHint=\(HybridTurboQuantKVCache.encodedMetadata(hint))"
+                })
+            entries.append(
+                contentsOf: coldBlocks.map { block in
+                    "block=\(HybridTurboQuantKVCache.encodedMetadata(block.descriptor))"
+                })
+            return entries
         }
         set {
             guard newValue.isEmpty || (newValue.count == 1 && newValue[0].isEmpty) else {
@@ -325,12 +683,7 @@ public final class HybridTurboQuantKVCache: BaseKVCache {
     }
 
     public override func update(keys: MLXArray, values: MLXArray) -> (MLXArray, MLXArray) {
-        appendHot(keys: keys, values: values)
-        do {
-            try sealReadyColdBlocks()
-        } catch {
-            lastSealFailure = String(describing: error)
-        }
+        appendHotInBoundedChunks(keys: keys, values: values)
         refreshDiagnostics(selection: lastSelection, fallbackReason: lastSealFailure)
         return rawHotState(defaultKeys: keys, defaultValues: values)
     }
@@ -358,14 +711,16 @@ public final class HybridTurboQuantKVCache: BaseKVCache {
             defaultBudget: budgetOverride ?? coldBudgetTokens
         )
         let budget = min(maxColdBudgetTokens, max(0, layerBudget))
+        let descriptors = coldBlockDescriptorsScored(for: query)
         let selection = Self.selectColdBlocks(
-            descriptors: coldBlockDescriptors,
+            descriptors: descriptors,
             mode: coldAttentionMode,
             budgetTokens: budget,
-            maxBudgetTokens: maxColdBudgetTokens
+            maxBudgetTokens: maxColdBudgetTokens,
+            selectorPolicy: selectorPolicy
         )
         lastSelection = selection
-        if selection.requiresExhaustiveFallback {
+        if selection.selectorEscalation == .exhaustive {
             fullScanFallbackCount += 1
         }
         refreshDiagnostics(selection: selection, fallbackReason: lastSealFailure)
@@ -376,10 +731,11 @@ public final class HybridTurboQuantKVCache: BaseKVCache {
         descriptors: [TurboQuantColdBlockDescriptor],
         mode: TurboQuantColdAttentionMode,
         budgetTokens: Int,
-        maxBudgetTokens: Int
+        maxBudgetTokens: Int,
+        selectorPolicy: TurboQuantColdSelectorPolicy = .automatic
     ) -> TurboQuantColdSelection {
         guard !descriptors.isEmpty else { return .empty }
-        guard mode != .off, budgetTokens > 0 || mode == .exhaustive else {
+        guard mode != .off else {
             return TurboQuantColdSelection(
                 selectedBlockIDs: [],
                 selectedTokenBudget: budgetTokens,
@@ -391,67 +747,254 @@ public final class HybridTurboQuantKVCache: BaseKVCache {
         }
 
         if mode == .exhaustive {
-            let tokenCount = descriptors.reduce(0) { $0 + $1.logicalTokenCount }
-            return TurboQuantColdSelection(
-                selectedBlockIDs: descriptors.map(\.blockID),
-                selectedTokenBudget: tokenCount,
-                selectedTokenCount: tokenCount,
-                confidence: 1,
-                reasonFlags: ["exhaustive"],
-                requiresExhaustiveFallback: false
+            return exhaustiveSelection(
+                descriptors: descriptors,
+                budgetTokens: max(0, maxBudgetTokens),
+                initialConfidence: 1,
+                reasonFlags: ["exhaustive"]
             )
         }
 
         let cappedBudget = min(maxBudgetTokens, max(0, budgetTokens))
+        var selection = budgetedSelection(
+            descriptors: descriptors,
+            budgetTokens: cappedBudget,
+            selectorPolicy: selectorPolicy,
+            escalation: .none,
+            initialConfidence: nil,
+            extraReasons: []
+        )
+        let initialConfidence = selection.confidence
+
+        if selection.confidence < selectorPolicy.minimumConfidence,
+            selectorPolicy.allowMaxBudgetEscalation,
+            maxBudgetTokens > cappedBudget
+        {
+            selection = budgetedSelection(
+                descriptors: descriptors,
+                budgetTokens: max(0, maxBudgetTokens),
+                selectorPolicy: selectorPolicy,
+                escalation: .maxBudget,
+                initialConfidence: initialConfidence,
+                extraReasons: ["max_budget_escalation"]
+            )
+        }
+
+        if selection.confidence < selectorPolicy.minimumConfidence {
+            if selectorPolicy.allowExhaustiveEscalation {
+                return exhaustiveSelection(
+                    descriptors: descriptors,
+                    budgetTokens: max(0, maxBudgetTokens),
+                    initialConfidence: initialConfidence,
+                    reasonFlags: selection.reasonFlags + ["quality_guard_exhaustive"]
+                )
+            }
+            if !selection.reasonFlags.contains("low_confidence_exhaustive_disabled") {
+                selection.reasonFlags.append("low_confidence_exhaustive_disabled")
+            }
+        }
+
+        return selection
+    }
+
+    private static func exhaustiveSelection(
+        descriptors: [TurboQuantColdBlockDescriptor],
+        budgetTokens: Int,
+        initialConfidence: Float,
+        reasonFlags: [String]
+    ) -> TurboQuantColdSelection {
+        let tokenCount = descriptors.reduce(0) { $0 + $1.logicalTokenCount }
+        let anchorTokens = descriptors.filter(\.isAnchor).reduce(0) {
+            $0 + $1.logicalTokenCount
+        }
+        return TurboQuantColdSelection(
+            selectedBlockIDs: descriptors.sorted { $0.startToken < $1.startToken }.map(\.blockID),
+            selectedTokenBudget: tokenCount,
+            selectedTokenCount: tokenCount,
+            anchorTokenCount: anchorTokens,
+            budgetedTokenCount: max(0, tokenCount - anchorTokens),
+            anchorOverflowTokens: max(0, anchorTokens - budgetTokens),
+            confidence: 1,
+            initialConfidence: initialConfidence,
+            finalConfidence: 1,
+            selectorEscalation: .exhaustive,
+            reasonFlags: uniqueReasonFlags(reasonFlags.isEmpty ? ["exhaustive"] : reasonFlags),
+            requiresExhaustiveFallback: true
+        )
+    }
+
+    private static func budgetedSelection(
+        descriptors: [TurboQuantColdBlockDescriptor],
+        budgetTokens: Int,
+        selectorPolicy: TurboQuantColdSelectorPolicy,
+        escalation: TurboQuantColdSelectorEscalation,
+        initialConfidence: Float?,
+        extraReasons: [String]
+    ) -> TurboQuantColdSelection {
+        let cappedBudget = max(0, budgetTokens)
         var selected: [TurboQuantColdBlockDescriptor] = []
         var selectedIDs = Set<Int>()
-        var tokens = 0
-        var reasons: [String] = []
+        var budgetedTokens = 0
+        var reasons = extraReasons
 
-        func add(_ descriptor: TurboQuantColdBlockDescriptor, reason: String) {
-            guard !selectedIDs.contains(descriptor.blockID) else { return }
-            guard tokens + descriptor.logicalTokenCount <= cappedBudget || descriptor.isAnchor else {
-                return
-            }
-            selectedIDs.insert(descriptor.blockID)
-            selected.append(descriptor)
-            tokens += descriptor.logicalTokenCount
+        func addReason(_ reason: String) {
             if !reasons.contains(reason) {
                 reasons.append(reason)
             }
         }
 
+        func addAnchor(_ descriptor: TurboQuantColdBlockDescriptor) {
+            guard !selectedIDs.contains(descriptor.blockID) else { return }
+            selectedIDs.insert(descriptor.blockID)
+            selected.append(descriptor)
+            addReason("anchor")
+        }
+
+        func addBudgeted(_ descriptor: TurboQuantColdBlockDescriptor, reason: String) {
+            guard !selectedIDs.contains(descriptor.blockID) else { return }
+            guard budgetedTokens + descriptor.logicalTokenCount <= cappedBudget else { return }
+            selectedIDs.insert(descriptor.blockID)
+            selected.append(descriptor)
+            budgetedTokens += descriptor.logicalTokenCount
+            addReason(reason)
+        }
+
         for descriptor in descriptors where descriptor.isAnchor {
-            add(descriptor, reason: "anchor")
+            addAnchor(descriptor)
         }
 
-        if let nearest = descriptors.max(by: { $0.endToken < $1.endToken }) {
-            add(nearest, reason: "nearest")
-        }
-
-        let scored = descriptors.sorted {
-            if $0.relevanceScore == $1.relevanceScore {
+        let nonAnchors = descriptors.filter { !$0.isAnchor }
+        let nearest = nonAnchors
+            .sorted {
+                if $0.endToken == $1.endToken {
+                    return $0.blockID < $1.blockID
+                }
                 return $0.endToken > $1.endToken
             }
-            return $0.relevanceScore > $1.relevanceScore
+            .prefix(selectorPolicy.nearestBlockCount)
+        for descriptor in nearest {
+            addBudgeted(descriptor, reason: "nearest")
         }
+
+        let maxKeyNorm = max(0, nonAnchors.map(\.maxKeyNormEstimate).max() ?? 0)
+        let scored = nonAnchors
+            .filter { !selectedIDs.contains($0.blockID) }
+            .sorted {
+                let left = selectorScore($0, policy: selectorPolicy, maxKeyNorm: maxKeyNorm)
+                let right = selectorScore($1, policy: selectorPolicy, maxKeyNorm: maxKeyNorm)
+                if left == right {
+                    if $0.endToken == $1.endToken {
+                        return $0.blockID < $1.blockID
+                    }
+                    return $0.endToken > $1.endToken
+                }
+                return left > right
+            }
         for descriptor in scored {
-            guard tokens < cappedBudget else { break }
-            add(descriptor, reason: "score")
+            guard budgetedTokens < cappedBudget else { break }
+            addBudgeted(
+                descriptor,
+                reason: selectorReason(descriptor, policy: selectorPolicy, maxKeyNorm: maxKeyNorm)
+            )
         }
 
         selected.sort { $0.startToken < $1.startToken }
-        let coverage = descriptors.isEmpty ? 1 : Float(selected.count) / Float(descriptors.count)
-        let requiresExhaustive =
-            selected.isEmpty && !descriptors.isEmpty && cappedBudget < descriptors[0].logicalTokenCount
+        let anchorTokens = selected.filter(\.isAnchor).reduce(0) {
+            $0 + $1.logicalTokenCount
+        }
+        let selectedTokenCount = anchorTokens + budgetedTokens
+        let confidence = selectorConfidence(
+            descriptors: descriptors,
+            selectedIDs: selectedIDs,
+            selectedTokenCount: selectedTokenCount,
+            policy: selectorPolicy,
+            maxKeyNorm: maxKeyNorm
+        )
+        if selected.isEmpty {
+            addReason(cappedBudget == 0 ? "budget_empty" : "no_selectable_blocks")
+        }
         return TurboQuantColdSelection(
             selectedBlockIDs: selected.map(\.blockID),
             selectedTokenBudget: cappedBudget,
-            selectedTokenCount: tokens,
-            confidence: max(0.05, min(1, coverage)),
-            reasonFlags: reasons.isEmpty ? ["budget_empty"] : reasons,
-            requiresExhaustiveFallback: requiresExhaustive
+            selectedTokenCount: selectedTokenCount,
+            anchorTokenCount: anchorTokens,
+            budgetedTokenCount: budgetedTokens,
+            anchorOverflowTokens: max(0, anchorTokens - cappedBudget),
+            confidence: confidence,
+            initialConfidence: initialConfidence ?? confidence,
+            finalConfidence: confidence,
+            selectorEscalation: escalation,
+            reasonFlags: uniqueReasonFlags(reasons.isEmpty ? ["budget_empty"] : reasons),
+            requiresExhaustiveFallback: false
         )
+    }
+
+    private static func selectorScore(
+        _ descriptor: TurboQuantColdBlockDescriptor,
+        policy: TurboQuantColdSelectorPolicy,
+        maxKeyNorm: Float
+    ) -> Float {
+        let keyNormScore = maxKeyNorm > 0 ? descriptor.maxKeyNormEstimate / maxKeyNorm : 0
+        let recencyScore = descriptor.recencyRank > 0 ? 1 / Float(descriptor.recencyRank) : 0
+        return policy.semanticWeight * descriptor.semanticScore
+            + policy.lexicalWeight * descriptor.lexicalScore
+            + policy.keyNormWeight * keyNormScore
+            + policy.recencyWeight * recencyScore
+    }
+
+    private static func selectorReason(
+        _ descriptor: TurboQuantColdBlockDescriptor,
+        policy: TurboQuantColdSelectorPolicy,
+        maxKeyNorm: Float
+    ) -> String {
+        let semantic = policy.semanticWeight * descriptor.semanticScore
+        let lexical = policy.lexicalWeight * descriptor.lexicalScore
+        let keyNorm =
+            maxKeyNorm > 0
+            ? policy.keyNormWeight * descriptor.maxKeyNormEstimate / maxKeyNorm
+            : 0
+        if semantic >= lexical, semantic >= keyNorm, semantic > 0 {
+            return "semantic"
+        }
+        if lexical >= keyNorm, lexical > 0 {
+            return "lexical"
+        }
+        if keyNorm > 0 {
+            return "key_norm"
+        }
+        return "recency"
+    }
+
+    private static func selectorConfidence(
+        descriptors: [TurboQuantColdBlockDescriptor],
+        selectedIDs: Set<Int>,
+        selectedTokenCount: Int,
+        policy: TurboQuantColdSelectorPolicy,
+        maxKeyNorm: Float
+    ) -> Float {
+        let totalTokens = descriptors.reduce(0) { $0 + $1.logicalTokenCount }
+        let tokenCoverage =
+            totalTokens > 0 ? Float(selectedTokenCount) / Float(totalTokens) : 1
+        let totalScore = descriptors.reduce(Float(0)) {
+            $0 + max(0, selectorScore($1, policy: policy, maxKeyNorm: maxKeyNorm))
+        }
+        let selectedScore = descriptors.reduce(Float(0)) {
+            guard selectedIDs.contains($1.blockID) else { return $0 }
+            return $0 + max(0, selectorScore($1, policy: policy, maxKeyNorm: maxKeyNorm))
+        }
+        let scoreCoverage = totalScore > 0 ? selectedScore / totalScore : tokenCoverage
+        return max(0, min(1, max(tokenCoverage, scoreCoverage)))
+    }
+
+    private static func uniqueReasonFlags(_ reasons: [String]) -> [String] {
+        var seen = Set<String>()
+        var result: [String] = []
+        for reason in reasons where !reason.isEmpty {
+            if seen.insert(reason).inserted {
+                result.append(reason)
+            }
+        }
+        return result.isEmpty ? ["unknown"] : result
     }
 
     public func selectedColdState(
@@ -498,17 +1041,33 @@ public final class HybridTurboQuantKVCache: BaseKVCache {
         flags: TurboQuantColdBlockAnchorFlags
     ) {
         guard !flags.isEmpty else { return }
-        for index in coldBlocks.indices {
-            let descriptor = coldBlocks[index].descriptor
-            guard descriptor.startToken < tokenRange.upperBound,
-                tokenRange.lowerBound < descriptor.endToken
-            else {
-                continue
-            }
-            coldBlocks[index].descriptor.anchorFlags.formUnion(flags)
-            coldBlocks[index].descriptor.relevanceScore += 10
-        }
+        mergeSelectorHints([
+            TurboQuantColdSelectorHint(
+                startToken: tokenRange.lowerBound,
+                endToken: tokenRange.upperBound,
+                anchorFlags: flags,
+                sourceID: "anchor"
+            )
+        ])
+    }
+
+    public func applySelectorHints(_ hints: [TurboQuantColdSelectorHint]) {
+        selectorHints = hints.filter { !$0.isEmpty }
+        refreshHintScores()
         refreshDiagnostics(selection: lastSelection, fallbackReason: lastSealFailure)
+    }
+
+    private func mergeSelectorHints(_ hints: [TurboQuantColdSelectorHint]) {
+        selectorHints.append(contentsOf: hints.filter { !$0.isEmpty })
+        refreshHintScores()
+        refreshDiagnostics(selection: lastSelection, fallbackReason: lastSealFailure)
+    }
+
+    private func refreshHintScores() {
+        for index in coldBlocks.indices {
+            applySelectorHintsToDescriptor(&coldBlocks[index].descriptor, resetScores: true)
+        }
+        refreshRecency()
     }
 
     public override var isTrimmable: Bool {
@@ -520,6 +1079,7 @@ public final class HybridTurboQuantKVCache: BaseKVCache {
         guard n > 0, offset > 0 else { return 0 }
         let targetTrim = min(n, offset)
         var remaining = targetTrim
+        var actualTrimmed = 0
 
         if let hotKeys, let hotValues, remaining > 0 {
             let hotLength = hotKeys.dim(2)
@@ -527,10 +1087,13 @@ public final class HybridTurboQuantKVCache: BaseKVCache {
             if keepHot == 0 {
                 self.hotKeys = nil
                 self.hotValues = nil
+                hotStartToken += hotLength
                 remaining -= hotLength
+                actualTrimmed += hotLength
             } else {
                 self.hotKeys = hotKeys[.ellipsis, ..<keepHot, 0...]
                 self.hotValues = hotValues[.ellipsis, ..<keepHot, 0...]
+                actualTrimmed += remaining
                 remaining = 0
             }
         }
@@ -540,16 +1103,21 @@ public final class HybridTurboQuantKVCache: BaseKVCache {
             if remaining >= count {
                 coldBlocks.removeLast()
                 remaining -= count
+                actualTrimmed += count
             } else {
                 // Partial compressed block rollback is intentionally conservative:
                 // drop the whole block and report the extra trim to keep state coherent.
                 coldBlocks.removeLast()
+                actualTrimmed += count
                 remaining = 0
             }
         }
 
-        let trimmed = targetTrim - remaining
+        let trimmed = min(offset, actualTrimmed)
         offset = max(0, offset - trimmed)
+        if hotKeys == nil {
+            hotStartToken = offset
+        }
         refreshRecency()
         refreshDiagnostics(selection: .empty, fallbackReason: lastSealFailure)
         return trimmed
@@ -573,9 +1141,13 @@ public final class HybridTurboQuantKVCache: BaseKVCache {
             valueBits: valueBits,
             residentBudgetBytes: residentBudgetBytes,
             layerIndex: layerIndex,
-            layerCount: layerCount
+            layerCount: layerCount,
+            sparseValuePolicy: sparseValuePolicy,
+            selectorPolicy: selectorPolicy,
+            selectorHints: selectorHints
         )
         copied.offset = offset
+        copied.hotStartToken = hotStartToken
         copied.hotKeys = hotKeys
         copied.hotValues = hotValues
         copied.coldBlocks = coldBlocks
@@ -584,6 +1156,7 @@ public final class HybridTurboQuantKVCache: BaseKVCache {
         copied.fullScanFallbackCount = fullScanFallbackCount
         copied.lastSealFailure = lastSealFailure
         copied.diagnostics = diagnostics
+        copied.selectorHints = selectorHints
         return copied
     }
 
@@ -604,9 +1177,12 @@ public final class HybridTurboQuantKVCache: BaseKVCache {
     {
         TurboQuantHybridCheckpoint(
             offset: offset,
+            hotStartToken: hotStartToken,
             hotKeys: hotKeys,
             hotValues: hotValues,
             blocks: coldBlocks,
+            selectorPolicy: selectorPolicy,
+            selectorHints: selectorHints,
             nextBlockID: nextBlockID,
             fullScanFallbackCount: fullScanFallbackCount,
             diagnostics: diagnostics
@@ -616,9 +1192,12 @@ public final class HybridTurboQuantKVCache: BaseKVCache {
     public func restoreCompressedUpdateCheckpoint(_ checkpoint: Any) {
         guard let checkpoint = checkpoint as? TurboQuantHybridCheckpoint else { return }
         offset = checkpoint.offset
+        hotStartToken = checkpoint.hotStartToken
         hotKeys = checkpoint.hotKeys
         hotValues = checkpoint.hotValues
         coldBlocks = checkpoint.blocks
+        selectorPolicy = checkpoint.selectorPolicy
+        selectorHints = checkpoint.selectorHints
         nextBlockID = checkpoint.nextBlockID
         fullScanFallbackCount = checkpoint.fullScanFallbackCount
         diagnostics = checkpoint.diagnostics
@@ -628,20 +1207,32 @@ public final class HybridTurboQuantKVCache: BaseKVCache {
         state: [MLXArray],
         metaState: [String]
     ) throws -> HybridTurboQuantKVCache {
-        guard metaState.first == "HybridTurboQuantKVCache.v1" else {
+        let version = metaState.first
+        guard version == "HybridTurboQuantKVCache.v1"
+            || version == "HybridTurboQuantKVCache.v2"
+            || version == "HybridTurboQuantKVCache.v3"
+        else {
             throw KVCacheError(message: "Invalid HybridTurboQuantKVCache metaState version")
         }
-        let metadata = Dictionary(
-            uniqueKeysWithValues: metaState.compactMap { entry -> (String, String)? in
-                guard let equalIndex = entry.firstIndex(of: "=") else { return nil }
-                return (
-                    String(entry[..<equalIndex]),
-                    String(entry[entry.index(after: equalIndex)...])
-                )
+        var metadata: [String: String] = [:]
+        var encodedDescriptorEntries: [String] = []
+        var encodedHintEntries: [String] = []
+        var legacyBlockDescriptorEntries: [String] = []
+        for entry in metaState.dropFirst() {
+            guard let equalIndex = entry.firstIndex(of: "=") else {
+                legacyBlockDescriptorEntries.append(entry)
+                continue
             }
-        )
-        let blockDescriptorEntries = metaState.filter {
-            !$0.contains("=") && $0 != "HybridTurboQuantKVCache.v1"
+            let key = String(entry[..<equalIndex])
+            let value = String(entry[entry.index(after: equalIndex)...])
+            switch key {
+            case "block":
+                encodedDescriptorEntries.append(value)
+            case "selectorHint":
+                encodedHintEntries.append(value)
+            default:
+                metadata[key] = value
+            }
         }
         let maxSize =
             metadata["maxSize"].flatMap { $0 == "None" ? nil : Int($0) }
@@ -654,6 +1245,13 @@ public final class HybridTurboQuantKVCache: BaseKVCache {
         let valueBits =
             metadata["valueBits"].flatMap { $0 == "None" ? nil : Int($0) }
         let seed = metadata["seed"].flatMap(UInt64.init) ?? defaultTurboQuantSeed
+        let selectorPolicy =
+            metadata["selectorPolicy"].flatMap {
+                try? Self.decodedMetadata(TurboQuantColdSelectorPolicy.self, from: $0)
+            } ?? .automatic
+        let selectorHints = encodedHintEntries.compactMap {
+            try? Self.decodedMetadata(TurboQuantColdSelectorHint.self, from: $0)
+        }
         let cache = HybridTurboQuantKVCache(
             maxSize: maxSize,
             hotWindowTokens: metadata["hotWindowTokens"].flatMap(Int.init),
@@ -667,9 +1265,12 @@ public final class HybridTurboQuantKVCache: BaseKVCache {
             seed: seed,
             valueBits: valueBits,
             layerIndex: metadata["layerIndex"].flatMap { $0 == "None" ? nil : Int($0) },
-            layerCount: metadata["layerCount"].flatMap { $0 == "None" ? nil : Int($0) }
+            layerCount: metadata["layerCount"].flatMap { $0 == "None" ? nil : Int($0) },
+            selectorPolicy: selectorPolicy,
+            selectorHints: selectorHints
         )
         cache.offset = metadata["offset"].flatMap(Int.init) ?? 0
+        cache.hotStartToken = metadata["hotStartToken"].flatMap(Int.init) ?? cache.offset
 
         var stateIndex = 0
         let hotStateCount = metadata["hotStateCount"].flatMap(Int.init) ?? 0
@@ -679,10 +1280,20 @@ public final class HybridTurboQuantKVCache: BaseKVCache {
             }
             cache.hotKeys = state[0]
             cache.hotValues = state[1]
+            if metadata["hotStartToken"] == nil {
+                cache.hotStartToken = max(0, cache.offset - state[0].dim(2))
+            }
             stateIndex = 2
         }
 
-        let descriptors = try blockDescriptorEntries.map(Self.descriptor(from:))
+        let descriptors: [TurboQuantColdBlockDescriptor]
+        if version == "HybridTurboQuantKVCache.v2" || version == "HybridTurboQuantKVCache.v3" {
+            descriptors = try encodedDescriptorEntries.map {
+                try Self.decodedMetadata(TurboQuantColdBlockDescriptor.self, from: $0)
+            }
+        } else {
+            descriptors = try legacyBlockDescriptorEntries.map(Self.descriptor(from:))
+        }
         for descriptor in descriptors {
             guard stateIndex + 10 <= state.count else {
                 throw KVCacheError(message: "HybridTurboQuantKVCache compressed block state is truncated")
@@ -723,7 +1334,59 @@ public final class HybridTurboQuantKVCache: BaseKVCache {
         return cache
     }
 
+    private func appendHotInBoundedChunks(keys: MLXArray, values: MLXArray) {
+        let tokenCount = keys.dim(2)
+        guard tokenCount > 0 else { return }
+        guard canSealColdBlocks else {
+            appendHot(keys: keys, values: values)
+            return
+        }
+        let maxResidentTokens = max(1, hotWindowTokens + coldBlockTokens)
+        var consumed = 0
+        while consumed < tokenCount {
+            do {
+                try sealReadyColdBlocks(sealAtCapacity: true)
+                lastSealFailure = nil
+            } catch {
+                lastSealFailure = String(describing: error)
+                let tailRange = consumed ..< tokenCount
+                appendHot(
+                    keys: keys[.ellipsis, tailRange, 0...],
+                    values: values[.ellipsis, tailRange, 0...]
+                )
+                return
+            }
+            let remaining = tokenCount - consumed
+            let currentHot = rawHotLength
+            let room = max(1, maxResidentTokens - currentHot)
+            let chunkCount = min(remaining, room)
+            let chunkRange = consumed ..< (consumed + chunkCount)
+            appendHot(
+                keys: keys[.ellipsis, chunkRange, 0...],
+                values: values[.ellipsis, chunkRange, 0...]
+            )
+            do {
+                try sealReadyColdBlocks(sealAtCapacity: false)
+                lastSealFailure = nil
+            } catch {
+                lastSealFailure = String(describing: error)
+                if consumed + chunkCount < tokenCount {
+                    let tailRange = (consumed + chunkCount) ..< tokenCount
+                    appendHot(
+                        keys: keys[.ellipsis, tailRange, 0...],
+                        values: values[.ellipsis, tailRange, 0...]
+                    )
+                }
+                return
+            }
+            consumed += chunkCount
+        }
+    }
+
     private func appendHot(keys: MLXArray, values: MLXArray) {
+        if hotKeys == nil {
+            hotStartToken = offset
+        }
         if let currentKeys = hotKeys, let currentValues = hotValues {
             hotKeys = concatenated([currentKeys, keys], axis: 2)
             hotValues = concatenated([currentValues, values], axis: 2)
@@ -734,27 +1397,32 @@ public final class HybridTurboQuantKVCache: BaseKVCache {
         offset += keys.dim(2)
     }
 
-    private func sealReadyColdBlocks() throws {
-        guard activeBackend == .metalPolarQJL,
-            TurboQuantKernelAvailability.current.supportsMetalPolarQJLCodec
-        else {
+    private func sealReadyColdBlocks(sealAtCapacity: Bool) throws {
+        guard canSealColdBlocks else {
             return
         }
+        let maxResidentTokens = hotWindowTokens + coldBlockTokens
         while let hotKeys, let hotValues,
-            hotKeys.dim(2) > hotWindowTokens + coldBlockTokens
+            hotKeys.dim(2) >= coldBlockTokens
         {
+            let hotLength = hotKeys.dim(2)
+            let shouldSeal =
+                hotLength > maxResidentTokens
+                || (sealAtCapacity && hotLength == maxResidentTokens)
+            guard shouldSeal else { break }
             let blockKeys = hotKeys[.ellipsis, ..<coldBlockTokens, 0...]
             let blockValues = hotValues[.ellipsis, ..<coldBlockTokens, 0...]
             try sealBlock(keys: blockKeys, values: blockValues)
             let remainingStart = coldBlockTokens
             self.hotKeys = hotKeys[.ellipsis, remainingStart..., 0...]
             self.hotValues = hotValues[.ellipsis, remainingStart..., 0...]
+            hotStartToken += coldBlockTokens
         }
     }
 
     private func sealBlock(keys: MLXArray, values: MLXArray) throws {
         let tokenCount = keys.dim(2)
-        let startToken = coldTokenCount
+        let startToken = hotStartToken
         let endToken = startToken + tokenCount
         let keyConfig = TurboQuantConfiguration(
             preset: preset,
@@ -786,7 +1454,8 @@ public final class HybridTurboQuantKVCache: BaseKVCache {
             capacity: tokenCount,
             logicalLength: tokenCount
         )
-        let descriptor = TurboQuantColdBlockDescriptor(
+        let maxKeyNormEstimate = Self.maxKeyNormEstimate(keys)
+        var descriptor = TurboQuantColdBlockDescriptor(
             blockID: nextBlockID,
             startToken: startToken,
             endToken: endToken,
@@ -795,9 +1464,12 @@ public final class HybridTurboQuantKVCache: BaseKVCache {
             logicalTokenCount: tokenCount,
             recencyRank: 0,
             anchorFlags: [],
-            maxKeyNormEstimate: 0,
+            keyMeanSummary: Self.keyMeanSummary(keys),
+            maxKeyNormEstimate: maxKeyNormEstimate,
+            scoreUpperBoundEstimate: maxKeyNormEstimate,
             relevanceScore: Float(endToken)
         )
+        applySelectorHintsToDescriptor(&descriptor, resetScores: true)
         coldBlocks.append(
             TurboQuantColdBlock(
                 descriptor: descriptor,
@@ -810,11 +1482,71 @@ public final class HybridTurboQuantKVCache: BaseKVCache {
     }
 
     private func refreshRecency() {
+        let maxKeyNorm = max(0, coldBlocks.map(\.descriptor.maxKeyNormEstimate).max() ?? 0)
         for index in coldBlocks.indices {
             coldBlocks[index].descriptor.recencyRank = coldBlocks.count - index
             coldBlocks[index].descriptor.relevanceScore =
-                Float(coldBlocks[index].descriptor.endToken)
-                + (coldBlocks[index].descriptor.isAnchor ? 10_000 : 0)
+                Self.staticRelevanceScore(
+                    coldBlocks[index].descriptor,
+                    policy: selectorPolicy,
+                    maxKeyNorm: maxKeyNorm
+                )
+        }
+    }
+
+    private func coldBlockDescriptorsScored(for query: MLXArray?) -> [TurboQuantColdBlockDescriptor] {
+        var descriptors = coldBlockDescriptors
+        guard let query,
+            let querySummary = Self.meanSummary(query),
+            !querySummary.isEmpty
+        else {
+            return descriptors
+        }
+        let queryNorm = Self.vectorNorm(querySummary)
+        guard queryNorm > 0 else { return descriptors }
+        for index in descriptors.indices {
+            let queryScore = Self.summarySimilarity(
+                lhs: querySummary,
+                rhs: descriptors[index].keyMeanSummary
+            )
+            descriptors[index].semanticScore = max(descriptors[index].semanticScore, queryScore)
+            descriptors[index].scoreUpperBoundEstimate =
+                descriptors[index].maxKeyNormEstimate * queryNorm
+            descriptors[index].relevanceScore += queryScore
+        }
+        return descriptors
+    }
+
+    private static func staticRelevanceScore(
+        _ descriptor: TurboQuantColdBlockDescriptor,
+        policy: TurboQuantColdSelectorPolicy,
+        maxKeyNorm: Float
+    ) -> Float {
+        let keyNormScore = maxKeyNorm > 0 ? descriptor.maxKeyNormEstimate / maxKeyNorm : 0
+        let recencyScore = descriptor.recencyRank > 0 ? 1 / Float(descriptor.recencyRank) : 0
+        return policy.semanticWeight * descriptor.semanticScore
+            + policy.lexicalWeight * descriptor.lexicalScore
+            + policy.keyNormWeight * keyNormScore
+            + policy.recencyWeight * recencyScore
+            + (descriptor.isAnchor ? 10_000 : 0)
+    }
+
+    private func applySelectorHintsToDescriptor(
+        _ descriptor: inout TurboQuantColdBlockDescriptor,
+        resetScores: Bool
+    ) {
+        if resetScores {
+            descriptor.lexicalScore = 0
+            descriptor.semanticScore = 0
+        }
+        for hint in selectorHints {
+            let overlapStart = max(descriptor.startToken, hint.startToken)
+            let overlapEnd = min(descriptor.endToken, hint.endToken)
+            guard overlapStart < overlapEnd, descriptor.logicalTokenCount > 0 else { continue }
+            let overlap = Float(overlapEnd - overlapStart) / Float(descriptor.logicalTokenCount)
+            descriptor.lexicalScore += hint.lexicalScore * overlap
+            descriptor.semanticScore += hint.semanticScore * overlap
+            descriptor.anchorFlags.formUnion(hint.anchorFlags)
         }
     }
 
@@ -827,8 +1559,15 @@ public final class HybridTurboQuantKVCache: BaseKVCache {
             hotTokens: rawHotLength,
             coldBlockCount: coldBlocks.count,
             selectedColdTokens: selection.selectedTokenCount,
+            selectedBudgetedColdTokens: selection.budgetedTokenCount,
+            anchorColdTokens: selection.anchorTokenCount,
+            anchorOverflowTokens: selection.anchorOverflowTokens,
             selectedColdBlocks: selection.selectedBlockIDs,
             selectorConfidence: selection.confidence,
+            selectorInitialConfidence: selection.initialConfidence,
+            selectorFinalConfidence: selection.finalConfidence,
+            selectorEscalation: selection.selectorEscalation,
+            selectorReasonFlags: selection.reasonFlags,
             coldBudgetTokens: selection.selectedTokenBudget,
             maxColdBudgetTokens: maxColdBudgetTokens,
             fallbackReason: fallbackReason,
@@ -922,6 +1661,82 @@ public final class HybridTurboQuantKVCache: BaseKVCache {
         ]
     }
 
+    private static func encodedMetadata<T: Encodable>(_ value: T) -> String {
+        guard let data = try? JSONEncoder().encode(value) else { return "" }
+        return data.base64EncodedString()
+    }
+
+    private static func decodedMetadata<T: Decodable>(
+        _ type: T.Type,
+        from value: String
+    ) throws -> T {
+        guard let data = Data(base64Encoded: value) else {
+            throw KVCacheError(message: "Invalid HybridTurboQuantKVCache metadata encoding")
+        }
+        return try JSONDecoder().decode(type, from: data)
+    }
+
+    private static func maxKeyNormEstimate(_ keys: MLXArray) -> Float {
+        let fp32 = keys.asType(.float32)
+        return sqrt((fp32 * fp32).sum(axis: -1)).max().item(Float.self)
+    }
+
+    private static func keyMeanSummary(_ keys: MLXArray) -> [Float] {
+        meanSummary(keys) ?? []
+    }
+
+    private static func meanSummary(_ array: MLXArray, maxDimensions: Int = 16) -> [Float]? {
+        guard array.ndim >= 4 else { return nil }
+        let batchCount = max(1, array.dim(0))
+        let headCount = max(1, array.dim(1))
+        let tokenCount = max(1, array.dim(2))
+        let headDimension = max(1, array.dim(3))
+        let summaryCount = min(maxDimensions, headDimension)
+        guard summaryCount > 0 else { return nil }
+        let values = array.asType(.float32).asArray(Float.self)
+        guard values.count >= batchCount * headCount * tokenCount * headDimension else {
+            return nil
+        }
+        let dimensions = (0 ..< summaryCount).map {
+            min(headDimension - 1, ($0 * headDimension) / summaryCount)
+        }
+        let denominator = Float(batchCount * headCount * tokenCount)
+        return dimensions.map { dimension in
+            var sum = Float(0)
+            for batch in 0 ..< batchCount {
+                for head in 0 ..< headCount {
+                    for token in 0 ..< tokenCount {
+                        let index =
+                            (((batch * headCount + head) * tokenCount + token) * headDimension)
+                            + dimension
+                        sum += values[index]
+                    }
+                }
+            }
+            return sum / max(denominator, 1)
+        }
+    }
+
+    private static func vectorNorm(_ values: [Float]) -> Float {
+        sqrt(values.reduce(Float(0)) { $0 + $1 * $1 })
+    }
+
+    private static func summarySimilarity(lhs: [Float], rhs: [Float]) -> Float {
+        let count = min(lhs.count, rhs.count)
+        guard count > 0 else { return 0 }
+        var dot = Float(0)
+        var leftNorm = Float(0)
+        var rightNorm = Float(0)
+        for index in 0 ..< count {
+            dot += lhs[index] * rhs[index]
+            leftNorm += lhs[index] * lhs[index]
+            rightNorm += rhs[index] * rhs[index]
+        }
+        let denominator = sqrt(leftNorm) * sqrt(rightNorm)
+        guard denominator > Float.leastNonzeroMagnitude else { return 0 }
+        return max(0, min(1, (dot / denominator + 1) * 0.5))
+    }
+
     private static func descriptor(from entry: String) throws -> TurboQuantColdBlockDescriptor {
         let values = entry.split(separator: ":").compactMap { Int($0) }
         guard values.count == 7 else {
@@ -1013,7 +1828,11 @@ func turboQuantHybridAttentionThrowing(
                     rawValues: hot.values,
                     coldSegments: coldSegments,
                     scale: scale,
-                    outputDType: queries.dtype
+                    outputDType: queries.dtype,
+                    sparseVThreshold: cache.sparseValuePolicy.resolvedThreshold(
+                        runtimeMode: .capacityTurboQuant,
+                        contextLength: cache.offset
+                    )
                 )
                 cache.recordFallbackReason(nil)
                 let state = AttentionKVState.hybridTurboQuant(

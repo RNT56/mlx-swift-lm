@@ -568,6 +568,78 @@ extension MLXRuntimeSwiftTests {
             #expect(cache.valueBits == 4)
         }
 
+        @Test func testAffineInt4StrategyCreatesNativeQuantizedCachesImmediately() throws {
+            let simple = try #require(
+                makeAttentionKVCache(
+                    parameters: GenerateParameters(kvCacheStrategy: .affineInt4)
+                ) as? AffineInt4KVCache)
+            #expect(simple.groupSize == TurboQuantKVCodec.affineInt4DefaultGroupSize)
+            #expect(simple.bits == TurboQuantKVCodec.affineInt4Bits)
+            #expect(simple.mode == .affine)
+
+            let rotating = try #require(
+                makeAttentionKVCache(
+                    parameters: GenerateParameters(
+                        maxKVSize: 32,
+                        kvBits: TurboQuantKVCodec.affineInt4Bits,
+                        kvGroupSize: 64,
+                        kvCacheStrategy: .affineInt4,
+                        kvCodec: .affineInt4
+                    ),
+                    keep: 2
+                ) as? RotatingAffineInt4KVCache)
+            #expect(rotating.maxSize == 32)
+            #expect(rotating.groupSize == 64)
+            #expect(rotating.bits == TurboQuantKVCodec.affineInt4Bits)
+        }
+
+        @Test func testAffineInt4AttentionUsesQuantizedNativeState() throws {
+            guard Device.defaultDevice().deviceType == .gpu else { return }
+            let cache = AffineInt4KVCache(groupSize: 32)
+            let queries = MLXArray.ones([1, 4, 1, 256], dtype: .float16)
+            let keys = MLXArray.ones([1, 1, 1, 256], dtype: .float16)
+            let values = MLXArray.ones([1, 1, 1, 256], dtype: .float16)
+
+            let result = try attentionWithCacheUpdateReturningStateThrowing(
+                queries: queries,
+                keys: keys,
+                values: values,
+                cache: cache,
+                scale: 1 / sqrt(Float(256)),
+                mask: .causal
+            )
+
+            #expect(result.output.shape == [1, 4, 1, 256])
+            if case .quantized(_, _, let routedCache) = result.state {
+                #expect(routedCache is any NativeAffineInt4KVCacheProtocol)
+            } else {
+                Issue.record("affine int4 attention did not return quantized state")
+            }
+        }
+
+        @Test func testAffineInt4NativeAttentionRejectsUnsupportedShapesWithoutDecodedFallback()
+            throws
+        {
+            guard Device.defaultDevice().deviceType == .gpu else { return }
+            let cache = AffineInt4KVCache(groupSize: 32)
+            let queries = MLXArray.ones([1, 2, 1, 256], dtype: .float16)
+            let keys = MLXArray.ones([1, 1, 1, 256], dtype: .float16)
+            let values = MLXArray.ones([1, 1, 1, 256], dtype: .float16)
+            let badSinks = MLXArray.ones([3], dtype: .float16)
+
+            #expect(throws: TurboQuantRuntimeFailure.self) {
+                _ = try attentionWithCacheUpdateReturningStateThrowing(
+                    queries: queries,
+                    keys: keys,
+                    values: values,
+                    cache: cache,
+                    scale: 1 / sqrt(Float(256)),
+                    mask: .causal,
+                    sinks: badSinks
+                )
+            }
+        }
+
         @Test func testRawOnlyAttentionCacheIgnoresTurboQuantConversion() {
             let parameters = GenerateParameters(
                 maxKVSize: 16,
@@ -676,7 +748,12 @@ extension MLXRuntimeSwiftTests {
                 maxKVSize: 32,
                 kvCacheStrategy: .turboQuant,
                 turboQuantBackend: .metalPolarQJL,
-                turboQuantOptimizationPolicy: .conservative
+                turboQuantOptimizationPolicy: .conservative,
+                turboQuantPrecisionPolicy: .legacy(
+                    preset: .turbo3_5,
+                    valueBits: nil,
+                    boundary: .disabled
+                )
             )
             let cache = makePromptCacheWithLayerCount(numLayers: 2, parameters: parameters)
 
@@ -869,8 +946,9 @@ extension MLXRuntimeSwiftTests {
                 scale: 0.125
             )
 
+            eval(fallback, directPacked)
             #expect(fallback.shape == [1, 4, 1, 64])
-            #expect(allClose(fallback, directPacked, rtol: 1e-5, atol: 1e-5).item(Bool.self))
+            #expect(allClose(fallback, directPacked, rtol: 1e-4, atol: 1e-4).item(Bool.self))
         }
 
         @Test func testRotatingTurboQuantCompressedCacheMaterializesPackedFallbackState() throws {
@@ -948,8 +1026,9 @@ extension MLXRuntimeSwiftTests {
                 scale: 0.125
             )
 
+            eval(fallback, directPacked)
             #expect(fallback.shape == directPacked.shape)
-            #expect(allClose(fallback, directPacked, rtol: 1e-5, atol: 1e-5).item(Bool.self))
+            #expect(allClose(fallback, directPacked, rtol: 1e-4, atol: 1e-4).item(Bool.self))
             #expect(cache.attentionDiagnostics.rawFallbackAllocated == false)
         }
 

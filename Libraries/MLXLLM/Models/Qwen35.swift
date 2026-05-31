@@ -685,11 +685,15 @@ public class Qwen35TextModel: Module, LLMModel, KVCacheDimensionProvider, Throwi
     }
 
     public func newCache(parameters: GenerateParameters?) -> [KVCache] {
-        return model.layers.map { layer in
+        return model.layers.enumerated().map { index, layer in
             if layer.isLinear {
                 return MambaCache()
             }
-            return makeAttentionKVCache(parameters: parameters)
+            return makeAttentionKVCache(
+                parameters: parameters,
+                layerIndex: index,
+                layerCount: model.layers.count
+            )
         }
     }
 
@@ -880,7 +884,15 @@ extension Qwen35TextModel: MTPLanguageModel {
     }
 
     public func makeMTPCaches(parameters: GenerateParameters?) -> [[KVCache]] {
-        mtp.map { _ in [makeAttentionKVCache(parameters: parameters)] }
+        mtp.map { _ in
+            [
+                makeAttentionKVCache(
+                    parameters: parameters,
+                    layerIndex: 0,
+                    layerCount: 1
+                )
+            ]
+        }
     }
 }
 

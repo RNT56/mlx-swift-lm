@@ -445,8 +445,19 @@ public class Gemma3TextModel: Module, LLMModel, ThrowingLanguageModel {
             let isGlobalLayer = (i % slidingWindowPattern == slidingWindowPattern - 1)
 
             if isGlobalLayer {
-                if parameters?.kvCacheStrategy == .turboQuant {
-                    caches.append(makeAttentionKVCache(parameters: parameters))
+                // Use the same gate makeAttentionKVCache uses internally so .hybridTurboQuant
+                // (and .turboQuant) get a compressed cache on the global — i.e. memory-critical,
+                // non-sliding — layers. The prior `== .turboQuant` exact check silently routed
+                // .hybridTurboQuant to an uncompressed StandardKVCache here, defeating TurboQuant
+                // on exactly the layers that dominate long-context KV memory. .adaptiveTurboQuant
+                // and the no-strategy case correctly fall through (they start raw).
+                if parameters?.kvCacheStrategy.createsTurboQuantCacheImmediately == true {
+                    caches.append(
+                        makeAttentionKVCache(
+                            parameters: parameters,
+                            layerIndex: i,
+                            layerCount: config.hiddenLayers
+                        ))
                 } else {
                     // For global layers, use standard cache but with reasonable step size for long sequences
                     let cache = StandardKVCache()
@@ -456,7 +467,8 @@ public class Gemma3TextModel: Module, LLMModel, ThrowingLanguageModel {
             } else {
                 caches.append(
                     makeAttentionKVCache(
-                        parameters: parameters, maxKVSize: slidingWindow, keep: 0)
+                        parameters: parameters, maxKVSize: slidingWindow, keep: 0,
+                        layerIndex: i, layerCount: config.hiddenLayers)
                 )
             }
         }

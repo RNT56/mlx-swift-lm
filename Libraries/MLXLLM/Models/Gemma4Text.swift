@@ -734,11 +734,17 @@ public class Gemma4TextModel: Module, LLMModel, KVCacheDimensionProvider, Throwi
         var caches = [any KVCache]()
         for i in 0 ..< firstKvShared {
             if config.layerTypes[i] == "full_attention" {
-                caches.append(makeAttentionKVCache(parameters: parameters))
+                caches.append(
+                    makeAttentionKVCache(
+                        parameters: parameters,
+                        layerIndex: i,
+                        layerCount: firstKvShared
+                    ))
             } else {
                 caches.append(
                     makeAttentionKVCache(
-                        parameters: parameters, maxKVSize: config.slidingWindow, keep: 0))
+                        parameters: parameters, maxKVSize: config.slidingWindow, keep: 0,
+                        layerIndex: i, layerCount: firstKvShared))
             }
         }
         return caches

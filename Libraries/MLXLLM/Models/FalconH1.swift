@@ -697,8 +697,12 @@ public class FalconH1Model: Module, LLMModel, KVCacheDimensionProvider {
     }
 
     public func makeCache(parameters: GenerateParameters?) -> [CacheList] {
-        return (0 ..< configuration.numHiddenLayers).map { _ in
-            CacheList(MambaCache(), makeAttentionKVCache(parameters: parameters))
+        return (0 ..< configuration.numHiddenLayers).map { layerIndex in
+            CacheList(
+                MambaCache(),
+                makeAttentionKVCache(
+                    parameters: parameters, layerIndex: layerIndex,
+                    layerCount: configuration.numHiddenLayers))
         }
     }
 

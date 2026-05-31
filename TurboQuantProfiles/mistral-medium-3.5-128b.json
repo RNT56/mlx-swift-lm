@@ -1,5 +1,5 @@
 {
-  "schema_version": 2,
+  "schema_version": 3,
   "id": "mistral-medium-3.5-128b",
   "exact_model_ids": [],
   "model_patterns": [

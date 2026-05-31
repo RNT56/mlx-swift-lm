@@ -267,8 +267,10 @@ public class BaichuanM1Model: Module, LLMModel, KVCacheDimensionProvider {
             let kvCache: KVCache =
                 isSWA
                 ? makeAttentionKVCache(
-                    parameters: parameters, maxKVSize: configuration.slidingWindow, keep: 0)
-                : makeAttentionKVCache(parameters: parameters)
+                    parameters: parameters, maxKVSize: configuration.slidingWindow, keep: 0,
+                    layerIndex: i, layerCount: model.layers.count)
+                : makeAttentionKVCache(
+                    parameters: parameters, layerIndex: i, layerCount: model.layers.count)
             return CacheList(convCache, kvCache)
         }
     }

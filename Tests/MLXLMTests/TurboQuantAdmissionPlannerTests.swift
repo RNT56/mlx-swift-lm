@@ -28,6 +28,8 @@ extension MLXRuntimeSwiftTests {
             #expect(admission.downgradeReasons.isEmpty)
             #expect(admission.memoryPlan.runtimeZones.compressedKVBytes > 0)
             #expect(!admission.memoryPlan.usesRawShadow)
+            #expect(admission.memoryPlan.rawBoundaryLayerCount == 0)
+            #expect(admission.memoryPlan.rawBoundaryKVBytes == 0)
             #expect(admission.memoryPlan.runtimeZones.rawShadowBytes == 0)
             #expect(admission.userMessage.contains("8192 tokens"))
         }
@@ -47,7 +49,8 @@ extension MLXRuntimeSwiftTests {
             #expect(admission.admitted)
             #expect(admission.selectedMode == .fastest)
             #expect(!admission.memoryPlan.usesRawShadow)
-            #expect(admission.memoryPlan.runtimeZones.rawShadowBytes == 0)
+            #expect(admission.memoryPlan.runtimeZones.rawShadowBytes
+                == admission.memoryPlan.rawBoundaryKVBytes)
         }
 
         @Test func testLowMemoryReducesAdmittedContextBeforeGeneration() {
@@ -142,6 +145,11 @@ extension MLXRuntimeSwiftTests {
                 userMode: .balanced,
                 fallbackPolicy: .fatalOnFailure,
                 preset: .turbo3_5,
+                precisionPolicy: .legacy(
+                    preset: .turbo3_5,
+                    valueBits: nil,
+                    boundary: .disabled
+                ),
                 memorySample: TurboQuantRuntimeMemorySample(
                     availableAppMemoryBytes: available,
                     modelResidentBytes: Self.gib(2),
@@ -162,6 +170,100 @@ extension MLXRuntimeSwiftTests {
             )
             #expect(admission.memoryPlan.valueBits == 2)
             #expect(admission.memoryPlan.preset == .turbo2_5)
+        }
+
+        @Test func testValueBitsDowngradeHappensBeforeKeyPresetDowngrade() {
+            let planner = Self.planner()
+            let profile = Self.profile(weightGiB: 2, layers: 24)
+
+            let admission = planner.admit(
+                profile: profile,
+                requestedContextLength: 65_536,
+                userMode: .balanced,
+                fallbackPolicy: .fatalOnFailure,
+                preset: .turbo8,
+                valueBits: 8,
+                precisionPolicy: .legacy(
+                    preset: .turbo8,
+                    valueBits: 8,
+                    boundary: .disabled
+                ),
+                memorySample: TurboQuantRuntimeMemorySample(
+                    availableAppMemoryBytes: Self.gib(6),
+                    modelResidentBytes: Self.gib(2),
+                    tokenizerBytes: 0,
+                    promptBytes: 0,
+                    uiReserveBytes: 0,
+                    thermalState: .nominal
+                )
+            )
+
+            #expect(admission.admitted)
+            #expect(admission.memoryPlan.preset == .turbo8)
+            #expect(admission.memoryPlan.valueBits == 2)
+            #expect(
+                admission.downgradeReasons.contains {
+                    $0.reason == .loweredValueBits
+                }
+            )
+            #expect(
+                !admission.downgradeReasons.contains {
+                    $0.reason == .movedBalancedToMaxContext
+                }
+            )
+        }
+
+        @Test func testAdmissionAccountsForRawBoundaryLayerMemory() {
+            let planner = Self.planner()
+            let profile = Self.profile(weightGiB: 2, layers: 8)
+            let contextLength = 4096
+            let sample = Self.sample(availableGiB: 16, modelGiB: 2)
+
+            let boundary = planner.admit(
+                profile: profile,
+                requestedContextLength: contextLength,
+                userMode: .maxContext,
+                fallbackPolicy: .fatalOnFailure,
+                preset: .turbo3_5,
+                precisionPolicy: .legacy(
+                    preset: .turbo3_5,
+                    valueBits: nil,
+                    boundary: .profileDefault
+                ),
+                memorySample: sample
+            )
+            let disabled = planner.admit(
+                profile: profile,
+                requestedContextLength: contextLength,
+                userMode: .maxContext,
+                fallbackPolicy: .fatalOnFailure,
+                preset: .turbo3_5,
+                precisionPolicy: .legacy(
+                    preset: .turbo3_5,
+                    valueBits: nil,
+                    boundary: .disabled
+                ),
+                memorySample: sample
+            )
+
+            let rawBytesPerTokenPerLayer =
+                boundary.memoryPlan.rawBytesPerToken / max(1, profile.layerCount)
+            #expect(boundary.admitted)
+            #expect(disabled.admitted)
+            #expect(boundary.memoryPlan.rawBoundaryLayerCount == 4)
+            #expect(
+                boundary.memoryPlan.rawBoundaryKVBytes
+                    == rawBytesPerTokenPerLayer * 4 * contextLength
+            )
+            #expect(
+                boundary.memoryPlan.runtimeZones.rawShadowBytes
+                    == boundary.memoryPlan.rawBoundaryKVBytes
+            )
+            #expect(disabled.memoryPlan.rawBoundaryKVBytes == 0)
+            #expect(
+                boundary.memoryPlan.runtimeZones.compressedKVBytes
+                    < disabled.memoryPlan.runtimeZones.compressedKVBytes
+            )
         }
 
         @Test func testRefusesWhenModelCannotFitMinimumPlan() {
@@ -232,6 +334,7 @@ extension MLXRuntimeSwiftTests {
             )
             let parameters = GenerateParameters(
                 kvCacheStrategy: .turboQuant,
+                turboQuantRuntimeMode: .capacityTurboQuant,
                 turboQuantAdmission: admission
             )
 
@@ -262,6 +365,7 @@ extension MLXRuntimeSwiftTests {
             let resolved = try parameters.resolvedForTurboQuantRuntime(layerCount: 32)
 
             #expect(resolved.kvCacheStrategy == .mlxAffine)
+            #expect(resolved.turboQuantResolvedRuntimeMode == .rawPreferred)
             #expect(resolved.kvBits == nil)
             #expect(resolved.turboQuantPerCacheResidentBudgetBytes == nil)
         }
@@ -295,11 +399,13 @@ extension MLXRuntimeSwiftTests {
             let resolved = try parameters.resolvedForTurboQuantRuntime(layerCount: 32)
 
             #expect(resolved.kvCacheStrategy == .turboQuant)
+            #expect(resolved.turboQuantResolvedRuntimeMode == .capacityTurboQuant)
+            #expect(resolved.turboQuantRuntimeFallbackReason?.contains("decoded active KV") == true)
             #expect(resolved.quantizedKVStart == 0)
             #expect((resolved.turboQuantPerCacheResidentBudgetBytes ?? 0) > 0)
         }
 
-        @Test func testAdaptiveTurboQuantKeepsRawWindowBeforeLongContextConversion() throws {
+        @Test func testAutoTurboQuantUsesCapacityWhenThroughputResidencyDoesNotFit() throws {
             let planner = Self.planner()
             let admission = planner.admit(
                 profile: Self.profile(weightGiB: 2, layers: 32),
@@ -318,8 +424,9 @@ extension MLXRuntimeSwiftTests {
 
             let resolved = try parameters.resolvedForTurboQuantRuntime(layerCount: 32)
 
-            #expect(resolved.kvCacheStrategy == .adaptiveTurboQuant)
-            #expect(resolved.quantizedKVStart == 16_384)
+            #expect(resolved.kvCacheStrategy == .turboQuant)
+            #expect(resolved.turboQuantResolvedRuntimeMode == .capacityTurboQuant)
+            #expect(resolved.quantizedKVStart == 0)
             #expect(resolved.maxKVSize == admission.admittedContextLength)
         }
 
@@ -344,7 +451,90 @@ extension MLXRuntimeSwiftTests {
             let resolved = try parameters.resolvedForTurboQuantRuntime(layerCount: 32)
 
             #expect(resolved.kvCacheStrategy == .turboQuant)
+            #expect(resolved.turboQuantResolvedRuntimeMode == .capacityTurboQuant)
             #expect(resolved.quantizedKVStart == 0)
+        }
+
+        @Test func testAutoTurboQuantUsesThroughputWhenDecodedBackingFits() throws {
+            let planner = Self.planner()
+            let admission = planner.admit(
+                profile: Self.profile(weightGiB: 2, layers: 24),
+                requestedContextLength: 32_768,
+                userMode: .balanced,
+                fallbackPolicy: .compressedDecodeAllowed,
+                preset: .turbo8,
+                valueBits: 4,
+                memorySample: Self.sample(availableGiB: 16, modelGiB: 2)
+            )
+            let parameters = GenerateParameters(
+                kvCacheStrategy: .adaptiveTurboQuant,
+                turboQuantRuntimeMode: .auto,
+                turboQuantPrecisionPolicy: .qwenQ4Default,
+                turboQuantAdmission: admission,
+                turboQuantRawSDPAThreshold: 16_384
+            )
+
+            let resolved = try parameters.resolvedForTurboQuantRuntime(layerCount: 24)
+
+            #expect(resolved.kvCacheStrategy == .turboQuant)
+            #expect(resolved.turboQuantResolvedRuntimeMode == .throughputTurboQuant)
+            #expect(resolved.turboQuantResolvedPrecisionPolicy == .qwenQ4Default)
+            #expect(resolved.turboQuantPreset == .turbo8)
+            #expect(resolved.turboQuantValueBits == 4)
+            #expect((resolved.turboQuantAdmission?.memoryPlan.decodedActiveKVBytes ?? 0) > 0)
+        }
+
+        @Test func testThroughputModeRequiredRejectsWhenDecodedBackingDoesNotFit() {
+            let admission = Self.planner().admit(
+                profile: Self.profile(weightGiB: 2, layers: 24),
+                requestedContextLength: 65_536,
+                userMode: .balanced,
+                fallbackPolicy: .compressedDecodeAllowed,
+                preset: .turbo8,
+                valueBits: 4,
+                memorySample: Self.sample(availableGiB: 8, modelGiB: 2)
+            )
+            let parameters = GenerateParameters(
+                kvCacheStrategy: .turboQuant,
+                turboQuantRuntimeMode: .throughputTurboQuant,
+                turboQuantAdmissionPolicy: .required,
+                turboQuantAdmission: admission
+            )
+
+            #expect(throws: TurboQuantGenerationError.self) {
+                _ = try parameters.resolvedForTurboQuantRuntime(layerCount: 24)
+            }
+        }
+
+        @Test func testCacheFactoryRoutesThroughputAndCapacityCaches() {
+            let throughput = makeAttentionKVCache(
+                parameters: GenerateParameters(
+                    maxKVSize: 128,
+                    kvCacheStrategy: .turboQuant,
+                    turboQuantRuntimeMode: .auto,
+                    turboQuantResolvedRuntimeMode: .throughputTurboQuant,
+                    turboQuantPrecisionPolicy: .qwenQ4Default
+                )
+            )
+            let capacity = makeAttentionKVCache(
+                parameters: GenerateParameters(
+                    maxKVSize: 128,
+                    kvCacheStrategy: .turboQuant,
+                    turboQuantRuntimeMode: .capacityTurboQuant,
+                    turboQuantResolvedRuntimeMode: .capacityTurboQuant,
+                    turboQuantPrecisionPolicy: .qwenQ4Default
+                )
+            )
+            let raw = makeAttentionKVCache(
+                parameters: GenerateParameters(
+                    maxKVSize: 128,
+                    kvCacheStrategy: .mlxAffine
+                )
+            )
+
+            #expect(throughput is ThroughputTurboQuantKVCache)
+            #expect(capacity is RotatingTurboQuantKVCache)
+            #expect(raw is RotatingKVCache)
         }
 
         private static func planner() -> TurboQuantAdmissionPlanner {

@@ -62,7 +62,37 @@ public typealias TurboQuantRuntimeSelfTestStatus = MLX.TurboQuantRuntimeSelfTest
 let defaultTurboQuantSeed: UInt64 = 0x9E37_79B9_7F4A_7C15
 private let turboQuantValueSeedSalt: UInt64 = 0xD1B5_4A32_D192_ED03
 
+public enum TurboQuantKVCodec: String, Codable, Sendable, CaseIterable {
+    case polarQJL = "polar_qjl"
+    case affineInt4 = "affine_int4"
+
+    public static let affineInt4Bits = 4
+    public static let affineInt4DefaultGroupSize = 32
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.singleValueContainer()
+        let value = try container.decode(String.self)
+        switch value {
+        case Self.polarQJL.rawValue, "polarQJL", "polar-qjl":
+            self = .polarQJL
+        case Self.affineInt4.rawValue, "affineInt4", "affine-int4":
+            self = .affineInt4
+        default:
+            throw DecodingError.dataCorruptedError(
+                in: container,
+                debugDescription: "Unsupported KV codec '\(value)'"
+            )
+        }
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.singleValueContainer()
+        try container.encode(rawValue)
+    }
+}
+
 public enum TurboQuantFallbackPath: String, Equatable, Codable, Sendable, CaseIterable {
+    case nativeMLXCompressed
     case onlineFusedCompressed
     case tiledOnlineFused
     case twoStageQKAV
@@ -111,6 +141,7 @@ public struct TurboQuantRuntimeCacheFootprint: Equatable, Codable, Sendable {
 public enum KVCacheStrategy: String, Codable, Sendable, CaseIterable {
     case none
     case mlxAffine
+    case affineInt4
     case adaptiveTurboQuant
     case hybridTurboQuant
     case turboQuant
@@ -124,6 +155,10 @@ extension KVCacheStrategy {
     public var createsTurboQuantCacheImmediately: Bool {
         self == .hybridTurboQuant || self == .turboQuant
     }
+
+    public var createsAffineInt4CacheImmediately: Bool {
+        self == .affineInt4
+    }
 }
 
 public enum TurboQuantOptimizationPolicy: String, Codable, Sendable, CaseIterable {
@@ -136,6 +171,10 @@ public enum TurboQuantOptimizationPolicy: String, Codable, Sendable, CaseIterabl
 public struct TurboQuantAttentionDiagnostics: Equatable, Codable, Sendable {
     public var metalAttentionAvailable: Bool
     public var activeAttentionPath: TurboQuantAttentionPath
+    public var nativeBackend: String? = nil
+    public var nativeBackendVersion: Int? = nil
+    public var nativeFallbackReason: String? = nil
+    public var nativeSparseVSkipRatio: Double? = nil
     public var selectedKernelProfile: TurboQuantKernelProfile
     public var selfTestStatus: TurboQuantRuntimeSelfTestStatus
     public var selfTestFailureReason: String?
@@ -145,6 +184,11 @@ public struct TurboQuantAttentionDiagnostics: Equatable, Codable, Sendable {
     public var rawFallbackAllocated: Bool
     public var cacheLifecycle: TurboQuantCacheLifecycle = .empty
     public var lastFallback: TurboQuantFallbackResult?
+    public var sparseVEnabled: Bool = false
+    public var sparseVThreshold: Float?
+    public var sparseVSkipRatio: Double?
+    public var boundaryProtectedLayerCount: Int = 0
+    public var boundaryProtectionReason: String?
 }
 
 public struct TurboQuantKVCacheDiagnostics: Equatable, Codable, Sendable {
@@ -155,6 +199,10 @@ public struct TurboQuantKVCacheDiagnostics: Equatable, Codable, Sendable {
     public var metalCodecAvailable: Bool
     public var metalAttentionAvailable: Bool
     public var activeAttentionPath: TurboQuantAttentionPath
+    public var nativeBackend: String? = nil
+    public var nativeBackendVersion: Int? = nil
+    public var nativeFallbackReason: String? = nil
+    public var nativeSparseVSkipRatio: Double? = nil
     public var selectedKernelProfile: TurboQuantKernelProfile
     public var selfTestStatus: TurboQuantRuntimeSelfTestStatus
     public var selfTestFailureReason: String?
@@ -168,6 +216,11 @@ public struct TurboQuantKVCacheDiagnostics: Equatable, Codable, Sendable {
     public var cacheLifecycle: TurboQuantCacheLifecycle = .empty
     public var lastFallback: TurboQuantFallbackResult?
     public var footprint: TurboQuantRuntimeCacheFootprint?
+    public var sparseVEnabled: Bool = false
+    public var sparseVThreshold: Float?
+    public var sparseVSkipRatio: Double?
+    public var boundaryProtectedLayerCount: Int = 0
+    public var boundaryProtectionReason: String?
 }
 
 public protocol TurboQuantCompressedKVCacheProtocol: KVCache, AnyObject {
@@ -181,6 +234,8 @@ public protocol TurboQuantCompressedKVCacheProtocol: KVCache, AnyObject {
     var cacheLifecycle: TurboQuantCacheLifecycle { get }
     var fallbackResults: [TurboQuantFallbackResult] { get }
     var cacheFootprint: TurboQuantRuntimeCacheFootprint { get }
+    var sparseValuePolicy: TurboQuantSparseValuePolicy { get }
+    var resolvedRuntimeMode: TurboQuantRuntimeMode { get }
 
     func runtimeSnapshot() -> TurboQuantCacheRuntimeSnapshot
     func exportSnapshot(
@@ -389,6 +444,15 @@ private func turboQuantMetaInt(_ meta: [String], key: String) -> Int? {
 
 private func turboQuantSupportsAttentionDimension(_ dimension: Int) -> Bool {
     dimension > 0 && dimension <= 512
+}
+
+private func turboQuantNativeSupportsMask(_ mask: MLXFast.ScaledDotProductAttentionMaskMode) -> Bool {
+    switch mask {
+    case .none, .causal:
+        true
+    case .array, .arrays:
+        false
+    }
 }
 
 private func turboQuantSupportsPackedFallback(keys: MLXArray, values: MLXArray, groupSize: Int)
@@ -689,7 +753,9 @@ private func turboQuantValidateSnapshotManifest(
     expectedMode: QuantizationMode,
     arrays: [String: MLXArray]
 ) throws -> [MLXArray] {
-    guard manifest.schemaVersion == TurboQuantKVSnapshotManifest.currentSchemaVersion else {
+    guard manifest.schemaVersion >= 1,
+        manifest.schemaVersion <= TurboQuantKVSnapshotManifest.currentSchemaVersion
+    else {
         throw TurboQuantRuntimeFailure.cacheLayoutInvalid(
             "Unsupported TurboQuant snapshot schema \(manifest.schemaVersion)"
         )
@@ -960,6 +1026,12 @@ public final class TurboQuantKVCache: QuantizedKVCache, TurboQuantCompressedKVCa
     public let fallbackPolicy: TurboQuantFallbackPolicy
     public let seed: UInt64
     public let valueBits: Int
+    public let precisionPolicy: TurboQuantKVPrecisionPolicy
+    public let requestedRuntimeMode: TurboQuantRuntimeMode
+    public let resolvedRuntimeMode: TurboQuantRuntimeMode
+    public let sparseValuePolicy: TurboQuantSparseValuePolicy
+    public let boundaryProtectedLayerCount: Int
+    public let boundaryProtectionReason: String?
 
     public init(
         preset: TurboQuantPreset = .turbo3_5,
@@ -970,19 +1042,36 @@ public final class TurboQuantKVCache: QuantizedKVCache, TurboQuantCompressedKVCa
         fallbackPolicy: TurboQuantFallbackPolicy = .compressedDecodeAllowed,
         seed: UInt64 = 0x9E37_79B9_7F4A_7C15,
         valueBits: Int? = nil,
+        precisionPolicy: TurboQuantKVPrecisionPolicy? = nil,
+        requestedRuntimeMode: TurboQuantRuntimeMode = .auto,
+        resolvedRuntimeMode: TurboQuantRuntimeMode = .capacityTurboQuant,
+        sparseValuePolicy: TurboQuantSparseValuePolicy = .off,
+        boundaryProtectedLayerCount: Int = 0,
+        boundaryProtectionReason: String? = nil,
         residentBudgetBytes: Int? = nil
     ) {
-        self.preset = preset
+        let resolvedPrecisionPolicy =
+            precisionPolicy ?? TurboQuantKVPrecisionPolicy.legacy(preset: preset, valueBits: valueBits)
+        self.preset = resolvedPrecisionPolicy.compressedKeyPreset
         self.requestedBackend = backend
         self.optimizationPolicy = optimizationPolicy
         self.fallbackPolicy = fallbackPolicy
         self.seed = seed
-        self.valueBits = valueBits ?? preset.defaultValueBits
+        self.valueBits =
+            resolvedPrecisionPolicy.resolvedValueBits
+            ?? valueBits
+            ?? resolvedPrecisionPolicy.compressedKeyPreset.defaultValueBits
+        self.precisionPolicy = resolvedPrecisionPolicy
+        self.requestedRuntimeMode = requestedRuntimeMode
+        self.resolvedRuntimeMode = resolvedRuntimeMode
+        self.sparseValuePolicy = sparseValuePolicy
+        self.boundaryProtectedLayerCount = max(0, boundaryProtectedLayerCount)
+        self.boundaryProtectionReason = boundaryProtectionReason
         self.residentBudgetBytes = residentBudgetBytes
         let availability = TurboQuantKernelAvailability.current
         self.activeBackend = availability.runtimeBackend(for: backend)
         self.backendFallbackReason = availability.fallbackReason(for: backend)
-        super.init(groupSize: groupSize, bits: preset.effectiveBits, mode: mode)
+        super.init(groupSize: groupSize, bits: resolvedPrecisionPolicy.compressedKeyPreset.effectiveBits, mode: mode)
     }
 
     public override var metaState: [String] {
@@ -1239,7 +1328,22 @@ public final class TurboQuantKVCache: QuantizedKVCache, TurboQuantCompressedKVCa
             rawShadowAllocated: false,
             packedFallbackAllocated: turboQuantArrayBytes(super.state) > 0,
             lastAttentionPath: lastAttentionPath.rawValue,
-            lastFailure: cacheLifecycle.turboQuantRuntimeFailureReason ?? lastUnsupportedShape
+            lastFailure: cacheLifecycle.turboQuantRuntimeFailureReason ?? lastUnsupportedShape,
+            kvCodec: .polarQJL,
+            quantizationMode: mode.rawValue,
+            keyBits: bits,
+            groupSize: groupSize,
+            selectedPath: lastAttentionPath.rawValue,
+            fallbackReason: cacheLifecycle.turboQuantRuntimeFailureReason ?? lastUnsupportedShape,
+            requestedRuntimeMode: requestedRuntimeMode,
+            resolvedRuntimeMode: resolvedRuntimeMode,
+            precisionPolicy: precisionPolicy,
+            sparseValuePolicy: sparseValuePolicy,
+            boundaryPolicy: precisionPolicy.boundary,
+            boundaryProtectedLayerCount: boundaryProtectedLayerCount,
+            boundaryProtectionReason: boundaryProtectionReason,
+            runtimeFallbackReason: backendFallbackReason,
+            activeCacheAllocated: false
         )
     }
 
@@ -1281,9 +1385,12 @@ public final class TurboQuantKVCache: QuantizedKVCache, TurboQuantCompressedKVCa
             encryptionKeyID: encryptionKeyID,
             createdAt: createdAt,
             cacheKind: "TurboQuantKVCache",
+            kvCodec: .polarQJL,
             preset: preset.rawValue,
             requestedBackend: requestedBackend.rawValue,
             activeBackend: activeBackend.rawValue,
+            quantizationMode: mode.rawValue,
+            keyBits: bits,
             groupSize: groupSize,
             valueBits: valueBits,
             seed: seed,
@@ -1294,6 +1401,16 @@ public final class TurboQuantKVCache: QuantizedKVCache, TurboQuantCompressedKVCa
             kvHeadCount: compressedKeys.layout.kvHeadCount,
             keyHeadDimension: compressedKeys.layout.headDimension,
             valueHeadDimension: compressedValues.layout.headDimension,
+            requestedRuntimeMode: requestedRuntimeMode,
+            resolvedRuntimeMode: resolvedRuntimeMode,
+            precisionPolicy: precisionPolicy,
+            sparseValuePolicy: sparseValuePolicy,
+            boundaryPolicy: precisionPolicy.boundary,
+            boundaryProtectedLayerCount: boundaryProtectedLayerCount,
+            boundaryProtectionReason: boundaryProtectionReason,
+            runtimeFallbackReason: backendFallbackReason,
+            selectedPath: lastAttentionPath.rawValue,
+            fallbackReason: backendFallbackReason,
             arrays: descriptors
         )
         return TurboQuantKVSnapshotPayload(manifest: manifest, compressedArrays: arrays)
@@ -1543,6 +1660,10 @@ public final class TurboQuantKVCache: QuantizedKVCache, TurboQuantCompressedKVCa
         return TurboQuantAttentionDiagnostics(
             metalAttentionAvailable: availability.supportsMetalPolarQJLAttention,
             activeAttentionPath: lastAttentionPath,
+            nativeBackend: availability.attentionCapabilities.nativeCompressedAttention == true
+                ? "nativeMLX" : nil,
+            nativeBackendVersion: availability.attentionCapabilities.nativeBackendVersion,
+            nativeFallbackReason: availability.attentionCapabilities.nativeFallbackReason,
             selectedKernelProfile: availability.selectedKernelProfile,
             selfTestStatus: availability.selfTestStatus,
             selfTestFailureReason: availability.selfTestFailureReason,
@@ -1551,7 +1672,17 @@ public final class TurboQuantKVCache: QuantizedKVCache, TurboQuantCompressedKVCa
             lastUnsupportedShape: lastUnsupportedShape,
             rawFallbackAllocated: false,
             cacheLifecycle: cacheLifecycle,
-            lastFallback: fallbackResults.last
+            lastFallback: fallbackResults.last,
+            sparseVEnabled: sparseValuePolicy.resolvedThreshold(
+                runtimeMode: resolvedRuntimeMode,
+                contextLength: compressedKeys?.layout.logicalLength ?? offset
+            ) != nil,
+            sparseVThreshold: sparseValuePolicy.resolvedThreshold(
+                runtimeMode: resolvedRuntimeMode,
+                contextLength: compressedKeys?.layout.logicalLength ?? offset
+            ),
+            boundaryProtectedLayerCount: boundaryProtectedLayerCount,
+            boundaryProtectionReason: boundaryProtectionReason
         )
     }
 
@@ -1565,6 +1696,10 @@ public final class TurboQuantKVCache: QuantizedKVCache, TurboQuantCompressedKVCa
             metalCodecAvailable: availability.supportsMetalPolarQJLCodec,
             metalAttentionAvailable: availability.supportsMetalPolarQJLAttention,
             activeAttentionPath: lastAttentionPath,
+            nativeBackend: availability.attentionCapabilities.nativeCompressedAttention == true
+                ? "nativeMLX" : nil,
+            nativeBackendVersion: availability.attentionCapabilities.nativeBackendVersion,
+            nativeFallbackReason: availability.attentionCapabilities.nativeFallbackReason,
             selectedKernelProfile: availability.selectedKernelProfile,
             selfTestStatus: availability.selfTestStatus,
             selfTestFailureReason: availability.selfTestFailureReason,
@@ -1577,7 +1712,17 @@ public final class TurboQuantKVCache: QuantizedKVCache, TurboQuantCompressedKVCa
             rawFallbackAllocated: false,
             cacheLifecycle: cacheLifecycle,
             lastFallback: fallbackResults.last,
-            footprint: cacheFootprint
+            footprint: cacheFootprint,
+            sparseVEnabled: sparseValuePolicy.resolvedThreshold(
+                runtimeMode: resolvedRuntimeMode,
+                contextLength: compressedKeys?.layout.logicalLength ?? offset
+            ) != nil,
+            sparseVThreshold: sparseValuePolicy.resolvedThreshold(
+                runtimeMode: resolvedRuntimeMode,
+                contextLength: compressedKeys?.layout.logicalLength ?? offset
+            ),
+            boundaryProtectedLayerCount: boundaryProtectedLayerCount,
+            boundaryProtectionReason: boundaryProtectionReason
         )
     }
 
@@ -1587,8 +1732,11 @@ public final class TurboQuantKVCache: QuantizedKVCache, TurboQuantCompressedKVCa
         values: MLXArray,
         mask: MLXFast.ScaledDotProductAttentionMaskMode
     ) -> Bool {
+        let availability = TurboQuantKernelAvailability.current
+        let nativeAttentionAvailable =
+            availability.attentionCapabilities.nativeCompressedAttention == true
         guard activeBackend == .metalPolarQJL,
-            TurboQuantKernelAvailability.current.supportsMetalPolarQJLAttention
+            availability.supportsMetalPolarQJLAttention || nativeAttentionAvailable
         else {
             lastUnsupportedShape = "metal backend unavailable"
             return false
@@ -1627,6 +1775,8 @@ public final class TurboQuantKVCache: QuantizedKVCache, TurboQuantCompressedKVCa
             lastUnsupportedShape = "failed to create compressed attention placeholder"
             return false
         }
+        let supportsNative =
+            nativeAttentionAvailable && queries.dim(2) <= 8 && turboQuantNativeSupportsMask(mask)
         let supportsTiled =
             queries.dim(3) == values.dim(3) && prefersOnlineFusedAttention
             && MLX.turboQuantMetalSupportsOnlineFusedAttention(
@@ -1634,9 +1784,10 @@ public final class TurboQuantKVCache: QuantizedKVCache, TurboQuantCompressedKVCa
                 keyCode: keyCode,
                 mask: mask
             )
-        lastAttentionPath = supportsTiled ? .tiledOnlineFused : .twoStageCompressed
+        lastAttentionPath =
+            supportsNative ? .nativeMLXCompressed : (supportsTiled ? .tiledOnlineFused : .twoStageCompressed)
         lastUnsupportedShape =
-            supportsTiled
+            supportsNative || supportsTiled
             ? nil
             : "online fused attention is not throughput-admitted for head dimension \(queries.dim(3)); using two-stage compressed attention"
         return true
@@ -1808,6 +1959,12 @@ public final class TurboQuantKVCache: QuantizedKVCache, TurboQuantCompressedKVCa
             fallbackPolicy: fallbackPolicy,
             seed: seed,
             valueBits: valueBits,
+            precisionPolicy: precisionPolicy,
+            requestedRuntimeMode: requestedRuntimeMode,
+            resolvedRuntimeMode: resolvedRuntimeMode,
+            sparseValuePolicy: sparseValuePolicy,
+            boundaryProtectedLayerCount: boundaryProtectedLayerCount,
+            boundaryProtectionReason: boundaryProtectionReason,
             residentBudgetBytes: residentBudgetBytes
         )
         let s = self.state
@@ -2054,6 +2211,12 @@ public final class RotatingTurboQuantKVCache: BaseKVCache, QuantizedKVCacheProto
     public let mode: QuantizationMode
     public let seed: UInt64
     public let valueBits: Int
+    public let precisionPolicy: TurboQuantKVPrecisionPolicy
+    public let requestedRuntimeMode: TurboQuantRuntimeMode
+    public let resolvedRuntimeMode: TurboQuantRuntimeMode
+    public let sparseValuePolicy: TurboQuantSparseValuePolicy
+    public let boundaryProtectedLayerCount: Int
+    public let boundaryProtectionReason: String?
 
     public override var maxSize: Int? { maxCacheSize }
     public override var isTrimmable: Bool { offset < maxCacheSize }
@@ -2082,24 +2245,41 @@ public final class RotatingTurboQuantKVCache: BaseKVCache, QuantizedKVCacheProto
         fallbackPolicy: TurboQuantFallbackPolicy = .compressedDecodeAllowed,
         seed: UInt64 = 0x9E37_79B9_7F4A_7C15,
         valueBits: Int? = nil,
+        precisionPolicy: TurboQuantKVPrecisionPolicy? = nil,
+        requestedRuntimeMode: TurboQuantRuntimeMode = .auto,
+        resolvedRuntimeMode: TurboQuantRuntimeMode = .capacityTurboQuant,
+        sparseValuePolicy: TurboQuantSparseValuePolicy = .off,
+        boundaryProtectedLayerCount: Int = 0,
+        boundaryProtectionReason: String? = nil,
         residentBudgetBytes: Int? = nil
     ) {
+        let resolvedPrecisionPolicy =
+            precisionPolicy ?? TurboQuantKVPrecisionPolicy.legacy(preset: preset, valueBits: valueBits)
         self.keep = max(0, min(keep, maxSize))
         self.step = step
         self.maxCacheSize = maxSize
         self.writeIndex = self.keep
-        self.preset = preset
+        self.preset = resolvedPrecisionPolicy.compressedKeyPreset
         self.requestedBackend = backend
         self.optimizationPolicy = optimizationPolicy
         self.fallbackPolicy = fallbackPolicy
         self.seed = seed
-        self.valueBits = valueBits ?? preset.defaultValueBits
+        self.valueBits =
+            resolvedPrecisionPolicy.resolvedValueBits
+            ?? valueBits
+            ?? resolvedPrecisionPolicy.compressedKeyPreset.defaultValueBits
+        self.precisionPolicy = resolvedPrecisionPolicy
+        self.requestedRuntimeMode = requestedRuntimeMode
+        self.resolvedRuntimeMode = resolvedRuntimeMode
+        self.sparseValuePolicy = sparseValuePolicy
+        self.boundaryProtectedLayerCount = max(0, boundaryProtectedLayerCount)
+        self.boundaryProtectionReason = boundaryProtectionReason
         self.residentBudgetBytes = residentBudgetBytes
         let availability = TurboQuantKernelAvailability.current
         self.activeBackend = availability.runtimeBackend(for: backend)
         self.backendFallbackReason = availability.fallbackReason(for: backend)
         self.groupSize = groupSize
-        self.bits = preset.effectiveBits
+        self.bits = resolvedPrecisionPolicy.compressedKeyPreset.effectiveBits
         self.mode = mode
         super.init()
         if self.activeBackend != .metalPolarQJL {
@@ -2245,7 +2425,24 @@ public final class RotatingTurboQuantKVCache: BaseKVCache, QuantizedKVCacheProto
                 || packedKeys != nil
                 || packedValues != nil,
             lastAttentionPath: lastAttentionPath.rawValue,
-            lastFailure: cacheLifecycle.turboQuantRuntimeFailureReason ?? lastUnsupportedShape
+            lastFailure: cacheLifecycle.turboQuantRuntimeFailureReason ?? lastUnsupportedShape,
+            kvCodec: .polarQJL,
+            quantizationMode: mode.rawValue,
+            keyBits: bits,
+            groupSize: groupSize,
+            selectedPath: lastAttentionPath.rawValue,
+            fallbackReason: cacheLifecycle.turboQuantRuntimeFailureReason ?? lastUnsupportedShape,
+            requestedRuntimeMode: requestedRuntimeMode,
+            resolvedRuntimeMode: resolvedRuntimeMode,
+            precisionPolicy: precisionPolicy,
+            sparseValuePolicy: sparseValuePolicy,
+            boundaryPolicy: precisionPolicy.boundary,
+            boundaryProtectedLayerCount: boundaryProtectedLayerCount,
+            boundaryProtectionReason: boundaryProtectionReason,
+            runtimeFallbackReason: backendFallbackReason,
+            decodedActiveKeyBytes: turboQuantKeyValueBytes(rawFallbackCache?.state ?? []).keyBytes,
+            decodedActiveValueBytes: turboQuantKeyValueBytes(rawFallbackCache?.state ?? []).valueBytes,
+            activeCacheAllocated: turboQuantArrayBytes(rawFallbackCache?.state ?? []) > 0
         )
     }
 
@@ -2287,9 +2484,12 @@ public final class RotatingTurboQuantKVCache: BaseKVCache, QuantizedKVCacheProto
             encryptionKeyID: encryptionKeyID,
             createdAt: createdAt,
             cacheKind: "RotatingTurboQuantKVCache",
+            kvCodec: .polarQJL,
             preset: preset.rawValue,
             requestedBackend: requestedBackend.rawValue,
             activeBackend: activeBackend.rawValue,
+            quantizationMode: mode.rawValue,
+            keyBits: bits,
             groupSize: groupSize,
             valueBits: valueBits,
             seed: seed,
@@ -2302,6 +2502,16 @@ public final class RotatingTurboQuantKVCache: BaseKVCache, QuantizedKVCacheProto
             valueHeadDimension: compressedValues.layout.headDimension,
             rotatingKeep: keep,
             rotatingStep: step,
+            requestedRuntimeMode: requestedRuntimeMode,
+            resolvedRuntimeMode: resolvedRuntimeMode,
+            precisionPolicy: precisionPolicy,
+            sparseValuePolicy: sparseValuePolicy,
+            boundaryPolicy: precisionPolicy.boundary,
+            boundaryProtectedLayerCount: boundaryProtectedLayerCount,
+            boundaryProtectionReason: boundaryProtectionReason,
+            runtimeFallbackReason: backendFallbackReason,
+            selectedPath: lastAttentionPath.rawValue,
+            fallbackReason: backendFallbackReason,
             arrays: descriptors
         )
         return TurboQuantKVSnapshotPayload(manifest: manifest, compressedArrays: arrays)
@@ -2606,6 +2816,10 @@ public final class RotatingTurboQuantKVCache: BaseKVCache, QuantizedKVCacheProto
         return TurboQuantAttentionDiagnostics(
             metalAttentionAvailable: availability.supportsMetalPolarQJLAttention,
             activeAttentionPath: lastAttentionPath,
+            nativeBackend: availability.attentionCapabilities.nativeCompressedAttention == true
+                ? "nativeMLX" : nil,
+            nativeBackendVersion: availability.attentionCapabilities.nativeBackendVersion,
+            nativeFallbackReason: availability.attentionCapabilities.nativeFallbackReason,
             selectedKernelProfile: availability.selectedKernelProfile,
             selfTestStatus: availability.selfTestStatus,
             selfTestFailureReason: availability.selfTestFailureReason,
@@ -2614,7 +2828,17 @@ public final class RotatingTurboQuantKVCache: BaseKVCache, QuantizedKVCacheProto
             lastUnsupportedShape: lastUnsupportedShape,
             rawFallbackAllocated: rawFallbackCache != nil,
             cacheLifecycle: cacheLifecycle,
-            lastFallback: fallbackResults.last
+            lastFallback: fallbackResults.last,
+            sparseVEnabled: sparseValuePolicy.resolvedThreshold(
+                runtimeMode: resolvedRuntimeMode,
+                contextLength: compressedKeys?.layout.logicalLength ?? min(offset, maxCacheSize)
+            ) != nil,
+            sparseVThreshold: sparseValuePolicy.resolvedThreshold(
+                runtimeMode: resolvedRuntimeMode,
+                contextLength: compressedKeys?.layout.logicalLength ?? min(offset, maxCacheSize)
+            ),
+            boundaryProtectedLayerCount: boundaryProtectedLayerCount,
+            boundaryProtectionReason: boundaryProtectionReason
         )
     }
 
@@ -2624,8 +2848,11 @@ public final class RotatingTurboQuantKVCache: BaseKVCache, QuantizedKVCacheProto
         values: MLXArray,
         mask: MLXFast.ScaledDotProductAttentionMaskMode
     ) -> Bool {
+        let availability = TurboQuantKernelAvailability.current
+        let nativeAttentionAvailable =
+            availability.attentionCapabilities.nativeCompressedAttention == true
         guard activeBackend == .metalPolarQJL,
-            TurboQuantKernelAvailability.current.supportsMetalPolarQJLAttention
+            availability.supportsMetalPolarQJLAttention || nativeAttentionAvailable
         else {
             lastUnsupportedShape = "metal backend unavailable"
             return false
@@ -2668,6 +2895,8 @@ public final class RotatingTurboQuantKVCache: BaseKVCache, QuantizedKVCacheProto
             lastUnsupportedShape = "failed to create compressed attention placeholder"
             return false
         }
+        let supportsNative =
+            nativeAttentionAvailable && queries.dim(2) <= 8 && turboQuantNativeSupportsMask(mask)
         let supportsTiled =
             queries.dim(3) == values.dim(3) && prefersOnlineFusedAttention
             && MLX.turboQuantMetalSupportsOnlineFusedAttention(
@@ -2675,9 +2904,10 @@ public final class RotatingTurboQuantKVCache: BaseKVCache, QuantizedKVCacheProto
                 keyCode: keyCode,
                 mask: mask
             )
-        lastAttentionPath = supportsTiled ? .tiledOnlineFused : .twoStageCompressed
+        lastAttentionPath =
+            supportsNative ? .nativeMLXCompressed : (supportsTiled ? .tiledOnlineFused : .twoStageCompressed)
         lastUnsupportedShape =
-            supportsTiled
+            supportsNative || supportsTiled
             ? nil
             : "online fused attention is not throughput-admitted for head dimension \(queries.dim(3)); using two-stage compressed attention"
         return true
@@ -3191,6 +3421,12 @@ public final class RotatingTurboQuantKVCache: BaseKVCache, QuantizedKVCacheProto
             fallbackPolicy: fallbackPolicy,
             seed: seed,
             valueBits: valueBits,
+            precisionPolicy: precisionPolicy,
+            requestedRuntimeMode: requestedRuntimeMode,
+            resolvedRuntimeMode: resolvedRuntimeMode,
+            sparseValuePolicy: sparseValuePolicy,
+            boundaryProtectedLayerCount: boundaryProtectedLayerCount,
+            boundaryProtectionReason: boundaryProtectionReason,
             residentBudgetBytes: residentBudgetBytes
         )
         let s = state
@@ -3223,7 +3459,17 @@ public final class RotatingTurboQuantKVCache: BaseKVCache, QuantizedKVCacheProto
             rawFallbackAllocated: rawFallbackCache != nil,
             cacheLifecycle: cacheLifecycle,
             lastFallback: fallbackResults.last,
-            footprint: cacheFootprint
+            footprint: cacheFootprint,
+            sparseVEnabled: sparseValuePolicy.resolvedThreshold(
+                runtimeMode: resolvedRuntimeMode,
+                contextLength: compressedKeys?.layout.logicalLength ?? min(offset, maxCacheSize)
+            ) != nil,
+            sparseVThreshold: sparseValuePolicy.resolvedThreshold(
+                runtimeMode: resolvedRuntimeMode,
+                contextLength: compressedKeys?.layout.logicalLength ?? min(offset, maxCacheSize)
+            ),
+            boundaryProtectedLayerCount: boundaryProtectedLayerCount,
+            boundaryProtectionReason: boundaryProtectionReason
         )
     }
 

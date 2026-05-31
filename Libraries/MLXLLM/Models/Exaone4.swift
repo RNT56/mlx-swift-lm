@@ -254,12 +254,14 @@ public class Exaone4Model: Module, LLMModel, KVCacheDimensionProvider, ThrowingL
     }
 
     public func newCache(parameters: GenerateParameters? = nil) -> [KVCache] {
-        return model.layers.map { layer in
+        return model.layers.enumerated().map { layerIndex, layer in
             if layer.attention.isLocal, let slidingWindow = configuration.slidingWindow {
                 return makeAttentionKVCache(
-                    parameters: parameters, maxKVSize: slidingWindow, keep: 0)
+                    parameters: parameters, maxKVSize: slidingWindow, keep: 0,
+                    layerIndex: layerIndex, layerCount: model.layers.count)
             } else {
-                return makeAttentionKVCache(parameters: parameters)
+                return makeAttentionKVCache(
+                    parameters: parameters, layerIndex: layerIndex, layerCount: model.layers.count)
             }
         }
     }

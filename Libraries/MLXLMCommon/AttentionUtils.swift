@@ -44,13 +44,17 @@ public enum AttentionKVState {
     public var keyLength: Int {
         switch self {
         case .raw(let keys, _):
-            keys.dim(2)
+            return keys.dim(2)
         case .quantized(let keys, _, _):
-            keys.0.dim(-2)
+            return keys.0.dim(-2)
         case .turboQuant(let keys, _, _):
-            keys.layout.logicalLength
-        case .hybridTurboQuant(let keys, _, _, _):
-            keys.dim(2)
+            return keys.layout.logicalLength
+        case .hybridTurboQuant(let keys, _, let selection, let cache):
+            let keyLength = keys.dim(2)
+            if keyLength == cache.rawHotLength {
+                return keyLength + selection.selectedTokenCount
+            }
+            return keyLength
         }
     }
 }
@@ -275,6 +279,8 @@ private func recordTurboQuantFallback(
 ) {
     let toPath: TurboQuantAttentionPath? =
         switch path {
+        case .nativeMLXCompressed:
+            .nativeMLXCompressed
         case .onlineFusedCompressed:
             .onlineFused
         case .tiledOnlineFused:
@@ -294,7 +300,7 @@ private func recordTurboQuantFallback(
             .packedAllowed
         case .decodedCompressedSDPA:
             .compressedDecodeAllowed
-        case .rawExactSDPA, .onlineFusedCompressed, .tiledOnlineFused, .twoStageQKAV:
+        case .rawExactSDPA, .nativeMLXCompressed, .onlineFusedCompressed, .tiledOnlineFused, .twoStageQKAV:
             .exactRequired
         case .typedFailure:
             .fatalOnFailure
@@ -405,6 +411,58 @@ private func turboQuantAttentionFallbackLadder(
     let cachedOnlineAdmission =
         stateAlreadyValidated
         && (cachedPath == .onlineFused || cachedPath == .tiledOnlineFused)
+    let sparseVThreshold = cache.sparseValuePolicy.resolvedThreshold(
+        runtimeMode: cache.resolvedRuntimeMode,
+        contextLength: keyCode.layout.logicalLength
+    )
+    let nativeCapabilities = TurboQuantKernelAvailability.current.attentionCapabilities
+    let nativeMaskSupported: Bool
+    switch adjustedMask {
+    case .none, .causal:
+        nativeMaskSupported = true
+    case .array, .arrays:
+        nativeMaskSupported = false
+    }
+    let canUseNative =
+        nativeCapabilities.nativeCompressedAttention == true
+        && (sparseVThreshold == nil || nativeCapabilities.nativeSparseVSupport == true)
+        && sinks == nil
+        && queries.dim(2) <= 8
+        && keyCode.layout.headDimension == valueCode.layout.headDimension
+        && nativeMaskSupported
+
+    if canUseNative {
+        do {
+            let result = try MLX.turboQuantNativeScaledDotProductAttentionWithDiagnostics(
+                queries: queries,
+                keyCode: keyCode,
+                valueCode: valueCode,
+                options: TurboQuantNativeAttentionOptions(
+                    scale: scale,
+                    causal: adjustedMask.isCausal,
+                    sparseVThreshold: sparseVThreshold ?? 0,
+                    diagnostics: nativeCapabilities.nativeDiagnosticsSupport == true,
+                    backendVersion: nativeCapabilities.nativeBackendVersion
+                        ?? TurboQuantNativeAttentionOptions.backendVersion
+                )
+            )
+            return result.output
+        } catch {
+            let reason = "native MLX compressed attention failed: \(error)"
+            failures.append(reason)
+            recordTurboQuantFallback(
+                cache: cache,
+                path: .nativeMLXCompressed,
+                reason: reason
+            )
+        }
+    } else {
+        failures.append(
+            nativeCapabilities.nativeFallbackReason
+                ?? "native MLX compressed attention unsupported for this query/cache/mask"
+        )
+    }
+
     let canUseOnline =
         sinks == nil && cache.prefersOnlineFusedAttention
         && keyCode.layout.headDimension == valueCode.layout.headDimension
@@ -425,7 +483,8 @@ private func turboQuantAttentionFallbackLadder(
                 mask: adjustedMask,
                 sinks: sinks,
                 preferOnlineFused: true,
-                kernelProfile: cache.attentionDiagnostics.selectedKernelProfile
+                kernelProfile: cache.attentionDiagnostics.selectedKernelProfile,
+                sparseVThreshold: sparseVThreshold
             )
         } catch {
             let reason = "online fused compressed attention failed: \(error)"
@@ -444,7 +503,8 @@ private func turboQuantAttentionFallbackLadder(
             mask: adjustedMask,
             sinks: sinks,
             preferOnlineFused: false,
-            kernelProfile: cache.attentionDiagnostics.selectedKernelProfile
+            kernelProfile: cache.attentionDiagnostics.selectedKernelProfile,
+            sparseVThreshold: sparseVThreshold
         )
         if !failures.isEmpty {
             recordTurboQuantFallback(
@@ -690,6 +750,17 @@ public func attentionWithKVStateThrowing(
         )
 
     case .quantized(let keys, let values, let cache):
+        if let affineCache = cache as? any NativeAffineInt4KVCacheProtocol {
+            return try affineInt4NativeScaledDotProductAttention(
+                queries: queries,
+                quantizedKeys: keys,
+                quantizedValues: values,
+                scale: scale,
+                mask: mask,
+                sinks: sinks,
+                groupSize: affineCache.groupSize
+            )
+        }
         return quantizedScaledDotProductAttention(
             queries: queries,
             quantizedKeys: keys,
@@ -899,6 +970,23 @@ public func attentionWithCacheUpdateReturningStateThrowing(
 ) throws -> (output: MLXArray, state: AttentionKVState) {
     guard let cache else {
         let state = AttentionKVState.raw(keys: keys, values: values)
+        return (
+            try attentionWithKVStateThrowing(
+                queries: queries,
+                state: state,
+                scale: scale,
+                mask: mask,
+                sinks: sinks
+            ),
+            state
+        )
+    }
+    if let throughputCache = cache as? ThroughputTurboQuantKVCache {
+        let (cachedKeys, cachedValues) = try throughputCache.updateThroughput(
+            keys: keys,
+            values: values
+        )
+        let state = AttentionKVState.raw(keys: cachedKeys, values: cachedValues)
         return (
             try attentionWithKVStateThrowing(
                 queries: queries,

@@ -1,5 +1,5 @@
 {
-  "schema_version": 2,
+  "schema_version": 3,
   "id": "mistral-compatible-22b",
   "exact_model_ids": [],
   "model_patterns": [

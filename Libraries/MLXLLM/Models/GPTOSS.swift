@@ -509,13 +509,19 @@ public class GPTOSSModel: Module, LLMModel, KVCacheDimensionProvider {
     public func newCache(parameters: GenerateParameters?) -> [any KVCache] {
         var caches: [KVCache] = []
 
-        for lt in model.layerTypes {
+        for (index, lt) in model.layerTypes.enumerated() {
             if lt == "full_attention" {
-                caches.append(makeAttentionKVCache(parameters: parameters))
+                caches.append(
+                    makeAttentionKVCache(
+                        parameters: parameters,
+                        layerIndex: index,
+                        layerCount: model.layerTypes.count
+                    ))
             } else {
                 caches.append(
                     makeAttentionKVCache(
-                        parameters: parameters, maxKVSize: configuration.slidingWindow, keep: 0)
+                        parameters: parameters, maxKVSize: configuration.slidingWindow, keep: 0,
+                        layerIndex: index, layerCount: model.layerTypes.count)
                 )
             }
         }

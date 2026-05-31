@@ -713,8 +713,12 @@ private enum PixtralLanguage {
         }
 
         func newCache(parameters: GenerateParameters?) -> [KVCache] {
-            (0 ..< config.numHiddenLayers).map { _ in
-                makeAttentionKVCache(parameters: parameters)
+            (0 ..< config.numHiddenLayers).map { index in
+                makeAttentionKVCache(
+                    parameters: parameters,
+                    layerIndex: index,
+                    layerCount: config.numHiddenLayers
+                )
             }
         }
     }

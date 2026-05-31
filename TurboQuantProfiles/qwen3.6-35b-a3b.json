@@ -1,5 +1,5 @@
 {
-  "schema_version": 2,
+  "schema_version": 3,
   "id": "qwen3.6-35b-a3b",
   "exact_model_ids": [
 
@@ -85,7 +85,7 @@
   "recommended_scheme": "turbo8",
   "fallback_scheme": "turbo3_5",
   "key_bits": 8,
-  "value_bits": 8,
+  "value_bits": 4,
   "group_size": 64,
   "safe_mask_modes": [
     "none",
@@ -117,7 +117,7 @@
     "Runtime shape checks and Metal self-tests remain authoritative.",
     "Qwen3.5 and Qwen3.6 profiles are config-backed with verified 256-dimensional key and value heads.",
     "Turbo4V2 and Turbo3.5 are guarded proof candidates only; promote them per model/device after the Qwen proof pipeline passes quality, stop, memory, and throughput gates.",
-    "production Qwen3.5/Qwen3.6 uses turbo8 exact initial prefill plus block-parallel fused compressed decode for extended context",
-    "turbo4v2 and turbo3_5 remain guarded proof candidates with block-parallel fused decode until certified"
+    "Wave 1 Qwen3.5/Qwen3.6 uses high-precision K with Turbo4V2 V and throughput native SDPA when admitted",
+    "turbo4v2 and turbo3_5 low-K candidates remain guarded until exact per-model evidence permits promotion"
   ]
 }

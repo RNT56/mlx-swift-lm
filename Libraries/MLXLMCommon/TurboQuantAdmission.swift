@@ -352,6 +352,8 @@ public enum TurboQuantAdmissionDowngradeReason: String, Codable, Sendable, CaseI
     case releasedRawShadow
     case disabledPackedFallback
     case loweredValueBits
+    case loweredValuePrecision
+    case keyPrecisionEvidenceRequired
     case movedBalancedToMaxContext
     case reducedContext
     case rollingSummaryMemory
@@ -378,9 +380,19 @@ public struct TurboQuantMemoryPlan: Codable, Equatable, Sendable {
     public var valueBits: Int
     public var groupSize: Int
     public var fallbackPolicy: TurboQuantFallbackPolicy
+    public var requestedRuntimeMode: TurboQuantRuntimeMode?
+    public var resolvedRuntimeMode: TurboQuantRuntimeMode?
+    public var precisionPolicy: TurboQuantKVPrecisionPolicy?
+    public var sparseValuePolicy: TurboQuantSparseValuePolicy?
+    public var runtimeFallbackReason: String?
     public var rawBytesPerToken: Int
     public var packedFallbackBytesPerToken: Int
     public var compressedBytesPerToken: Int
+    public var compressedKeyBytes: Int?
+    public var compressedValueBytes: Int?
+    public var decodedActiveKVBytes: Int?
+    public var rawBoundaryLayerCount: Int
+    public var rawBoundaryKVBytes: Int
     public var layerFootprint: TurboQuantLayerCacheFootprint
     public var usesRawShadow: Bool
     public var packedFallbackEnabled: Bool
@@ -408,6 +420,16 @@ public struct TurboQuantMemoryPlan: Codable, Equatable, Sendable {
             <= runtimeZones.availableAppMemoryBytes
     }
 
+    public func throughputRuntimeBytes(contextLength: Int) -> Int {
+        rawSDPARuntimeBytes(contextLength: contextLength)
+            + compressedBytesPerToken * max(0, contextLength)
+    }
+
+    public func throughputFits(contextLength: Int) -> Bool {
+        throughputRuntimeBytes(contextLength: contextLength)
+            <= runtimeZones.availableAppMemoryBytes
+    }
+
     public init(
         requestedContextLength: Int,
         admittedContextLength: Int,
@@ -417,9 +439,19 @@ public struct TurboQuantMemoryPlan: Codable, Equatable, Sendable {
         valueBits: Int,
         groupSize: Int,
         fallbackPolicy: TurboQuantFallbackPolicy,
+        requestedRuntimeMode: TurboQuantRuntimeMode = .auto,
+        resolvedRuntimeMode: TurboQuantRuntimeMode = .capacityTurboQuant,
+        precisionPolicy: TurboQuantKVPrecisionPolicy? = nil,
+        sparseValuePolicy: TurboQuantSparseValuePolicy? = nil,
+        runtimeFallbackReason: String? = nil,
         rawBytesPerToken: Int,
         packedFallbackBytesPerToken: Int,
         compressedBytesPerToken: Int,
+        compressedKeyBytes: Int? = nil,
+        compressedValueBytes: Int? = nil,
+        decodedActiveKVBytes: Int = 0,
+        rawBoundaryLayerCount: Int = 0,
+        rawBoundaryKVBytes: Int = 0,
         layerFootprint: TurboQuantLayerCacheFootprint,
         usesRawShadow: Bool,
         packedFallbackEnabled: Bool,
@@ -434,9 +466,31 @@ public struct TurboQuantMemoryPlan: Codable, Equatable, Sendable {
         self.valueBits = min(8, max(2, valueBits))
         self.groupSize = max(1, groupSize)
         self.fallbackPolicy = fallbackPolicy
+        self.requestedRuntimeMode = requestedRuntimeMode
+        self.resolvedRuntimeMode = resolvedRuntimeMode
+        self.precisionPolicy =
+            precisionPolicy
+            ?? TurboQuantKVPrecisionPolicy.legacy(preset: preset, valueBits: valueBits)
+        self.sparseValuePolicy = sparseValuePolicy
+        self.runtimeFallbackReason = runtimeFallbackReason
         self.rawBytesPerToken = max(0, rawBytesPerToken)
         self.packedFallbackBytesPerToken = max(0, packedFallbackBytesPerToken)
         self.compressedBytesPerToken = max(0, compressedBytesPerToken)
+        self.compressedKeyBytes = max(
+            0,
+            compressedKeyBytes ?? layerFootprint.keyBytesPerTokenPerLayer
+                * max(0, layerFootprint.layerCount)
+                * max(0, admittedContextLength)
+        )
+        self.compressedValueBytes = max(
+            0,
+            compressedValueBytes ?? layerFootprint.valueBytesPerTokenPerLayer
+                * max(0, layerFootprint.layerCount)
+                * max(0, admittedContextLength)
+        )
+        self.decodedActiveKVBytes = max(0, decodedActiveKVBytes)
+        self.rawBoundaryLayerCount = max(0, rawBoundaryLayerCount)
+        self.rawBoundaryKVBytes = max(0, rawBoundaryKVBytes)
         self.layerFootprint = layerFootprint
         self.usesRawShadow = usesRawShadow
         self.packedFallbackEnabled = packedFallbackEnabled
@@ -553,6 +607,7 @@ public struct TurboQuantAdmissionPlanner: Sendable {
         fallbackPolicy: TurboQuantFallbackPolicy = .compressedDecodeAllowed,
         preset: TurboQuantPreset = .turbo3_5,
         valueBits: Int? = nil,
+        precisionPolicy: TurboQuantKVPrecisionPolicy? = nil,
         groupSize: Int = 64,
         memorySample: TurboQuantRuntimeMemorySample? = nil
     ) -> TurboQuantAdmission {
@@ -567,6 +622,9 @@ public struct TurboQuantAdmissionPlanner: Sendable {
         let requestedContext = max(1, requestedContextLength)
         let requestedValueBits = min(
             8, max(options.minimumValueBits, valueBits ?? preset.defaultValueBits))
+        let requestedPrecisionPolicy =
+            precisionPolicy
+            ?? TurboQuantKVPrecisionPolicy.legacy(preset: preset, valueBits: requestedValueBits)
         var downgrades: [TurboQuantAdmissionDowngrade] = []
         var candidate = initialCandidate(
             requestedContextLength: requestedContext,
@@ -585,6 +643,7 @@ public struct TurboQuantAdmissionPlanner: Sendable {
             candidate: candidate,
             requestedMode: userMode,
             fallbackPolicy: fallbackPolicy,
+            precisionPolicy: requestedPrecisionPolicy,
             groupSize: groupSize,
             sample: sample
         )
@@ -625,6 +684,7 @@ public struct TurboQuantAdmissionPlanner: Sendable {
                 candidate: candidate,
                 requestedMode: userMode,
                 fallbackPolicy: fallbackPolicy,
+                precisionPolicy: requestedPrecisionPolicy,
                 groupSize: groupSize,
                 sample: sample
             )
@@ -652,6 +712,7 @@ public struct TurboQuantAdmissionPlanner: Sendable {
                 candidate: candidate,
                 requestedMode: userMode,
                 fallbackPolicy: fallbackPolicy,
+                precisionPolicy: requestedPrecisionPolicy,
                 groupSize: groupSize,
                 sample: sample
             )
@@ -681,6 +742,7 @@ public struct TurboQuantAdmissionPlanner: Sendable {
                 candidate: candidate,
                 requestedMode: userMode,
                 fallbackPolicy: fallbackPolicy,
+                precisionPolicy: requestedPrecisionPolicy,
                 groupSize: groupSize,
                 sample: sample
             )
@@ -712,6 +774,7 @@ public struct TurboQuantAdmissionPlanner: Sendable {
                 candidate: candidate,
                 requestedMode: userMode,
                 fallbackPolicy: fallbackPolicy,
+                precisionPolicy: requestedPrecisionPolicy,
                 groupSize: groupSize,
                 sample: sample
             )
@@ -731,6 +794,7 @@ public struct TurboQuantAdmissionPlanner: Sendable {
             candidate: candidate,
             requestedMode: userMode,
             fallbackPolicy: fallbackPolicy,
+            precisionPolicy: requestedPrecisionPolicy,
             groupSize: groupSize,
             sample: sample
         )
@@ -749,6 +813,7 @@ public struct TurboQuantAdmissionPlanner: Sendable {
                 candidate: candidate,
                 requestedMode: userMode,
                 fallbackPolicy: fallbackPolicy,
+                precisionPolicy: requestedPrecisionPolicy,
                 groupSize: groupSize,
                 sample: sample
             )
@@ -776,6 +841,7 @@ public struct TurboQuantAdmissionPlanner: Sendable {
             candidate: candidate,
             requestedMode: userMode,
             fallbackPolicy: fallbackPolicy,
+            precisionPolicy: requestedPrecisionPolicy,
             groupSize: groupSize,
             sample: sample
         )
@@ -922,6 +988,7 @@ public struct TurboQuantAdmissionPlanner: Sendable {
         candidate: Candidate,
         requestedMode: TurboQuantUserMode,
         fallbackPolicy: TurboQuantFallbackPolicy,
+        precisionPolicy: TurboQuantKVPrecisionPolicy,
         groupSize: Int,
         sample: TurboQuantRuntimeMemorySample
     ) -> TurboQuantMemoryPlan {
@@ -930,13 +997,22 @@ public struct TurboQuantAdmissionPlanner: Sendable {
             valueBits: candidate.valueBits,
             groupSize: groupSize
         )
-        let compressedKVBytes = footprint.bytesPerTokenAllLayers * candidate.contextLength
         let rawBytesPerToken = profile.kvCacheBytes(contextLength: 1)
+        let rawBytesPerTokenPerLayer =
+            profile.layerCount > 0 ? rawBytesPerToken / max(1, profile.layerCount) : 0
+        let protectedLayerCount = precisionPolicy
+            .protectedBoundaryLayerIndexes(layerCount: profile.layerCount)
+            .count
+        let compressedLayerCount = max(0, profile.layerCount - protectedLayerCount)
+        let compressedKVBytes =
+            footprint.bytesPerTokenPerLayer * compressedLayerCount * candidate.contextLength
+        let rawBoundaryKVBytes =
+            rawBytesPerTokenPerLayer * protectedLayerCount * candidate.contextLength
         let rawShadowTokens =
             candidate.usesRawShadow
             ? min(candidate.contextLength, options.rawShadowPrefillChunkLength)
             : 0
-        let rawShadowBytes = rawBytesPerToken * rawShadowTokens
+        let rawShadowBytes = rawBytesPerToken * rawShadowTokens + rawBoundaryKVBytes
         let packedFallbackBytesPerToken = packedFallbackBytesPerToken(
             profile: profile,
             bits: candidate.valueBits,
@@ -989,9 +1065,18 @@ public struct TurboQuantAdmissionPlanner: Sendable {
             valueBits: candidate.valueBits,
             groupSize: max(1, groupSize),
             fallbackPolicy: fallbackPolicy,
+            precisionPolicy: precisionPolicy,
             rawBytesPerToken: rawBytesPerToken,
             packedFallbackBytesPerToken: packedFallbackBytesPerToken,
-            compressedBytesPerToken: footprint.bytesPerTokenAllLayers,
+            compressedBytesPerToken: footprint.bytesPerTokenPerLayer * compressedLayerCount,
+            compressedKeyBytes: footprint.keyBytesPerTokenPerLayer
+                * compressedLayerCount
+                * candidate.contextLength,
+            compressedValueBytes: footprint.valueBytesPerTokenPerLayer
+                * compressedLayerCount
+                * candidate.contextLength,
+            rawBoundaryLayerCount: protectedLayerCount,
+            rawBoundaryKVBytes: rawBoundaryKVBytes,
             layerFootprint: footprint,
             usesRawShadow: candidate.usesRawShadow,
             packedFallbackEnabled: candidate.packedFallbackEnabled,
@@ -1065,6 +1150,7 @@ public struct TurboQuantAdmissionPlanner: Sendable {
         candidate: Candidate,
         requestedMode: TurboQuantUserMode,
         fallbackPolicy: TurboQuantFallbackPolicy,
+        precisionPolicy: TurboQuantKVPrecisionPolicy,
         groupSize: Int,
         sample: TurboQuantRuntimeMemorySample
     ) -> Int {
@@ -1080,6 +1166,7 @@ public struct TurboQuantAdmissionPlanner: Sendable {
                 candidate: candidate,
                 requestedMode: requestedMode,
                 fallbackPolicy: fallbackPolicy,
+                precisionPolicy: precisionPolicy,
                 groupSize: groupSize,
                 sample: sample
             )

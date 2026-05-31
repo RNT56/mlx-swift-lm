@@ -576,12 +576,14 @@ private enum Language {
                 config.layerTypes
                 ?? Array(repeating: "full_attention", count: config.numHiddenLayers)
 
-            return layerTypes.map { layerType in
+            return layerTypes.enumerated().map { layerIndex, layerType in
                 if layerType == "sliding_attention", let slidingWindow = config.slidingWindow {
                     return makeAttentionKVCache(
-                        parameters: parameters, maxKVSize: slidingWindow, keep: 0)
+                        parameters: parameters, maxKVSize: slidingWindow, keep: 0,
+                        layerIndex: layerIndex, layerCount: layerTypes.count)
                 } else {
-                    return makeAttentionKVCache(parameters: parameters)
+                    return makeAttentionKVCache(
+                        parameters: parameters, layerIndex: layerIndex, layerCount: layerTypes.count)
                 }
             }
         }

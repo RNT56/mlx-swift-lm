@@ -13,7 +13,7 @@ struct TurboQuantCacheRuntimeSnapshotTests {
         let decoded = try JSONDecoder().decode(TurboQuantCacheRuntimeSnapshot.self, from: data)
 
         #expect(decoded == snapshot)
-        #expect(snapshot.schemaVersion == 1)
+        #expect(snapshot.schemaVersion == TurboQuantCacheRuntimeSnapshot.currentSchemaVersion)
         #expect(snapshot.lifecycleDescription == "empty")
         #expect(snapshot.logicalLength == 0)
         #expect(snapshot.capacity == 0)
@@ -21,6 +21,125 @@ struct TurboQuantCacheRuntimeSnapshotTests {
         #expect(snapshot.valueBytes == 0)
         #expect(!snapshot.rawShadowAllocated)
         #expect(!snapshot.packedFallbackAllocated)
+    }
+
+    @Test func legacyV1SnapshotDecodesWithWave1Defaults() throws {
+        let json = """
+            {
+              "schemaVersion": 1,
+              "lifecycleDescription": "empty",
+              "logicalLength": 0,
+              "capacity": 0,
+              "pinnedPrefixLength": 0,
+              "ringOffset": 0,
+              "keyBytes": 0,
+              "valueBytes": 0,
+              "rawShadowAllocated": false,
+              "packedFallbackAllocated": false
+            }
+            """
+
+        let snapshot = try JSONDecoder().decode(
+            TurboQuantCacheRuntimeSnapshot.self,
+            from: Data(json.utf8)
+        )
+
+        #expect(snapshot.schemaVersion == 1)
+        #expect(snapshot.kvCodec == .polarQJL)
+        #expect(snapshot.quantizationMode == nil)
+        #expect(snapshot.keyBits == nil)
+        #expect(snapshot.groupSize == nil)
+        #expect(snapshot.requestedRuntimeMode == nil)
+        #expect(snapshot.resolvedRuntimeMode == nil)
+        #expect(snapshot.precisionPolicy == nil)
+        #expect(snapshot.sparseValuePolicy == nil)
+        #expect(snapshot.boundaryPolicy == nil)
+        #expect(snapshot.boundaryProtectedLayerCount == 0)
+        #expect(snapshot.decodedActiveKeyBytes == 0)
+        #expect(snapshot.decodedActiveValueBytes == 0)
+        #expect(!snapshot.activeCacheAllocated)
+    }
+
+    @Test func runtimeSnapshotRoundTripsWave2Metadata() throws {
+        let policy = TurboQuantKVPrecisionPolicy(
+            key: .turbo4v2,
+            value: .turbo4v2,
+            boundary: .protectedEdges(first: 2, last: 2)
+        )
+        let cache = TurboQuantKVCache(
+            preset: .turbo4v2,
+            precisionPolicy: policy,
+            resolvedRuntimeMode: .capacityTurboQuant,
+            sparseValuePolicy: .force(threshold: 1e-5),
+            boundaryProtectedLayerCount: 4,
+            boundaryProtectionReason: "test"
+        )
+
+        let snapshot = cache.runtimeSnapshot()
+        let decoded = try JSONDecoder().decode(
+            TurboQuantCacheRuntimeSnapshot.self,
+            from: try JSONEncoder().encode(snapshot)
+        )
+
+        #expect(decoded.sparseValuePolicy == .force(threshold: 1e-5))
+        #expect(decoded.boundaryPolicy == .protectedEdges(first: 2, last: 2))
+        #expect(decoded.boundaryProtectedLayerCount == 4)
+        #expect(decoded.boundaryProtectionReason == "test")
+    }
+
+    @Test func runtimeSnapshotRoundTripsAffineInt4Metadata() throws {
+        let snapshot = TurboQuantCacheRuntimeSnapshot(
+            lifecycleDescription: "affineInt4Native(logicalLength:8)",
+            logicalLength: 8,
+            capacity: 8,
+            pinnedPrefixLength: 0,
+            ringOffset: 0,
+            keyBytes: 1024,
+            valueBytes: 1024,
+            rawShadowAllocated: false,
+            packedFallbackAllocated: false,
+            lastAttentionPath: TurboQuantAttentionPath.affineInt4Native.rawValue,
+            lastFailure: nil,
+            kvCodec: .affineInt4,
+            quantizationMode: QuantizationMode.affine.rawValue,
+            keyBits: TurboQuantKVCodec.affineInt4Bits,
+            groupSize: TurboQuantKVCodec.affineInt4DefaultGroupSize,
+            selectedPath: TurboQuantAttentionPath.affineInt4Native.rawValue,
+            fallbackReason: nil
+        )
+
+        let decoded = try JSONDecoder().decode(
+            TurboQuantCacheRuntimeSnapshot.self,
+            from: try JSONEncoder().encode(snapshot)
+        )
+
+        #expect(decoded.kvCodec == .affineInt4)
+        #expect(decoded.quantizationMode == QuantizationMode.affine.rawValue)
+        #expect(decoded.keyBits == TurboQuantKVCodec.affineInt4Bits)
+        #expect(decoded.groupSize == TurboQuantKVCodec.affineInt4DefaultGroupSize)
+        #expect(decoded.selectedPath == TurboQuantAttentionPath.affineInt4Native.rawValue)
+    }
+
+    @Test func throughputSnapshotRecordsActiveDecodedResidency() {
+        let cache = ThroughputTurboQuantKVCache(
+            maxSize: 16,
+            preset: .turbo8,
+            valueBits: 4,
+            precisionPolicy: .qwenQ4Default,
+            requestedRuntimeMode: .auto
+        )
+        let keys = MLXArray.ones([1, 2, 3, 64], dtype: .float32)
+        let values = MLXArray.ones([1, 2, 3, 64], dtype: .float32)
+
+        _ = cache.update(keys: keys, values: values)
+        let snapshot = cache.runtimeSnapshot()
+
+        #expect(snapshot.requestedRuntimeMode == .auto)
+        #expect(snapshot.resolvedRuntimeMode == .throughputTurboQuant)
+        #expect(snapshot.precisionPolicy == .qwenQ4Default)
+        #expect(snapshot.activeCacheAllocated)
+        #expect(snapshot.decodedActiveKeyBytes == keys.nbytes)
+        #expect(snapshot.decodedActiveValueBytes == values.nbytes)
     }
 
     @Test func failureSnapshotRecordsReasonAndPath() {
@@ -53,7 +172,7 @@ struct TurboQuantCacheRuntimeSnapshotTests {
         #expect(snapshot.lastFailure == "qk unavailable")
     }
 
-    @Test func hybridSnapshotCarriesSelectorDiagnostics() {
+    @Test func hybridSnapshotCarriesSelectorDiagnostics() throws {
         let cache = HybridTurboQuantKVCache(
             maxSize: 32,
             hotWindowTokens: 8,
@@ -74,6 +193,21 @@ struct TurboQuantCacheRuntimeSnapshotTests {
         #expect(snapshot.hybridDiagnostics?.hotTokens == 3)
         #expect(snapshot.hybridDiagnostics?.coldBudgetTokens == 0)
         #expect(snapshot.hybridDiagnostics?.maxColdBudgetTokens == 8)
+
+        let decoded = try JSONDecoder().decode(
+            TurboQuantCacheRuntimeSnapshot.self,
+            from: try JSONEncoder().encode(snapshot)
+        )
+        #expect(decoded.hybridDiagnostics?.selectedBudgetedColdTokens == 0)
+        #expect(decoded.hybridDiagnostics?.anchorColdTokens == 0)
+        #expect(decoded.hybridDiagnostics?.anchorOverflowTokens == 0)
+        #expect(decoded.hybridDiagnostics?.selectorInitialConfidence == 1)
+        #expect(decoded.hybridDiagnostics?.selectorFinalConfidence == 1)
+        #expect(
+            decoded.hybridDiagnostics?.selectorEscalation
+                == TurboQuantColdSelectorEscalation.none
+        )
+        #expect(decoded.hybridDiagnostics?.selectorReasonFlags == ["empty"])
     }
 
     @Test func rotatingSnapshotReportsCapacityAndPinnedPrefix() {

@@ -265,53 +265,7 @@ extension LanguageModel where Self: KVCacheDimensionProvider {
         // Create one cache per layer (kvHeads.count = number of layers)
         // The number of heads per layer (kvHeads[i]) is not used for cache creation
         let numLayers = kvHeads.count
-
-        if parameters?.kvCacheStrategy.createsTurboQuantCacheImmediately == true {
-            let preset = parameters?.turboQuantPreset ?? .turbo3_5
-            let backend = parameters?.turboQuantBackend ?? .metalPolarQJL
-            let groupSize = parameters?.kvGroupSize ?? 64
-            let policy = parameters?.turboQuantOptimizationPolicy ?? .auto
-            let fallbackPolicy = parameters?.turboQuantFallbackPolicy ?? .compressedDecodeAllowed
-            let seed = parameters?.turboQuantSeed ?? defaultTurboQuantSeed
-            let valueBits = parameters?.turboQuantValueBits
-            if let maxKVSize = parameters?.maxKVSize {
-                return (0 ..< numLayers).map { _ in
-                    RotatingTurboQuantKVCache(
-                        maxSize: maxKVSize,
-                        keep: 4,
-                        preset: preset,
-                        groupSize: groupSize,
-                        backend: backend,
-                        optimizationPolicy: policy,
-                        fallbackPolicy: fallbackPolicy,
-                        seed: seed,
-                        valueBits: valueBits,
-                        residentBudgetBytes: parameters?.turboQuantPerCacheResidentBudgetBytes
-                    )
-                }
-            }
-            return (0 ..< numLayers).map { _ in
-                TurboQuantKVCache(
-                    preset: preset,
-                    groupSize: groupSize,
-                    backend: backend,
-                    optimizationPolicy: policy,
-                    fallbackPolicy: fallbackPolicy,
-                    seed: seed,
-                    valueBits: valueBits,
-                    residentBudgetBytes: parameters?.turboQuantPerCacheResidentBudgetBytes
-                )
-            }
-        }
-
-        // Follow Python logic: use RotatingKVCache if maxKVSize is provided
-        if let maxKVSize = parameters?.maxKVSize {
-            return (0 ..< numLayers).map { _ in
-                RotatingKVCache(maxSize: maxKVSize, keep: 4)
-            }
-        } else {
-            return (0 ..< numLayers).map { _ in KVCacheSimple() }
-        }
+        return makePromptCacheWithLayerCount(numLayers: numLayers, parameters: parameters)
     }
 }
 

@@ -38,9 +38,70 @@ extension MLXRuntimeSwiftTests {
         let decoded = try JSONDecoder().decode(TurboQuantKVSnapshotManifest.self, from: data)
 
         #expect(decoded == manifest)
-        #expect(decoded.schemaVersion == 1)
+        #expect(decoded.schemaVersion == TurboQuantKVSnapshotManifest.currentSchemaVersion)
+        #expect(decoded.kvCodec == .polarQJL)
+        #expect(decoded.quantizationMode == QuantizationMode.affine.rawValue)
+        #expect(decoded.keyBits == TurboQuantPreset.turbo3_5.effectiveBits)
         #expect(decoded.modelID == "model-a")
         #expect(decoded.tokenPrefixHash == "prefix-a")
+    }
+
+    @Test func manifestRoundTripsAffineInt4Metadata() throws {
+        let manifest = TurboQuantKVSnapshotManifest(
+            snapshotID: UUID(uuidString: "00000000-0000-0000-0000-000000000011")!,
+            conversationID: UUID(uuidString: "00000000-0000-0000-0000-000000000012")!,
+            identity: Self.identity(),
+            turboQuantLayoutVersion: 4,
+            logicalLength: 8,
+            pinnedPrefixLength: 0,
+            compressedKeyBytes: 10,
+            compressedValueBytes: 11,
+            blobByteCount: 21,
+            encryptionKeyID: "key-1",
+            createdAt: Date(timeIntervalSinceReferenceDate: 1),
+            cacheKind: "AffineInt4KVCache",
+            kvCodec: .affineInt4,
+            preset: "affine_int4",
+            requestedBackend: TurboQuantBackend.mlxPacked.rawValue,
+            activeBackend: TurboQuantBackend.mlxPacked.rawValue,
+            quantizationMode: QuantizationMode.affine.rawValue,
+            keyBits: TurboQuantKVCodec.affineInt4Bits,
+            groupSize: TurboQuantKVCodec.affineInt4DefaultGroupSize,
+            valueBits: TurboQuantKVCodec.affineInt4Bits,
+            capacity: 8,
+            ringOffset: 0,
+            batchSize: 1,
+            kvHeadCount: 2,
+            keyHeadDimension: 256,
+            valueHeadDimension: 256,
+            selectedPath: TurboQuantAttentionPath.affineInt4Native.rawValue,
+            arrays: [
+                TurboQuantKVSnapshotArrayDescriptor(
+                    name: "key_scales",
+                    dtype: "float32",
+                    shape: [1, 2, 8, 8],
+                    byteCount: 512
+                ),
+                TurboQuantKVSnapshotArrayDescriptor(
+                    name: "key_biases",
+                    dtype: "float32",
+                    shape: [1, 2, 8, 8],
+                    byteCount: 512
+                ),
+            ]
+        )
+
+        let decoded = try JSONDecoder().decode(
+            TurboQuantKVSnapshotManifest.self,
+            from: try JSONEncoder().encode(manifest)
+        )
+
+        #expect(decoded.kvCodec == .affineInt4)
+        #expect(decoded.quantizationMode == QuantizationMode.affine.rawValue)
+        #expect(decoded.keyBits == TurboQuantKVCodec.affineInt4Bits)
+        #expect(decoded.groupSize == TurboQuantKVCodec.affineInt4DefaultGroupSize)
+        #expect(decoded.selectedPath == TurboQuantAttentionPath.affineInt4Native.rawValue)
+        #expect(decoded.arrays.map(\.name).contains("key_biases"))
     }
 
     @Test func nonRotatingSnapshotRoundTripsCompressedStateWithoutRawKV() throws {
