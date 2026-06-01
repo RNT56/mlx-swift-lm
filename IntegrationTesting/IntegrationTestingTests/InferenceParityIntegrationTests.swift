@@ -9,7 +9,7 @@
 //     -scheme IntegrationTesting \
 //     -only-testing:IntegrationTestingTests/InferenceParityIntegrationTests
 //
-// Contexts default to 8K/16K/32K; override with TQ_PARITY_CONTEXTS="8192,131072".
+// Contexts default to 4K/8K/16K/32K; override with TQ_PARITY_CONTEXTS="8192,131072".
 
 import Foundation
 import HuggingFace
@@ -33,7 +33,8 @@ struct InferenceParityIntegrationTests {
         let container = try await models.llmContainer(for: config)
         let results = try await InferenceParityBenchmark.run(
             container: container,
-            contexts: Self.contextsFromEnv())
+            contexts: Self.contextsFromEnv(),
+            generateTokens: Self.generateTokensFromEnv())
         #expect(!results.isEmpty)
     }
 
@@ -43,6 +44,16 @@ struct InferenceParityIntegrationTests {
                 .compactMap { Int($0.trimmingCharacters(in: .whitespaces)) }
             if !parsed.isEmpty { return parsed }
         }
-        return [8192, 16384, 32768]
+        return [4096, 8192, 16384, 32768]
+    }
+
+    private static func generateTokensFromEnv() -> Int {
+        if let raw = ProcessInfo.processInfo.environment["TQ_PARITY_GENERATE_TOKENS"],
+            let value = Int(raw.trimmingCharacters(in: .whitespaces)),
+            value > 0
+        {
+            return value
+        }
+        return 64
     }
 }

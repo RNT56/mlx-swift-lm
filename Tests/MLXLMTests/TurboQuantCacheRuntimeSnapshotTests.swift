@@ -120,6 +120,39 @@ struct TurboQuantCacheRuntimeSnapshotTests {
         #expect(decoded.selectedPath == TurboQuantAttentionPath.affineInt4Native.rawValue)
     }
 
+    @Test func runtimeSnapshotRoundTripsAffineK8V4Metadata() throws {
+        let snapshot = TurboQuantCacheRuntimeSnapshot(
+            lifecycleDescription: "affineK8V4Native(logicalLength:8,capacity:16)",
+            logicalLength: 8,
+            capacity: 16,
+            pinnedPrefixLength: 0,
+            ringOffset: 0,
+            keyBytes: 1024,
+            valueBytes: 512,
+            rawShadowAllocated: false,
+            packedFallbackAllocated: false,
+            lastAttentionPath: TurboQuantAttentionPath.affineK8V4Native.rawValue,
+            lastFailure: nil,
+            kvCodec: .affineK8V4,
+            quantizationMode: QuantizationMode.affine.rawValue,
+            keyBits: TurboQuantKVCodec.affineK8V4KeyBits,
+            groupSize: TurboQuantKVCodec.affineK8V4KeyGroupSize,
+            selectedPath: TurboQuantAttentionPath.affineK8V4Native.rawValue,
+            fallbackReason: nil
+        )
+
+        let decoded = try JSONDecoder().decode(
+            TurboQuantCacheRuntimeSnapshot.self,
+            from: try JSONEncoder().encode(snapshot)
+        )
+
+        #expect(decoded.kvCodec == .affineK8V4)
+        #expect(decoded.quantizationMode == QuantizationMode.affine.rawValue)
+        #expect(decoded.keyBits == TurboQuantKVCodec.affineK8V4KeyBits)
+        #expect(decoded.groupSize == TurboQuantKVCodec.affineK8V4KeyGroupSize)
+        #expect(decoded.selectedPath == TurboQuantAttentionPath.affineK8V4Native.rawValue)
+    }
+
     @Test func throughputSnapshotRecordsActiveDecodedResidency() {
         let cache = ThroughputTurboQuantKVCache(
             maxSize: 16,

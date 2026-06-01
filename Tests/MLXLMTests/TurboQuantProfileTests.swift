@@ -98,6 +98,7 @@ extension MLXRuntimeSwiftTests {
             #expect(qwen35.recommendedScheme == .turbo8)
             #expect(qwen35.optimizationPolicy == TurboQuantOptimizationPolicy.preferThroughput)
             #expect(qwen35.valueBits == 4)
+            #expect(qwen35.kvCodec == .affineK8V4)
             #expect(qwen35.turboQuant.runtimeMode == .auto)
             #expect(qwen35.turboQuant.precisionPolicy == .qwenQ4Default)
             #expect(qwen35.status == .guarded)
@@ -118,6 +119,7 @@ extension MLXRuntimeSwiftTests {
                 qwen35OptiQ2B.optimizationPolicy == TurboQuantOptimizationPolicy.preferThroughput
             )
             #expect(qwen35OptiQ2B.valueBits == 4)
+            #expect(qwen35OptiQ2B.kvCodec == .affineK8V4)
             #expect(qwen35OptiQ2B.turboQuant.runtimeMode == .auto)
             #expect(qwen35OptiQ2B.turboQuant.precisionPolicy == .qwenQ4Default)
             #expect(qwen35OptiQ2B.status == .guarded)
@@ -1419,14 +1421,19 @@ extension MLXRuntimeSwiftTests {
                 )
             )
 
+            #expect(profile.kvCodec == .affineK8V4)
+            #expect(profile.affineInt4?.selectionStatus == .guarded)
+            #expect(profile.affineInt4?.groupSize == TurboQuantKVCodec.affineInt4DefaultGroupSize)
+
             let parameters = profile.applying(to: GenerateParameters())
 
-            #expect(parameters.kvCacheStrategy == .turboQuant)
-            #expect(parameters.turboQuantRuntimeMode == .auto)
-            #expect(parameters.turboQuantPrecisionPolicy == .qwenQ4Default)
+            #expect(parameters.kvCacheStrategy == .affineK8V4)
+            #expect(parameters.kvCodec == .affineK8V4)
+            #expect(parameters.kvBits == TurboQuantKVCodec.affineK8V4KeyBits)
+            #expect(parameters.kvGroupSize == TurboQuantKVCodec.affineK8V4KeyGroupSize)
             #expect(parameters.turboQuantRawSDPAThreshold == 16_384)
-            #expect(parameters.turboQuantPreset == .turbo8)
-            #expect(parameters.turboQuantValueBits == 4)
+            #expect(parameters.quantizedKVStart == 16_384)
+            #expect(parameters.turboQuantValueBits == TurboQuantKVCodec.affineK8V4ValueBits)
             #expect(parameters.turboQuantOptimizationPolicy == .preferThroughput)
         }
 

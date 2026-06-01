@@ -43,11 +43,14 @@ let package = Package(
         .executable(
             name: "TurboQuantQwenProof",
             targets: ["TurboQuantQwenProof"]),
+        .executable(
+            name: "TurboQuantInferenceParity",
+            targets: ["TurboQuantInferenceParity"]),
     ],
     dependencies: [
         .package(
             url: "https://github.com/RNT56/mlx-swift",
-            revision: "7a662770e0279d2693d4e3e93cb1b52cde34a321"),
+            revision: "d2586a242d456d8ef69d185e5e33f13b9f1dd4ad"),
         .package(url: "https://github.com/swiftlang/swift-syntax.git", "600.0.0" ..< "604.0.0"),
     ],
     targets: [
@@ -147,6 +150,16 @@ let package = Package(
                 .product(name: "MLX", package: "mlx-swift"),
             ],
             path: "tools/TurboQuantQwenProof"
+        ),
+        .executableTarget(
+            name: "TurboQuantInferenceParity",
+            dependencies: [
+                "IntegrationTestHelpers",
+                "MLXLLM",
+                "MLXLMCommon",
+                .product(name: "MLX", package: "mlx-swift"),
+            ],
+            path: "tools/TurboQuantInferenceParity"
         ),
         .testTarget(
             name: "MLXLMTests",

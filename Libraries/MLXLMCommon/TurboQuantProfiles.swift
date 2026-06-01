@@ -1154,6 +1154,20 @@ public struct TurboQuantProfile: Codable, Equatable, Identifiable, Sendable {
 
     public func applying(to parameters: GenerateParameters) -> GenerateParameters {
         var resolved = parameters
+        if kvCodec == .affineK8V4 {
+            resolved.kvCodec = .affineK8V4
+            resolved.kvCacheStrategy = .affineK8V4
+            resolved.kvBits = TurboQuantKVCodec.affineK8V4KeyBits
+            resolved.kvGroupSize = TurboQuantKVCodec.affineK8V4KeyGroupSize
+            resolved.turboQuantBackend = .mlxPacked
+            resolved.turboQuantValueBits = TurboQuantKVCodec.affineK8V4ValueBits
+            resolved.turboQuantOptimizationPolicy = .preferThroughput
+            resolved.quantizedKVStart = max(
+                resolved.quantizedKVStart,
+                resolved.turboQuantRawSDPAThreshold
+            )
+            return resolved
+        }
         if let affine = selectableAffineInt4Manifest {
             resolved.kvCodec = .affineInt4
             resolved.kvCacheStrategy = .affineInt4
@@ -1161,6 +1175,10 @@ public struct TurboQuantProfile: Codable, Equatable, Identifiable, Sendable {
             resolved.kvGroupSize = affine.groupSize
             resolved.turboQuantBackend = .mlxPacked
             resolved.turboQuantValueBits = TurboQuantKVCodec.affineInt4Bits
+            resolved.quantizedKVStart = max(
+                resolved.quantizedKVStart,
+                resolved.turboQuantRawSDPAThreshold
+            )
             return resolved
         }
         resolved.kvCodec = .polarQJL
@@ -1203,6 +1221,8 @@ public struct TurboQuantProfile: Codable, Equatable, Identifiable, Sendable {
             return TurboQuantRuntimeControl.enabled("TURBOQUANT_ENABLE_GUARDED_AFFINE_INT4")
                 || TurboQuantRuntimeControl.enabled("TURBOQUANT_BENCHMARK_AFFINE_INT4")
                 || TurboQuantRuntimeControl.enabled("TURBOQUANT_DEBUG_AFFINE_INT4")
+                || TurboQuantRuntimeControl.enabled("TURBOQUANT_FORCE_AFFINE_INT4")
+                || TurboQuantRuntimeControl.enabled("TURBOQUANT_FAST_AFFINE_INT4")
                 ? affineInt4 : nil
         case .unsupported:
             return nil
@@ -2481,6 +2501,17 @@ private func applyingBundledProfileOptimizations(_ profile: TurboQuantProfile)
         profile.turboQuant.valueBits = 4
         profile.turboQuant.runtimeMode = .auto
         profile.turboQuant.precisionPolicy = .qwenQ4Default
+        if isDenseQwen35HybridProfile(profile) {
+            profile.kvCodec = .affineK8V4
+            profile.affineInt4 = TurboQuantProfileAffineInt4Manifest(
+                groupSize: TurboQuantKVCodec.affineInt4DefaultGroupSize,
+                selectionStatus: .guarded,
+                fallbackCodec: .polarQJL
+            )
+            profile.notes.append(
+                "Default speed-balanced path: native affine K8/V4 keeps keys at 8-bit and values at 4-bit using fused mixed quantized SDPA after the raw SDPA start threshold; affineInt4 remains an explicit maximum-throughput override and Polar/QJL TurboQuant remains the capacity fallback."
+            )
+        }
     }
     return profile
 }

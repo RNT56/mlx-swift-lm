@@ -416,6 +416,8 @@ private func turboQuantAttentionFallbackLadder(
         contextLength: keyCode.layout.logicalLength
     )
     let nativeCapabilities = TurboQuantKernelAvailability.current.attentionCapabilities
+    let nativeBackend =
+        nativeCapabilities.nativeSegmentedAttentionBackend ?? .unavailable
     let nativeMaskSupported: Bool
     switch adjustedMask {
     case .none, .causal:
@@ -423,13 +425,36 @@ private func turboQuantAttentionFallbackLadder(
     case .array, .arrays:
         nativeMaskSupported = false
     }
+    var nativeRejectionReasons: [String] = []
+    if nativeCapabilities.nativeCompressedAttention != true {
+        nativeRejectionReasons.append(
+            nativeCapabilities.nativeFallbackReason
+                ?? "native MLX compressed attention backend is unavailable"
+        )
+    }
+    if sparseVThreshold != nil && nativeCapabilities.nativeSparseVSupport != true {
+        nativeRejectionReasons.append("native MLX compressed attention lacks sparse-V support")
+    }
+    if sinks != nil {
+        nativeRejectionReasons.append("native MLX compressed attention does not support sinks")
+    }
+    if queries.dim(2) > 8 {
+        nativeRejectionReasons.append(
+            "native MLX compressed attention supports qLen <= 8; received \(queries.dim(2))"
+        )
+    }
+    if keyCode.layout.headDimension != valueCode.layout.headDimension {
+        nativeRejectionReasons.append(
+            "native MLX compressed attention requires matching K/V head dimensions"
+        )
+    }
+    if !nativeMaskSupported {
+        nativeRejectionReasons.append(
+            "native MLX compressed attention supports only none/causal masks"
+        )
+    }
     let canUseNative =
-        nativeCapabilities.nativeCompressedAttention == true
-        && (sparseVThreshold == nil || nativeCapabilities.nativeSparseVSupport == true)
-        && sinks == nil
-        && queries.dim(2) <= 8
-        && keyCode.layout.headDimension == valueCode.layout.headDimension
-        && nativeMaskSupported
+        nativeRejectionReasons.isEmpty
 
     if canUseNative {
         do {
@@ -448,7 +473,8 @@ private func turboQuantAttentionFallbackLadder(
             )
             return result.output
         } catch {
-            let reason = "native MLX compressed attention failed: \(error)"
+            let reason =
+                "native MLX compressed attention failed via \(nativeBackend): \(error)"
             failures.append(reason)
             recordTurboQuantFallback(
                 cache: cache,
@@ -458,8 +484,8 @@ private func turboQuantAttentionFallbackLadder(
         }
     } else {
         failures.append(
-            nativeCapabilities.nativeFallbackReason
-                ?? "native MLX compressed attention unsupported for this query/cache/mask"
+            "native MLX compressed attention bypassed via \(nativeBackend): "
+                + nativeRejectionReasons.joined(separator: ", ")
         )
     }
 
@@ -750,6 +776,45 @@ public func attentionWithKVStateThrowing(
         )
 
     case .quantized(let keys, let values, let cache):
+        if let mixedCache = cache as? any NativeAffineK8V4KVCacheProtocol {
+            let nativeSupported = supportsNativeAffineK8V4ScaledDotProductAttention(
+                queries: queries,
+                quantizedKeys: keys,
+                quantizedValues: values,
+                mask: mask,
+                sinks: sinks,
+                keyGroupSize: mixedCache.keyGroupSize,
+                keyBits: mixedCache.keyBits,
+                valueGroupSize: mixedCache.valueGroupSize,
+                valueBits: mixedCache.valueBits
+            )
+            do {
+                let output = try mixedAffineK8V4ScaledDotProductAttention(
+                    queries: queries,
+                    quantizedKeys: keys,
+                    quantizedValues: values,
+                    scale: scale,
+                    mask: mask,
+                    sinks: sinks,
+                    keyGroupSize: mixedCache.keyGroupSize,
+                    keyBits: mixedCache.keyBits,
+                    valueGroupSize: mixedCache.valueGroupSize,
+                    valueBits: mixedCache.valueBits
+                )
+                mixedCache.recordNativeAffineK8V4AttentionPath(
+                    nativeSupported ? .affineK8V4Native : .mlxPackedFallback,
+                    failureReason: nativeSupported
+                        ? nil : "affine K8/V4 native attention unsupported; used quantizedMM fallback"
+                )
+                return output
+            } catch {
+                mixedCache.recordNativeAffineK8V4AttentionPath(
+                    .unavailable,
+                    failureReason: String(describing: error)
+                )
+                throw error
+            }
+        }
         if let affineCache = cache as? any NativeAffineInt4KVCacheProtocol {
             return try affineInt4NativeScaledDotProductAttention(
                 queries: queries,

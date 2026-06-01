@@ -4,6 +4,7 @@ import MLXLMCommon
 
 enum BenchmarkCodec: String {
     case polarQJL = "polar_qjl"
+    case affineK8V4 = "affine_k8_v4"
     case affineInt4 = "affine_int4"
     case raw
 }
@@ -51,6 +52,8 @@ struct BenchmarkThroughputMetrics: Codable {
 struct BenchmarkCase: Codable {
     var id: String
     var headDim: Int
+    var queryHeads: Int
+    var kvHeads: Int
     var contextLength: Int
     var queryLength: Int
     var fallbackDType: String
@@ -113,6 +116,17 @@ func argumentValues(_ name: String, default defaultValue: [Int]) -> [Int] {
     return values.isEmpty ? defaultValue : values
 }
 
+func argumentStrings(_ name: String, default defaultValue: [String]) -> [String] {
+    let arguments = CommandLine.arguments
+    guard let index = arguments.firstIndex(of: name), arguments.indices.contains(index + 1) else {
+        return defaultValue
+    }
+    let values = arguments[index + 1].split(separator: ",")
+        .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+        .filter { !$0.isEmpty }
+    return values.isEmpty ? defaultValue : values
+}
+
 func argumentString(_ name: String, default defaultValue: String) -> String {
     let arguments = CommandLine.arguments
     guard let index = arguments.firstIndex(of: name), arguments.indices.contains(index + 1) else {
@@ -126,6 +140,8 @@ func argumentCodec(_ name: String, default defaultValue: BenchmarkCodec) -> Benc
     switch raw {
     case "raw":
         return .raw
+    case "affine_k8_v4", "affineK8V4", "affine-k8-v4", "k8v4", "k8_v4":
+        return .affineK8V4
     case "affine_int4", "affineInt4", "affine-int4":
         return .affineInt4
     default:
@@ -189,13 +205,14 @@ func timed(iterations: Int, _ body: () throws -> MLXArray) throws -> (Double, ML
 func makeCases(
     releaseMatrix: Bool,
     headDims: [Int],
+    queryHeads: Int,
+    kvHeads: Int,
     contexts: [Int],
-    queryLengths: [Int]
+    queryLengths: [Int],
+    cacheLayouts: [String]
 ) -> [BenchmarkCase] {
     let fallbackDTypes = releaseMatrix ? ["fp16", "bf16", "fp32"] : ["fp16"]
     let masks = releaseMatrix ? ["causal", "additive", "bool"] : ["causal"]
-    let cacheLayouts =
-        releaseMatrix ? ["contiguous", "ring", "pinned_prefix"] : ["contiguous", "ring"]
     var cases = [BenchmarkCase]()
     for headDim in headDims {
         for context in contexts {
@@ -206,8 +223,10 @@ func makeCases(
                             cases.append(
                                 BenchmarkCase(
                                     id:
-                                        "hd\(headDim)_ctx\(context)_q\(queryLength)_\(dtype)_\(mask)_\(cacheLayout)",
+                                        "qh\(queryHeads)_kvh\(kvHeads)_hd\(headDim)_ctx\(context)_q\(queryLength)_\(dtype)_\(mask)_\(cacheLayout)",
                                     headDim: headDim,
+                                    queryHeads: queryHeads,
+                                    kvHeads: kvHeads,
                                     contextLength: context,
                                     queryLength: queryLength,
                                     fallbackDType: dtype,
@@ -500,8 +519,8 @@ func runCase(
     }
 
     let batch = 1
-    let kvHeads = 2
-    let queryHeads = 4
+    let kvHeads = benchmarkCase.kvHeads
+    let queryHeads = benchmarkCase.queryHeads
     let headDim = benchmarkCase.headDim
     let context = benchmarkCase.contextLength
     let queryLength = benchmarkCase.queryLength
@@ -624,6 +643,76 @@ func runCase(
         )
     }
 
+    if codec == .affineK8V4 {
+        let qKeys = quantized(
+            keys,
+            groupSize: TurboQuantKVCodec.affineK8V4KeyGroupSize,
+            bits: TurboQuantKVCodec.affineK8V4KeyBits,
+            mode: .affine
+        )
+        let qValues = quantized(
+            valuesArray,
+            groupSize: TurboQuantKVCodec.affineK8V4ValueGroupSize,
+            bits: TurboQuantKVCodec.affineK8V4ValueBits,
+            mode: .affine
+        )
+        let keyTuple = (qKeys.wq, qKeys.scales, qKeys.biases)
+        let valueTuple = (qValues.wq, qValues.scales, qValues.biases)
+        let usesNativeMixedAttention = supportsNativeAffineK8V4ScaledDotProductAttention(
+            queries: queries,
+            quantizedKeys: keyTuple,
+            quantizedValues: valueTuple,
+            mask: attentionMask(benchmarkCase.mask)
+        )
+        let prefillLatency = Date.timeIntervalSinceReferenceDate
+        let (decodeLatency, output) = try timed(iterations: iterations) {
+            try mixedAffineK8V4ScaledDotProductAttention(
+                queries: queries,
+                quantizedKeys: keyTuple,
+                quantizedValues: valueTuple,
+                scale: scale,
+                mask: attentionMask(benchmarkCase.mask)
+            )
+        }
+        let reference = MLXFast.scaledDotProductAttention(
+            queries: queries,
+            keys: keys,
+            values: valuesArray,
+            scale: scale,
+            mask: attentionMask(benchmarkCase.mask)
+        )
+        let quality = qualityGate(
+            candidate: output,
+            reference: reference,
+            prefillExact: true
+        )
+        return BenchmarkResult(
+            id: benchmarkCase.id,
+            status: "ok",
+            benchmarkCase: benchmarkCase,
+            shape: output.shape,
+            latencySeconds: decodeLatency,
+            memory: BenchmarkMemoryMetrics(
+                compressedKeyBytes: qKeys.wq.nbytes + qKeys.scales.nbytes
+                    + (qKeys.biases?.nbytes ?? 0),
+                compressedValueBytes: qValues.wq.nbytes + qValues.scales.nbytes
+                    + (qValues.biases?.nbytes ?? 0)
+            ),
+            throughput: BenchmarkThroughputMetrics(
+                decodeTokensPerSecond: Double(queryLength) / max(decodeLatency, .leastNonzeroMagnitude),
+                prefillTokensPerSecond: Double(context)
+                    / max(Date.timeIntervalSinceReferenceDate - prefillLatency, .leastNonzeroMagnitude),
+                firstTokenLatencySeconds: queryLength == 1 ? decodeLatency : nil
+            ),
+            quality: quality,
+            selectedPath: usesNativeMixedAttention ? .affineK8V4Native : .mlxPackedFallback,
+            fallbackReason: usesNativeMixedAttention
+                ? nil
+                : "mixed affine K8/V4 uses quantizedMM QK + quantizedMM AV",
+            error: nil
+        )
+    }
+
     let cache: any TurboQuantCompressedKVCacheProtocol
     switch benchmarkCase.cacheLayout {
     case "ring":
@@ -709,18 +798,26 @@ let iterations = argumentValue("--iterations", default: 10)
 let codec = argumentCodec("--codec", default: .polarQJL)
 let releaseMatrix = hasFlag("--release-matrix")
 let headDims = argumentValues("--head-dims", default: [64, 80, 96, 128, 192, 256])
+let queryHeads = argumentValue("--query-heads", default: 4)
+let kvHeads = argumentValue("--kv-heads", default: 2)
 let contexts = argumentValues(
     "--contexts",
     default: releaseMatrix ? [1024, 4096, 8192, 16384, 32768, 65536] : [1024]
 )
 let queryLengths = argumentValues(
     "--query-lengths", default: releaseMatrix ? [1, 4, 16, 128] : [1])
+let cacheLayouts = argumentStrings(
+    "--cache-layouts",
+    default: releaseMatrix ? ["contiguous", "ring", "pinned_prefix"] : ["contiguous"])
 let availability = TurboQuantKernelAvailability.current
 let cases = makeCases(
     releaseMatrix: releaseMatrix,
     headDims: headDims,
+    queryHeads: queryHeads,
+    kvHeads: kvHeads,
     contexts: contexts,
-    queryLengths: queryLengths
+    queryLengths: queryLengths,
+    cacheLayouts: cacheLayouts
 )
 
 var results = [BenchmarkResult]()
@@ -757,8 +854,8 @@ let modelConfig = BenchmarkModelConfig(
     family: environmentValue("TURBOQUANT_BENCHMARK_MODEL_FAMILY", default: "synthetic"),
     hiddenSize: argumentValue("--hidden-size", default: 4096),
     layerCount: argumentValue("--layers", default: 32),
-    attentionHeads: argumentValue("--attention-heads", default: 32),
-    kvHeads: argumentValue("--kv-heads", default: 8),
+    attentionHeads: queryHeads,
+    kvHeads: kvHeads,
     headDim: headDims.first ?? 128,
     rope: TurboQuantRoPEFingerprint(
         type: environmentValue("TURBOQUANT_BENCHMARK_ROPE_TYPE", default: "llama"),
@@ -797,16 +894,28 @@ let report = BenchmarkReport(
         codec: codec.rawValue,
         layoutVersion: TurboQuantAttentionLayout.currentVersion,
         path: firstSelectedPath?.rawValue,
-        backend: codec == .affineInt4 ? TurboQuantBackend.mlxPacked.rawValue : "metalPolarQJL",
+        backend: (codec == .affineInt4 || codec == .affineK8V4)
+            ? TurboQuantBackend.mlxPacked.rawValue : "metalPolarQJL",
         preset: TurboQuantPreset.turbo4v2.rawValue,
-        keyBits: Double(TurboQuantPreset.turbo4v2.targetMagnitudeBits),
+        keyBits: codec == .affineK8V4
+            ? Double(TurboQuantKVCodec.affineK8V4KeyBits)
+            : Double(TurboQuantPreset.turbo4v2.targetMagnitudeBits),
         valueBits: codec == .affineInt4
-            ? TurboQuantKVCodec.affineInt4Bits : TurboQuantPreset.turbo4v2.defaultValueBits,
-        groupSize: codec == .affineInt4 ? TurboQuantKVCodec.affineInt4DefaultGroupSize : 64,
+            ? TurboQuantKVCodec.affineInt4Bits
+            : codec == .affineK8V4
+                ? TurboQuantKVCodec.affineK8V4ValueBits : TurboQuantPreset.turbo4v2.defaultValueBits,
+        groupSize: codec == .affineInt4
+            ? TurboQuantKVCodec.affineInt4DefaultGroupSize
+            : codec == .affineK8V4 ? TurboQuantKVCodec.affineK8V4KeyGroupSize : 64,
         scaleBiasBytes: codec == .affineInt4
             ? (cases.first.map {
                 4 * 2 * 2 * $0.contextLength * max(1, $0.headDim / TurboQuantKVCodec.affineInt4DefaultGroupSize)
             })
+            : codec == .affineK8V4
+                ? (cases.first.map {
+                    4 * 2 * 2 * $0.contextLength
+                        * max(1, $0.headDim / TurboQuantKVCodec.affineK8V4KeyGroupSize)
+                })
             : nil,
         fallbackPolicy: "compressedDecodeAllowed",
         kernelProfile: availability.selectedKernelProfile.rawValue,

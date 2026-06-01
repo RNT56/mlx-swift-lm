@@ -581,6 +581,25 @@ extension GenerateParameters {
             resolved.turboQuantPerCacheResidentBudgetBytes = nil
             return resolved
         }
+        if kvCacheStrategy == .adaptiveTurboQuant,
+            runtimeSelection.route == .throughputTurboQuantNativeSDPA
+        {
+            resolved.kvCacheStrategy = .affineK8V4
+            resolved.kvCodec = .affineK8V4
+            resolved.kvBits = TurboQuantKVCodec.affineK8V4KeyBits
+            resolved.kvGroupSize = TurboQuantKVCodec.affineK8V4KeyGroupSize
+            resolved.turboQuantBackend = .mlxPacked
+            resolved.turboQuantValueBits = TurboQuantKVCodec.affineK8V4ValueBits
+            resolved.quantizedKVStart = max(
+                resolved.quantizedKVStart,
+                resolved.turboQuantRawSDPAThreshold
+            )
+            resolved.turboQuantRuntimeFallbackReason =
+                runtimeSelection.fallbackReason
+                ?? "adaptive throughput route selected native affine K8/V4; Polar/QJL TurboQuant remains reserved for capacity mode"
+            resolved.turboQuantPerCacheResidentBudgetBytes = nil
+            return resolved
+        }
         resolved.kvCacheStrategy = .turboQuant
         resolved.quantizedKVStart = 0
         return resolved
@@ -608,6 +627,34 @@ extension GenerateParameters {
         if TurboQuantRuntimeControl.enabled("TURBOQUANT_FORCE_PACKED") {
             resolved.kvCacheStrategy = .mlxAffine
             resolved.kvBits = resolved.turboQuantPreset.effectiveBits
+            resolved.turboQuantPerCacheResidentBudgetBytes = nil
+            return resolved
+        }
+        if TurboQuantRuntimeControl.enabled("TURBOQUANT_FORCE_AFFINE_K8V4")
+            || TurboQuantRuntimeControl.enabled("TURBOQUANT_FAST_AFFINE_K8V4")
+        {
+            resolved.kvCacheStrategy = .affineK8V4
+            resolved.kvCodec = .affineK8V4
+            resolved.kvBits = TurboQuantKVCodec.affineK8V4KeyBits
+            resolved.kvGroupSize = TurboQuantKVCodec.affineK8V4KeyGroupSize
+            resolved.turboQuantBackend = .mlxPacked
+            resolved.turboQuantValueBits = TurboQuantKVCodec.affineK8V4ValueBits
+            resolved.quantizedKVStart = max(
+                resolved.quantizedKVStart,
+                resolved.turboQuantRawSDPAThreshold
+            )
+            resolved.turboQuantPerCacheResidentBudgetBytes = nil
+            return resolved
+        }
+        if TurboQuantRuntimeControl.enabled("TURBOQUANT_FORCE_AFFINE_INT4")
+            || TurboQuantRuntimeControl.enabled("TURBOQUANT_FAST_AFFINE_INT4")
+        {
+            resolved.kvCacheStrategy = .affineInt4
+            resolved.kvCodec = .affineInt4
+            resolved.kvBits = TurboQuantKVCodec.affineInt4Bits
+            resolved.kvGroupSize = TurboQuantKVCodec.affineInt4DefaultGroupSize
+            resolved.turboQuantBackend = .mlxPacked
+            resolved.turboQuantValueBits = TurboQuantKVCodec.affineInt4Bits
             resolved.turboQuantPerCacheResidentBudgetBytes = nil
             return resolved
         }
@@ -1179,6 +1226,7 @@ public struct TokenIterator: TokenIteratorProtocol {
 
             break
         }
+        quantizeDynamicKVCache()
     }
 
     mutating func convertToToken(logits: MLXArray) -> MLXArray {
@@ -1207,6 +1255,12 @@ public struct TokenIterator: TokenIteratorProtocol {
         self.state = result.state
 
         // Apply dynamic cache quantization after each step
+        quantizeDynamicKVCache()
+
+        return convertToToken(logits: result.logits)
+    }
+
+    private mutating func quantizeDynamicKVCache() {
         maybeQuantizeKVCache(
             cache: &cache,
             kvBits: kvBits,
@@ -1226,8 +1280,6 @@ public struct TokenIterator: TokenIteratorProtocol {
         if materializeRecurrentKVCacheState(cache) {
             requiresSynchronousGenerationEval = true
         }
-
-        return convertToToken(logits: result.logits)
     }
 
     private func evaluateGeneratedToken(_ token: MLXArray) {
@@ -1426,6 +1478,8 @@ public struct SpeculativeTokenIterator: TokenIteratorProtocol {
             draftY = .init(tokens: token)
             evaluateDraftGeneratedToken(draftY.tokens)
         }
+        quantizeKVCache(&mainCache)
+        quantizeKVCache(&draftCache)
         if materializeRecurrentKVCacheState(mainCache) {
             requiresSynchronousMainGenerationEval = true
             evaluateMainGeneratedToken(y.tokens)
@@ -1771,6 +1825,10 @@ public struct MTPTokenIterator: TokenIteratorProtocol {
             processor?.didSample(token: token)
             y = .init(tokens: token)
             state = result.state
+        }
+        quantizeKVCache(&cache)
+        for i in mtpCaches.indices {
+            quantizeKVCache(&mtpCaches[i])
         }
         if materializeRecurrentKVCacheState(cache) {
             requiresSynchronousGenerationEval = true

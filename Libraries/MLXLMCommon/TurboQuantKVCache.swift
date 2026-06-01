@@ -64,8 +64,13 @@ private let turboQuantValueSeedSalt: UInt64 = 0xD1B5_4A32_D192_ED03
 
 public enum TurboQuantKVCodec: String, Codable, Sendable, CaseIterable {
     case polarQJL = "polar_qjl"
+    case affineK8V4 = "affine_k8_v4"
     case affineInt4 = "affine_int4"
 
+    public static let affineK8V4KeyBits = 8
+    public static let affineK8V4ValueBits = 4
+    public static let affineK8V4KeyGroupSize = 64
+    public static let affineK8V4ValueGroupSize = 32
     public static let affineInt4Bits = 4
     public static let affineInt4DefaultGroupSize = 32
 
@@ -75,6 +80,8 @@ public enum TurboQuantKVCodec: String, Codable, Sendable, CaseIterable {
         switch value {
         case Self.polarQJL.rawValue, "polarQJL", "polar-qjl":
             self = .polarQJL
+        case Self.affineK8V4.rawValue, "affineK8V4", "affine-k8-v4", "k8v4":
+            self = .affineK8V4
         case Self.affineInt4.rawValue, "affineInt4", "affine-int4":
             self = .affineInt4
         default:
@@ -141,6 +148,7 @@ public struct TurboQuantRuntimeCacheFootprint: Equatable, Codable, Sendable {
 public enum KVCacheStrategy: String, Codable, Sendable, CaseIterable {
     case none
     case mlxAffine
+    case affineK8V4
     case affineInt4
     case adaptiveTurboQuant
     case hybridTurboQuant
@@ -158,6 +166,10 @@ extension KVCacheStrategy {
 
     public var createsAffineInt4CacheImmediately: Bool {
         self == .affineInt4
+    }
+
+    public var createsAffineK8V4CacheImmediately: Bool {
+        self == .affineK8V4
     }
 }
 
@@ -1776,7 +1788,8 @@ public final class TurboQuantKVCache: QuantizedKVCache, TurboQuantCompressedKVCa
             return false
         }
         let supportsNative =
-            nativeAttentionAvailable && queries.dim(2) <= 8 && turboQuantNativeSupportsMask(mask)
+            optimizationPolicy != .conservative && nativeAttentionAvailable
+            && queries.dim(2) <= 8 && turboQuantNativeSupportsMask(mask)
         let supportsTiled =
             queries.dim(3) == values.dim(3) && prefersOnlineFusedAttention
             && MLX.turboQuantMetalSupportsOnlineFusedAttention(
@@ -2896,7 +2909,8 @@ public final class RotatingTurboQuantKVCache: BaseKVCache, QuantizedKVCacheProto
             return false
         }
         let supportsNative =
-            nativeAttentionAvailable && queries.dim(2) <= 8 && turboQuantNativeSupportsMask(mask)
+            optimizationPolicy != .conservative && nativeAttentionAvailable
+            && queries.dim(2) <= 8 && turboQuantNativeSupportsMask(mask)
         let supportsTiled =
             queries.dim(3) == values.dim(3) && prefersOnlineFusedAttention
             && MLX.turboQuantMetalSupportsOnlineFusedAttention(

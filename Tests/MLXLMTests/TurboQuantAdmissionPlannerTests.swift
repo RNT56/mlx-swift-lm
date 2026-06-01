@@ -476,11 +476,14 @@ extension MLXRuntimeSwiftTests {
 
             let resolved = try parameters.resolvedForTurboQuantRuntime(layerCount: 24)
 
-            #expect(resolved.kvCacheStrategy == .turboQuant)
+            #expect(resolved.kvCacheStrategy == .affineK8V4)
+            #expect(resolved.kvCodec == .affineK8V4)
+            #expect(resolved.kvBits == TurboQuantKVCodec.affineK8V4KeyBits)
+            #expect(resolved.kvGroupSize == TurboQuantKVCodec.affineK8V4KeyGroupSize)
+            #expect(resolved.quantizedKVStart == 16_384)
             #expect(resolved.turboQuantResolvedRuntimeMode == .throughputTurboQuant)
             #expect(resolved.turboQuantResolvedPrecisionPolicy == .qwenQ4Default)
-            #expect(resolved.turboQuantPreset == .turbo8)
-            #expect(resolved.turboQuantValueBits == 4)
+            #expect(resolved.turboQuantValueBits == TurboQuantKVCodec.affineK8V4ValueBits)
             #expect((resolved.turboQuantAdmission?.memoryPlan.decodedActiveKVBytes ?? 0) > 0)
         }
 

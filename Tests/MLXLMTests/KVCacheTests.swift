@@ -328,7 +328,11 @@ extension MLXRuntimeSwiftTests {
             #expect(output.shape == [2, 4, 1, 64])
             #expect(cache.activeBackend == .metalPolarQJL)
             #expect(cache.compressedState != nil)
-            #expect(cache.attentionDiagnostics.activeAttentionPath == .tiledOnlineFused)
+            let expectedPath: TurboQuantAttentionPath =
+                TurboQuantKernelAvailability.current.attentionCapabilities.nativeCompressedAttention == true
+                ? .nativeMLXCompressed
+                : .tiledOnlineFused
+            #expect(cache.attentionDiagnostics.activeAttentionPath == expectedPath)
             #expect(cache.attentionDiagnostics.rawFallbackAllocated == false)
         }
 
@@ -591,6 +595,121 @@ extension MLXRuntimeSwiftTests {
             #expect(rotating.maxSize == 32)
             #expect(rotating.groupSize == 64)
             #expect(rotating.bits == TurboQuantKVCodec.affineInt4Bits)
+        }
+
+        @Test func testAffineK8V4StrategyUsesRawStartThreshold() throws {
+            let delayed = makeAttentionKVCache(
+                parameters: GenerateParameters(
+                    maxKVSize: 32,
+                    quantizedKVStart: 16,
+                    kvCacheStrategy: .affineK8V4,
+                    kvCodec: .affineK8V4
+                )
+            )
+            #expect(delayed is RotatingKVCache)
+            #expect(!(delayed is any QuantizedKVCacheProtocol))
+
+            let immediate = try #require(
+                makeAttentionKVCache(
+                    parameters: GenerateParameters(
+                        kvCacheStrategy: .affineK8V4,
+                        kvCodec: .affineK8V4
+                    )
+                ) as? AffineK8V4KVCache)
+            #expect(immediate.keyBits == TurboQuantKVCodec.affineK8V4KeyBits)
+            #expect(immediate.valueBits == TurboQuantKVCodec.affineK8V4ValueBits)
+            #expect(immediate.keyGroupSize == TurboQuantKVCodec.affineK8V4KeyGroupSize)
+            #expect(immediate.valueGroupSize == TurboQuantKVCodec.affineK8V4ValueGroupSize)
+        }
+
+        @Test func testAffineK8V4TrimRollsBackNewestTokens() throws {
+            let cache = AffineK8V4KVCache()
+            let keyWeights = MLXArray([0, 1, 2, 3] as [Float]).reshaped([1, 1, 4, 1])
+            let keyScales = MLXArray([10, 11, 12, 13] as [Float]).reshaped([1, 1, 4, 1])
+            let valueWeights = MLXArray([20, 21, 22, 23] as [Float]).reshaped([1, 1, 4, 1])
+            let valueScales = MLXArray([30, 31, 32, 33] as [Float]).reshaped([1, 1, 4, 1])
+            cache.state = [keyWeights, keyScales, valueWeights, valueScales]
+            cache.metaState = [
+                "4",
+                "None",
+                "0",
+                String(TurboQuantKVCodec.affineK8V4KeyGroupSize),
+                String(TurboQuantKVCodec.affineK8V4KeyBits),
+                String(TurboQuantKVCodec.affineK8V4ValueGroupSize),
+                String(TurboQuantKVCodec.affineK8V4ValueBits),
+                QuantizationMode.affine.rawValue,
+            ]
+
+            #expect(cache.trim(1) == 1)
+
+            let state = cache.state
+            #expect(cache.offset == 3)
+            #expect(state[0].shape == [1, 1, 3, 1])
+            #expect(state[0].asArray(Float.self) == [0, 1, 2])
+            #expect(state[2].asArray(Float.self) == [20, 21, 22])
+        }
+
+        @Test func testAffineK8V4PreallocatesCapacityWhileReturningActiveState() throws {
+            let cache = AffineK8V4KVCache(maxSize: 8)
+            let keys = MLXArray.ones([1, 1, 3, 64], dtype: .float32)
+            let values = MLXArray.ones([1, 1, 3, 64], dtype: .float32)
+            _ = cache.updateQuantized(keys: keys, values: values)
+            _ = cache.updateQuantized(
+                keys: MLXArray.ones([1, 1, 2, 64], dtype: .float32),
+                values: MLXArray.ones([1, 1, 2, 64], dtype: .float32)
+            )
+
+            let quantizedState = try #require(cache.getQuantizedState())
+            let snapshot = cache.runtimeSnapshot()
+
+            #expect(cache.offset == 5)
+            #expect(quantizedState.0.0.shape == [1, 1, 5, 16])
+            #expect(quantizedState.1.0.shape == [1, 1, 5, 8])
+            #expect(snapshot.logicalLength == 5)
+            #expect(snapshot.capacity == 8)
+            #expect(snapshot.kvCodec == .affineK8V4)
+            #expect(snapshot.lastAttentionPath == TurboQuantAttentionPath.affineK8V4Native.rawValue)
+            #expect(snapshot.keyBytes > 0)
+            #expect(snapshot.valueBytes > 0)
+        }
+
+        @Test func testAffineK8V4AttentionUsesMixedQuantizedState() throws {
+            guard Device.defaultDevice().deviceType == .gpu else { return }
+            let cache = AffineK8V4KVCache()
+            let queries = MLXArray.ones([1, 4, 1, 256], dtype: .float16)
+            let keys = MLXArray.ones([1, 1, 1, 256], dtype: .float16)
+            let values = MLXArray.ones([1, 1, 1, 256], dtype: .float16)
+
+            let result = try attentionWithCacheUpdateReturningStateThrowing(
+                queries: queries,
+                keys: keys,
+                values: values,
+                cache: cache,
+                scale: 1 / sqrt(Float(256)),
+                mask: .causal
+            )
+
+            #expect(result.output.shape == [1, 4, 1, 256])
+            if case .quantized(_, _, let routedCache) = result.state {
+                #expect(routedCache is any NativeAffineK8V4KVCacheProtocol)
+                let expectedPath =
+                    supportsNativeAffineK8V4ScaledDotProductAttention(
+                        queries: queries,
+                        quantizedKeys: cache.getQuantizedState()!.0,
+                        quantizedValues: cache.getQuantizedState()!.1,
+                        mask: .causal,
+                        keyGroupSize: cache.keyGroupSize,
+                        keyBits: cache.keyBits,
+                        valueGroupSize: cache.valueGroupSize,
+                        valueBits: cache.valueBits
+                    )
+                    ? TurboQuantAttentionPath.affineK8V4Native
+                    : TurboQuantAttentionPath.mlxPackedFallback
+                #expect(cache.activeAttentionPath == expectedPath)
+                #expect(cache.runtimeSnapshot().selectedPath == expectedPath.rawValue)
+            } else {
+                Issue.record("affine K8/V4 attention did not return quantized state")
+            }
         }
 
         @Test func testAffineInt4AttentionUsesQuantizedNativeState() throws {
@@ -1056,7 +1175,11 @@ extension MLXRuntimeSwiftTests {
             #expect(cache.compressedState != nil)
             #expect(compressedKeys.layout.logicalLength == 2)
             #expect(compressedValues.layout.logicalLength == 2)
-            #expect(cache.attentionDiagnostics.activeAttentionPath == .tiledOnlineFused)
+            let expectedPath: TurboQuantAttentionPath =
+                TurboQuantKernelAvailability.current.attentionCapabilities.nativeCompressedAttention == true
+                ? .nativeMLXCompressed
+                : .tiledOnlineFused
+            #expect(cache.attentionDiagnostics.activeAttentionPath == expectedPath)
             #expect(cache.attentionDiagnostics.rawFallbackAllocated == false)
         }
 
@@ -1360,7 +1483,11 @@ extension MLXRuntimeSwiftTests {
                 )
             )
             #expect(cache.prefersOnlineFusedAttention == true)
-            #expect(cache.attentionDiagnostics.activeAttentionPath == .tiledOnlineFused)
+            let expectedPath: TurboQuantAttentionPath =
+                TurboQuantKernelAvailability.current.attentionCapabilities.nativeCompressedAttention == true
+                ? .nativeMLXCompressed
+                : .tiledOnlineFused
+            #expect(cache.attentionDiagnostics.activeAttentionPath == expectedPath)
         }
 
         @Test func testRotatingTurboQuantCompressedStateIsRawFreeWhenAvailable() throws {
