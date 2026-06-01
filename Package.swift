@@ -50,7 +50,7 @@ let package = Package(
     dependencies: [
         .package(
             url: "https://github.com/RNT56/mlx-swift",
-            revision: "d2586a242d456d8ef69d185e5e33f13b9f1dd4ad"),
+            revision: "609e8333671419ee1dbe928eeee7f48a24682631"),
         .package(url: "https://github.com/swiftlang/swift-syntax.git", "600.0.0" ..< "604.0.0"),
     ],
     targets: [
