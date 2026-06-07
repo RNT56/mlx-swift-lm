@@ -48,16 +48,24 @@ Qwen3-4B/Llama-3.2-3B for representative validation, disk now freed).
   end-to-end `--validate-speculative` (plain vs speculative, byte-identical assert + tok/s).
 - **Result (Qwen3-0.6B, real model):** determinism gate **PASS (byte-identical)**;
   speedup quote **2.20×**, doc-edit **1.68×**, json **1.20×** (acceptance 1.0/0.95/0.76);
-  code 0.79×, prose 0.78× (low-acceptance → the inherent speculative overhead on a tiny
-  5 ms/token model; vanishes on the weight-dominated 4B/long-ctx target). Acceptance gate
-  artifacts: `artifacts/turboquant-acceptance-20260607/`.
+  code 0.79×, prose 0.78× (low-acceptance → inherent speculative overhead on a tiny
+  5 ms/token model). Acceptance gate artifacts: `artifacts/turboquant-acceptance-20260607/`.
+
+**N1 — ① validated on Qwen3-4B-4bit (DONE, supersedes the 0.6B "vanishes at scale" guess):**
+- Determinism **PASS (byte-identical) on all 10 runs** (short/8K/16K/32K). Clean speedups:
+  short ~0.9× (quote 1.22×), **8K 0.80× (regress despite 4.5 tok/forward)**, **16K 1.11–1.43×**.
+  32K 4.755× is **memory-wall-confounded** (16 GB host) — not a clean number.
+- Finding: ① is **context-gated, crossover ≈12–16K**; the multi-query forward cost scales with
+  q_seq so the forward is not cleanly weight-bandwidth-bound at ≤16K. Full report:
+  `artifacts/turboquant-acceptance-4b-20260607/N1-summary.md`. New helper:
+  `scripts/turboquant-build-acceptance-prompts.py`.
 
 ## 3. Lever ladder + status
 | lever | what | status |
 | --- | --- | --- |
 | Instrumentation (roofline/amortization) | GB/s + ms/qtok | **DONE** |
 | Combined affine 16K gate | promotion artifact | **DONE** |
-| ① n-gram self-speculation | weight-stream amortization, bit-exact | **DONE + validated** (needs 4B run + product wiring) |
+| ① n-gram self-speculation | weight-stream amortization, bit-exact | **DONE + validated on 0.6B AND Qwen3-4B** (N1 done — context-gated, crossover ≈12–16K; needs product wiring) |
 | ③ banked lm_head | shrink the 30%-of-weights head | **next — gating microbench first** |
 | PolarQJL metadata diet | realize paper 4–7× compression | **pending (the focus)** |
 | recency-tiering | exact-recent + harder cold tail | pending (capacity/quality) |
@@ -65,21 +73,36 @@ Qwen3-4B/Llama-3.2-3B for representative validation, disk now freed).
 
 ## 4. Next steps (prioritized — goal · gate · commands · files · acceptance)
 
-### N1. ① on Qwen3-4B / Llama-3.2-3B (disk freed) — show the clean weight-dominated speedup
-The 0.6B understates ① (tiny-model fallback overhead). Validate on a standard-attention 3–4B.
-- Download: `huggingface-cli download mlx-community/Qwen3-4B-4bit` (or `mlx-community/Llama-3.2-3B-Instruct-4bit`).
-- Tokenize prompts (python `transformers`) → `--prompt-ids-file`; run:
-  `.build/release/TurboQuantAcceptanceHarness --model-dir <snap> --prompt-ids-file <json> --validate-speculative --max-tokens 256 --ngram 3 --max-proposal 4 --eos <id>`
-- **Acceptance:** determinism PASS (byte-identical) + speedup ≥ ~1.0 on prose (no
-  regression at scale) and clear wins on structured/long-context. Also sweep at long
-  context (16K/32K prompts) where the weight stream dominates most.
+### N1. ① on Qwen3-4B (DONE 2026-06-07) — the win is CONTEXT-gated, not size-gated
+Ran on `mlx-community/Qwen3-4B-4bit` (standard attention; M2 Pro 16 GB). Full report +
+reproduce: `artifacts/turboquant-acceptance-4b-20260607/N1-summary.md`. Build prompts with
+`scripts/turboquant-build-acceptance-prompts.py`.
+- **Determinism gate PASS (byte-identical) on all 10 runs** (short/8K/16K/32K). ① is bit-exact
+  at 4B scale → N2 wiring is unblocked on correctness.
+- **Speedups (clean):** short 0.87–0.96× (regress) except quote-continue 1.224× (acceptance
+  0.84); **8K long-code/doc 0.80× — a 20% REGRESSION despite 4.5 tok/forward**; **16K
+  long-code 1.110×, long-doc 1.425×** (wins). 32K showed 4.755× but is **confounded by the
+  16 GB memory wall** (plain baseline collapsed super-linearly to 3.96 tok/s) — do NOT quote it
+  as a clean ① number; the clean wins are 16K.
+- **Mechanism:** the multi-query verify forward cost SCALES with q_seq (~5.6×/forward at
+  q_seq=5 @8K), so the full-model forward is NOT cleanly weight-bandwidth-bound at ≤16K. ①
+  wins only once context is large enough that amortized KV-read growth beats q_seq compute
+  scaling → **crossover ≈12–16K** on this model.
+- **This corrects** the earlier "tiny-model artifact, vanishes at 4B" framing (§7) and the
+  memory reframe's "speculative decode is the real tok/s lever ≤47K": ① is a **long-context
+  (≥~16K) lever**, gated on context not model size.
+- **Next precision probe (optional):** full-model q_seq=1-vs-{2,4,8} forward microbench
+  (extends `TurboQuantNativeVxBenchmark --query-lengths` past attention into MLP+lm_head — the
+  unmeasured gap in gotcha #4) to pin the crossover analytically.
 
 ### N2. ① product wiring (admission-gate + Pines)
 - Add a `GenerateParameters` opt-in (e.g. `selfSpeculationMode = .promptLookup` + ngram/width)
   and route `generate()` to `NgramSpeculativeTokenIterator` when enabled.
-- **Admission rule:** enable only in the weight-dominated regime (large model OR long
-  context); the EMA floor (default 0.5) is an on-device tuning constant — lower it on
-  bigger/longer-context models.
+- **Admission rule (now data-backed by N1):** gate on **context ≥ ~16K**, NOT merely "large
+  model" — Qwen3-4B at 8K regresses 20% even on perfectly-repetitive content, and the EMA
+  floor alone does not prevent the short/medium-context regression. The crossover scales with
+  per-forward KV cost, so re-measure the threshold per model/cache (FP16 vs compressed). EMA
+  floor (default 0.5) stays an on-device tuning constant.
 - Wire through Pines `MLXRuntimeBridge` behind a flag; validate output identity in the app.
 - **Gate:** forced-rejection determinism test on the hybrid Qwen3.5 (MambaCache rollback
   correctness is UNTESTED — see caveats); byte-identical greedy stream vs non-speculative.
@@ -160,8 +183,13 @@ json.dump([{"label":k,"ids":tok.encode(v)} for k,v in prompts.items()], open("pr
 - Artifacts: `artifacts/turboquant-roofline-20260607/`, `artifacts/turboquant-acceptance-20260607/`.
 
 ## 7. Caveats / non-claims
-- ① wins are workload-gated (high on structured/repetitive long-context; ~1.0× on
-  free-form via the EMA gate). The 0.6B <1× on low-acceptance is a tiny-model artifact.
+- ① wins are **workload-gated AND context-gated** (N1): high on structured/repetitive
+  ≥16K-context; **regresses ~0.80–0.96× below the ≈12–16K crossover even at 4B and even at
+  4.5 tok/forward.** The earlier "0.6B <1× is just a tiny-model artifact that vanishes at
+  scale" guess is WRONG — the 4B regresses at 8K too. Do not claim a general ① decode speedup;
+  it is a long-context lever.
+- Do not quote the **32K 4.755×** as a clean ① result — it is inflated by the 16 GB host's
+  memory wall on the FP16 32K cache (plain baseline collapsed to 3.96 tok/s). Clean wins: 16K.
 - Speculative rollback on the recurrent `MambaCache` (Qwen3.5 hybrid) is **UNTESTED** —
   forced-rejection determinism gate required before ① runs on the hybrid (N2).
 - PolarQJL diet is a **compression/quality** win; do not claim PolarQJL *speed* parity
