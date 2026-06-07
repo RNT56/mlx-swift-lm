@@ -56,6 +56,27 @@ public struct PromptLookupSpeculator {
         for token in newTokens { append(token) }
     }
 
+    /// Truncate the running sequence back to `count` tokens, exactly reversing the
+    /// `append`s that grew it past `count`. Used by optimistic-prefetch speculation
+    /// (lever ①/N7) to roll back tokens that were appended on a full-acceptance
+    /// assumption when the verify later rejected them. O(removed × ngram).
+    public mutating func truncate(to count: Int) {
+        guard count >= 0, count < tokens.count else { return }
+        while tokens.count > count {
+            let n = tokens.count
+            if n >= ngram {
+                // `append` added a window starting at (n - ngram) when the count reached n.
+                let start = n - ngram
+                let h = windowHash(start: start)
+                if var arr = index[h] {
+                    if arr.last == start { arr.removeLast() }
+                    if arr.isEmpty { index[h] = nil } else { index[h] = arr }
+                }
+            }
+            tokens.removeLast()
+        }
+    }
+
     /// Propose up to `maxProposalTokens` guesses for the tokens immediately
     /// following the current sequence. Empty if no earlier match exists.
     public func propose() -> [Int] {

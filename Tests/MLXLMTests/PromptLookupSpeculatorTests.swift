@@ -99,4 +99,60 @@ struct PromptLookupSpeculatorTests {
         #expect(stats.forwards >= 1)
         #expect(stats.tokensPerForward >= 1.0)
     }
+
+    // ----- truncate (N7 optimistic-prefetch rollback building block) -----
+
+    @Test func truncateThenProposeEqualsNeverAppended() {
+        // The core invariant: appending then truncating leaves the proposer in the
+        // SAME state as if the truncated tokens were never appended.
+        let base = [5, 6, 7, 8, 9, 5, 6, 7]
+        let speculative = [99, 42, 7]  // wrong drafts appended on a full-accept guess
+        var rolled = PromptLookupSpeculator(ngram: 3, maxProposalTokens: 8)
+        rolled.append(contentsOf: base)
+        rolled.append(contentsOf: speculative)
+        rolled.truncate(to: base.count)
+        var clean = PromptLookupSpeculator(ngram: 3, maxProposalTokens: 8)
+        clean.append(contentsOf: base)
+        #expect(rolled.count == clean.count)
+        #expect(rolled.propose() == clean.propose())
+    }
+
+    @Test func truncateRestoresIndexForFutureMatches() {
+        // After rollback, a future append that recreates a window must still match the
+        // original earlier occurrence (index not corrupted by the popped speculative window).
+        var s = PromptLookupSpeculator(ngram: 3, maxProposalTokens: 8)
+        s.append(contentsOf: [1, 2, 3, 4, 5])  // window [1,2,3] recorded at 0
+        s.append(contentsOf: [1, 2, 3, 77])  // optimistic, wrong
+        s.truncate(to: 5)  // back to [1,2,3,4,5]
+        s.append(contentsOf: [1, 2, 3])  // now [1,2,3,4,5,1,2,3]; last [1,2,3] matches at 0
+        #expect(s.propose() == [4, 5, 1, 2, 3])
+    }
+
+    @Test func truncateNoOpWhenCountAtOrAboveLength() {
+        var s = PromptLookupSpeculator(ngram: 2, maxProposalTokens: 4)
+        s.append(contentsOf: [3, 1, 4, 1, 5])
+        let before = s.propose()
+        s.truncate(to: 5)  // == length: no-op
+        s.truncate(to: 99)  // > length: no-op
+        #expect(s.count == 5)
+        #expect(s.propose() == before)
+    }
+
+    @Test func repeatedAppendTruncateCyclesAreStable() {
+        // Mimics many prefetch mispredicts: append-then-truncate repeatedly must keep the
+        // proposer identical to the committed-only baseline.
+        var pipelined = PromptLookupSpeculator(ngram: 3, maxProposalTokens: 6)
+        var baseline = PromptLookupSpeculator(ngram: 3, maxProposalTokens: 6)
+        let committed = [2, 3, 5, 7, 11, 2, 3, 5, 13, 2, 3, 5]
+        for (i, tok) in committed.enumerated() {
+            // Optimistically append two wrong tokens, then roll them back before committing.
+            let mark = pipelined.count
+            pipelined.append(contentsOf: [9990 + i, 9991 + i])
+            pipelined.truncate(to: mark)
+            pipelined.append(tok)
+            baseline.append(tok)
+        }
+        #expect(pipelined.count == baseline.count)
+        #expect(pipelined.propose() == baseline.propose())
+    }
 }
