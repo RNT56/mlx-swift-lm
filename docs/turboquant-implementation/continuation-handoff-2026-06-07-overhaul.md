@@ -68,7 +68,7 @@ Qwen3-4B/Llama-3.2-3B for representative validation, disk now freed).
 | ① n-gram self-speculation | weight-stream amortization, bit-exact | **DONE + validated on 0.6B AND Qwen3-4B** (N1 done — context-gated, crossover ≈12–16K; needs product wiring) |
 | N7 ① async prefetch | overlap verify forward, bit-exact | **DONE + validated** (opt-in/default-off): 16K long-doc 1.43→**1.76×**, 8K regression nearly gone; long-context lever |
 | ③ banked lm_head | shrink the 30%-of-weights head | **gating microbench DONE** — kernel-viable (subset 2.6–4.1× at batch=1) but product-modest (~6% of forward latency); build only coupled with ① |
-| PolarQJL metadata diet | realize paper 4–7× compression | **N4 step 1 (fp16 scales) already implemented + structurally tested in mlx-swift**; remaining = native numerical/KL gate + LM wiring + steps 2–4 (focused cross-repo cycle) |
+| PolarQJL metadata diet | realize paper 4–7× compression | **N4 codec-level DEVELOPED + VALIDATED** (mlx-swift `dc6b9bd`): diet quantified (8 b/val, payload 81%), fp16-scales quality-free, data-free Gaussian quantizer = 3.2× equal-quality / 5.33× @ cos 0.982. 4–7× lever = PAYLOAD quantizer not metadata. Remaining = production encode/decode + Metal integration |
 | recency-tiering | exact-recent + harder cold tail | **VALIDATED (N5)** — wide edge protection (`affineK8V3-protectedK8V4-edge6`) recovers V3 bulk to near-V4 quality (Qwen3-4B@32K cosine 0.9973→0.9988); narrow protection neutral/negative. Capacity/quality, modest. |
 | ② recurrent-sync removal | Qwen3.5 product-only | **DONE** (N6) — folded 2→1 sync+clearCache/token on the hybrid recurrent path; byte-identical on Qwen3.5-2B, KVCacheTests green; no % claim (timing probe pending) |
 
@@ -103,6 +103,18 @@ promotion rules) and the models for it (Qwen3.5-2B hybrid for N6; mlx-swift kern
   validation. **Conclusion: N4 is a diagnostic-path research cycle** (wire `attentionScaleStorage` into
   `CacheConfig` + a PolarQJL-native quality run, ideally on faster hardware), de-prioritized vs the
   validated affine work.
+  **N4 DEVELOPED + VALIDATED at the codec/algorithm level (2026-06-07, mlx-swift commit `dc6b9bd`,
+  `Tests/MLXTests/TurboQuantCodecDietTests.swift` — CPU reference codec, fast).** Quantified the diet
+  (the roadmap never measured it): turbo3_5/role=.vector/group64/Gaussian = **8.000 bits/value (2.00×
+  vs fp16), cosine 0.998762; payload 81% of bytes, scale metadata 19%.** Validated levers: **(1) fp16
+  scales = quality-free** (cosine Δ −6e-8) saving 0.75 b/val; (2) one-norm-per-vector saves 1.25 b/val
+  (metadata) → the **metadata diet alone reaches only ~2.37×**; (3) **a data-free Gaussian Lloyd-Max
+  payload quantizer** (optimal scalar quantizer for the post-rotation Gaussian, centroids from the
+  N(0,1) pdf — no data) **matches the codec's quality at ~5 b/val vs 8 → 3.2× at EQUAL quality**, and
+  3-bit reaches **5.33× at cosine 0.982** (paper range). **CORRECTION:** the paper's 4–7× lives in the
+  **payload quantizer (81% of bytes), NOT the scale metadata** (the roadmap had this backwards). The
+  algorithm is proven on this Mac; the remaining work is integrating the payload quantizer into the
+  production encode/decode + Metal kernels (the slow/native part), separate from this validated proof.
 - **N5 — VALIDATED via the real-model KL/cos gate (2026-06-07).** The recency tier already exists
   two ways: the affine **protected-edge** configs (`affineK8V3-protectedK8V4-edge{4,5,6}`,
   `-last2`, `-protectedRaw` — recent/edge tokens at higher precision, bulk compressed) AND
