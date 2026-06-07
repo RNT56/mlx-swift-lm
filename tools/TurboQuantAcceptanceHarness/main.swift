@@ -109,7 +109,8 @@ struct TurboQuantAcceptanceHarness {
                   --output <path>          write JSON report
 
                   --validate-speculative   plain greedy vs n-gram speculative (determinism + tok/s)
-                  --prefetch               (with --validate-speculative) enable N7 async optimistic prefetch
+                  --prefetch               (with --validate-speculative/--validate-routing) enable N7 prefetch
+                  --validate-routing       N2: plain vs makeGenerationIterator(.promptLookup), byte-identity
                   --forward-scaling        full-model q_seq forward-cost microbench (N1 follow-up):
                     --contexts <csv>          prefill lengths L to slice from prompt[0] (default 0,2048,8192,16384)
                     --query-lengths <csv>     q_seq widths to time (default 1,2,4,8)
@@ -223,6 +224,66 @@ struct TurboQuantAcceptanceHarness {
                 try enc.encode(dump).write(to: URL(fileURLWithPath: dumpPath), options: .atomic)
                 print("wrote plain token dump: \(dumpPath)")
             }
+            return
+        }
+
+        // ----- N2 product-routing determinism gate -----
+        // Drive BOTH plain (.off) and self-speculation (.promptLookup) through the product
+        // factory `makeGenerationIterator` and assert byte-identical greedy output. This
+        // validates the generate()-path routing/admission, not just the iterator in isolation.
+        if CommandLine.arguments.contains("--validate-routing") {
+            let enablePrefetch = CommandLine.arguments.contains("--prefetch")
+            let ngram = argInt("--ngram", default: 3)
+            struct RoutingRow: Sendable { var label: String; var identical: Bool; var firstMismatch: Int; var gen: Int }
+            let rows: [RoutingRow] = try await container.perform { (ctx: ModelContext) in
+                var out: [RoutingRow] = []
+                for prompt in prompts {
+                    let lm = LMInput(text: LMInput.Text(tokens: MLXArray(prompt.ids.map { Int32($0) })))
+                    func params(_ mode: SelfSpeculationMode) -> GenerateParameters {
+                        var p = GenerateParameters(maxTokens: maxTokens)
+                        p.temperature = 0
+                        p.selfSpeculationMode = mode
+                        p.selfSpeculationMinPromptTokens = 0  // force admission for the gate
+                        p.selfSpeculationNgram = ngram
+                        p.selfSpeculationMaxProposalTokens = maxProposal
+                        p.selfSpeculationPrefetch = enablePrefetch
+                        return p
+                    }
+                    func run(_ mode: SelfSpeculationMode) throws -> [Int] {
+                        var it = try makeGenerationIterator(
+                            input: lm, model: ctx.model, parameters: params(mode))
+                        var toks: [Int] = []
+                        for _ in 0 ..< maxTokens { guard let t = it.next() else { break }; toks.append(t) }
+                        Stream().synchronize()
+                        return toks
+                    }
+                    let plain = try run(.off)
+                    let spec = try run(.promptLookup)
+                    var firstMismatch = -1
+                    let n = Swift.min(plain.count, spec.count)
+                    for i in 0 ..< n where plain[i] != spec[i] { firstMismatch = i; break }
+                    out.append(
+                        RoutingRow(
+                            label: prompt.label, identical: plain == spec,
+                            firstMismatch: firstMismatch, gen: spec.count))
+                }
+                return out
+            }
+            print("prompt            identical  genTok")
+            print("---------------   ---------  ------")
+            var allIdentical = true
+            for r in rows {
+                if !r.identical { allIdentical = false }
+                print(
+                    [
+                        r.label.padding(toLength: 15, withPad: " ", startingAt: 0),
+                        r.identical ? "    yes  " : " NO@\(r.firstMismatch)",
+                        String(format: "%6d", r.gen),
+                    ].joined(separator: "   "))
+            }
+            print(
+                "\n=== N2 routing determinism gate: "
+                    + "\(allIdentical ? "PASS (all byte-identical)" : "FAIL (mismatch)") ===")
             return
         }
 

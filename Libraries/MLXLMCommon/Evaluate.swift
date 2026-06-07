@@ -60,10 +60,39 @@ public protocol LogitProcessor {
 /// - ``LogitProcessor``
 ///
 /// for the `TokenIterator`.
+/// Draft-model-free self-speculation mode (lever ①). `.off` is ordinary decode.
+/// `.promptLookup` routes generation through ``NgramSpeculativeTokenIterator`` when the
+/// prompt is at/above ``GenerateParameters/selfSpeculationMinPromptTokens`` and the cache
+/// is trimmable — bit-exact for greedy/no-processor, falling back to exact decode otherwise.
+public enum SelfSpeculationMode: String, Sendable, Codable, CaseIterable {
+    case off
+    case promptLookup
+}
+
 public struct GenerateParameters: Sendable {
 
     /// Step size for processing the prompt
     public var prefillStepSize: Int
+
+    // ---- N2: draft-model-free self-speculation (lever ①) ----
+
+    /// Self-speculation mode. Default `.off` (ordinary decode).
+    public var selfSpeculationMode: SelfSpeculationMode
+
+    /// n-gram match-window size for prompt-lookup proposals (default 3).
+    public var selfSpeculationNgram: Int
+
+    /// Max proposed tokens per speculative round (default 4).
+    public var selfSpeculationMaxProposalTokens: Int
+
+    /// Use the N7 async optimistic-prefetch pipeline (default true). Long-context lever; the
+    /// admission floor below keeps it out of the short-context regime where it doesn't pay.
+    public var selfSpeculationPrefetch: Bool
+
+    /// Admission floor: only self-speculate when the prompt has at least this many tokens.
+    /// Speculation is a long-context lever (N1: crossover ≈12–16K; prefetch erases the ≥8K
+    /// regression) — this is an on-device tuning constant, re-measure per model/cache.
+    public var selfSpeculationMinPromptTokens: Int
 
     /// Maximum tokens to generate
     public var maxTokens: Int?
@@ -291,7 +320,12 @@ public struct GenerateParameters: Sendable {
         frequencyPenalty: Float? = nil,
         frequencyContextSize: Int = 20,
         prefillStepSize: Int = 512,
-        spillMemoryWatermarkBytes: Int? = nil
+        spillMemoryWatermarkBytes: Int? = nil,
+        selfSpeculationMode: SelfSpeculationMode = .off,
+        selfSpeculationNgram: Int = 3,
+        selfSpeculationMaxProposalTokens: Int = 4,
+        selfSpeculationPrefetch: Bool = true,
+        selfSpeculationMinPromptTokens: Int = 8192
     ) {
         self.maxTokens = maxTokens
         self.maxKVSize = maxKVSize
@@ -350,6 +384,11 @@ public struct GenerateParameters: Sendable {
         self.frequencyPenalty = frequencyPenalty
         self.frequencyContextSize = frequencyContextSize
         self.prefillStepSize = prefillStepSize
+        self.selfSpeculationMode = selfSpeculationMode
+        self.selfSpeculationNgram = max(1, selfSpeculationNgram)
+        self.selfSpeculationMaxProposalTokens = max(1, selfSpeculationMaxProposalTokens)
+        self.selfSpeculationPrefetch = selfSpeculationPrefetch
+        self.selfSpeculationMinPromptTokens = max(0, selfSpeculationMinPromptTokens)
     }
 
     public func sampler() -> LogitSampler {
@@ -2755,7 +2794,7 @@ public func generate(
     wiredMemoryTicket: WiredMemoryTicket? = nil,
     tools: [[String: any Sendable]]? = nil
 ) throws -> AsyncStream<Generation> {
-    let iterator = try TokenIterator(
+    let iterator = try makeGenerationIterator(
         input: input, model: context.model, cache: cache, parameters: parameters)
     let (stream, _) = generateTask(
         promptTokenCount: input.text.tokens.size,
@@ -2765,6 +2804,34 @@ public func generate(
         wiredMemoryTicket: wiredMemoryTicket,
         tools: tools)
     return stream
+}
+
+/// Build the generation iterator for ``GenerateParameters``, selecting draft-model-free
+/// self-speculation (lever ①, N2) when ``GenerateParameters/selfSpeculationMode`` is
+/// `.promptLookup`, the prompt meets ``GenerateParameters/selfSpeculationMinPromptTokens``,
+/// and the cache is trimmable. Falls back to an ordinary ``TokenIterator`` otherwise —
+/// including non-trimmable hybrid (MambaCache) caches, where speculation cannot run safely.
+public func makeGenerationIterator(
+    input: LMInput, model: any LanguageModel, cache: [KVCache]? = nil,
+    parameters: GenerateParameters
+) throws -> any TokenIteratorProtocol {
+    if parameters.selfSpeculationMode == .promptLookup,
+        input.text.tokens.size >= parameters.selfSpeculationMinPromptTokens
+    {
+        let runtime = try resolvedGenerationParameters(for: model, parameters: parameters)
+        let resolvedCache = cache ?? model.newCache(parameters: runtime)
+        if canTrimPromptCache(resolvedCache) {
+            return try NgramSpeculativeTokenIterator(
+                input: input, model: model, cache: resolvedCache, parameters: parameters,
+                ngram: parameters.selfSpeculationNgram,
+                maxProposalTokens: parameters.selfSpeculationMaxProposalTokens,
+                enablePrefetch: parameters.selfSpeculationPrefetch)
+        }
+        // Non-trimmable cache (e.g. hybrid MambaCache): exact decode, no speculation.
+        return try TokenIterator(
+            input: input, model: model, cache: resolvedCache, parameters: parameters)
+    }
+    return try TokenIterator(input: input, model: model, cache: cache, parameters: parameters)
 }
 
 /// Generates text and tool calls asynchronously using speculative decoding with a draft model.
