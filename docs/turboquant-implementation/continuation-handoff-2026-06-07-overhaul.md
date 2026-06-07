@@ -165,16 +165,27 @@ the fallback path — it is that `NgramSpeculativeTokenIterator.speculateRound` 
 `TokenIterator` overlaps with `asyncEval` (Evaluate.swift:1527). The synchronous spec forward
 per-qtok (~28 ms @8K) loses to async-plain per-token (27.2 ms @8K) even though the *synchronous*
 ceiling is positive (1.2–1.47×).
-- **Fix:** pipeline the verify forward — `asyncEval` the next round's proposal+verify before the
-  CPU reads/accepts the current round, mirroring `TokenIterator`'s `asyncEval(token)` pattern; keep
-  the greedy argmax-all-positions fast path; only sync when a rollback is actually needed.
+- **It needs OPTIMISTIC PREFETCH, not a one-line `asyncEval`** (corrected after analysis): plain
+  `TokenIterator` pipelines by running "one token behind" — each forward's input is the previously
+  *known* sampled token, so it can `asyncEval(token)` and read the prior token without blocking.
+  Speculation can't do that: round R+1's input = (R's last accepted token) + (a proposal seeded
+  with R's accepted tokens), both of which require reading R's argmax. So the only way to keep the
+  GPU busy is to **optimistically assume full acceptance**, build + `asyncEval` R+1's verify forward
+  on that assumption, then read R's argmax — if fully accepted (the common case at high acceptance),
+  R+1 is already in flight (win); on a partial reject, R+1 ran on a wrong cache state and its KV
+  appends must be **rolled back/discarded** before recomputing.
+- **Correctness risk = the misprediction rollback.** R+1's speculative forward mutates the KV cache;
+  the discard path must fully restore cache state (trim R+1's appends + R's rejects). Pairs with the
+  EMA gate (only prefetch when recent acceptance is high, else it thrashes). This is a substantial
+  feature, NOT a refinement — give it its own implementation + determinism cycle.
 - **Expected:** the 1.2–1.47× synchronous ceiling becomes realizable at ALL contexts (not just
   ≥16K), and the long-context win rises from ~1.4× toward the ~1.8× async-fair ceiling.
-- **Gate:** byte-identical determinism (the verify still makes it exact) + re-run
-  `--validate-speculative` short/8K/16K + re-run `--forward-scaling` to confirm the spec path now
-  tracks the synchronous ms/qtok. After it lands, **re-measure the N2 admission crossover** (should
-  drop well below 12K). Hard cap: forward q_seq scaling still bounds ① at ~1.4–1.8×; KV-byte cuts
-  do not move it.
+- **Gate:** byte-identical determinism on greedy (`--validate-speculative` short/8K/16K) PLUS a
+  **forced-misprediction determinism test** (drafts deliberately wrong → output still byte-identical
+  to plain greedy, proving the rollback restores state) + re-run `--forward-scaling` to confirm the
+  spec path now tracks the synchronous ms/qtok. After it lands, **re-measure the N2 admission
+  crossover** (should drop well below 12K). Hard cap: forward q_seq scaling still bounds ① at
+  ~1.4–1.8×; KV-byte cuts do not move it.
 
 ## 5. Build / test / run
 ```bash
@@ -212,6 +223,20 @@ json.dump([{"label":k,"ids":tok.encode(v)} for k,v in prompts.items()], open("pr
   long,32k} + forward-scaling-qwen3-4b.{txt,json} + prompt-id inputs).
 
 ## 7. Caveats / non-claims
+- **① speculates ONLY for exact greedy decode with no logit processor (hardened 2026-06-07).**
+  An audit found the old `temperature > 0` branch was not distribution-correct for a deterministic
+  (point-mass) draft — it resampled from the full target `p` instead of the residual `(p − q)+`,
+  and processed via a *discarded* processor copy (processor state dropped). Both paths now **fail
+  closed to exact single-token decode** (`speculationExact = temperature == 0 && processor == nil`
+  gates the proposal; the verify is greedy-argmax only). Greedy determinism re-verified byte-identical
+  on Qwen3-4B post-fix (`validate-short-qwen3-4b-postfix.txt`). Correct residual-sampling +
+  processor carry for temp>0 is future work; until then ① is a greedy-only lever.
+- **① is harness-only — NOT wired into `generate()`/`generateTokens()`** (Evaluate.swift:2811 routes
+  only `TokenIterator`/`SpeculativeTokenIterator`/`MTPTokenIterator`). Product use needs N2, which is
+  correctly blocked on N7 (the admission crossover shifts once N7 lands).
+- The combined affine 16K gate is **one local single-sample synthetic report** — gate evidence, not
+  a downstream/product claim. Still needs randomized repeats, larger contexts, same-machine upstream
+  (`arozanov/turboquant-mlx` @ `6e928d7`), and on-device evidence per the promotion checklist.
 - ① wins are **workload-gated AND context-gated** (N1): high on structured/repetitive
   ≥16K-context; **regresses ~0.80–0.96× below the ≈12–16K crossover even at 4B and even at
   4.5 tok/forward.** The earlier "0.6B <1× is just a tiny-model artifact that vanishes at

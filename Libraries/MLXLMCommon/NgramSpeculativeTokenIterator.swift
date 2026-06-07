@@ -16,9 +16,13 @@ import MLX
 /// An acceptance EMA self-disables speculation when recent rounds accept little, so
 /// free-form generation degrades to ordinary single-token decode (no regression).
 ///
-/// Output is identical to a greedy ``TokenIterator`` for `temperature == 0`; for
-/// `temperature > 0` it uses the standard speculative-sampling acceptance rule
-/// (distribution-preserving).
+/// Speculation runs ONLY for exact greedy decode with no logit processor, where the
+/// multi-query verify makes the deterministic n-gram draft correctness-neutral, so the
+/// output is byte-identical to a greedy ``TokenIterator``. For `temperature > 0` or an
+/// active logit processor it falls back to exact single-token decode (no speculation):
+/// distribution-correct speculative sampling for a point-mass draft requires resampling
+/// the *residual* `(p - q)+` and carrying processor state across accepted tokens, which
+/// is not yet validated, so those paths fail closed to the exact decoder.
 public struct NgramSpeculativeTokenIterator: TokenIteratorProtocol {
 
     var y: LMInput.Text
@@ -194,9 +198,16 @@ public struct NgramSpeculativeTokenIterator: TokenIteratorProtocol {
         let remaining = maxTokens.map { $0 - tokenCount } ?? maxProposalTokens
         guard remaining > 0 else { return }
 
+        // Speculation is exact ONLY for greedy decode with no logit processor: the
+        // multi-query verify makes the deterministic n-gram draft correctness-neutral
+        // via argmax. For temperature > 0 or an active processor, distribution-correct
+        // speculative sampling (residual when the draft is a point mass) and processor-
+        // state carry are not yet validated, so fall back to exact single-token decode.
+        let speculationExact = parameters.temperature == 0 && processor == nil
         // Acceptance-gated proposal.
         var draft = [Int]()
-        let gateOpen = roundsCompleted < emaWarmupRounds || acceptanceEMA >= emaFloor
+        let gateOpen = speculationExact
+            && (roundsCompleted < emaWarmupRounds || acceptanceEMA >= emaFloor)
         if gateOpen {
             let proposed = speculator.propose()
             let budget = Swift.min(maxProposalTokens, Swift.max(0, remaining - 1))
@@ -215,60 +226,21 @@ public struct NgramSpeculativeTokenIterator: TokenIteratorProtocol {
         let verifyTokens = concatenated([y.tokens, draftArray])
         guard let result = forward(verifyTokens) else { return }
         modelForwards += 1
-        let mainLogits = result.logits
         let positions = draft.count + 1
         let verifyStart = verifyTokens.dim(0) - positions  // == 0
 
-        // Sample the model's token at each verify position.
-        var mainTokens = [Int]()
-        var mainProcessed = [MLXArray]()
-        if parameters.temperature == 0.0 && processor == nil {
-            // Greedy fast path: argmax all positions in ONE eval/sync (vs qL+1).
-            let slice = mainLogits[0, verifyStart..., 0...]  // [positions, vocab]
-            mainTokens = slice.argMax(axis: -1).asArray(Int.self)
-        } else if var verifyProcessor = processor {
-            for i in 0 ..< positions {
-                var logits = mainLogits[0..., verifyStart + i, 0...]
-                logits = verifyProcessor.process(logits: logits)
-                let token = sampler.sample(logits: logits)
-                verifyProcessor.didSample(token: token)
-                mainTokens.append(token.item(Int.self))
-                mainProcessed.append(logits)
-            }
-        } else {
-            for i in 0 ..< positions {
-                let logits = mainLogits[0..., verifyStart + i, 0...]
-                mainTokens.append(sampler.sample(logits: logits).item(Int.self))
-                mainProcessed.append(logits)
-            }
-        }
+        // Greedy fast path only — the gate guarantees we reach here exclusively for
+        // temperature == 0 with no logit processor, where the deterministic n-gram draft
+        // is correctness-neutral. Argmax all positions in ONE eval/sync (vs qL+1).
+        let slice = result.logits[0, verifyStart..., 0...]  // [positions, vocab]
+        let mainTokens = slice.argMax(axis: -1).asArray(Int.self)
 
         var accepted = 0
-        if parameters.temperature == 0.0 {
-            while accepted < draft.count && mainTokens[accepted] == draft[accepted] {
-                commit(mainTokens[accepted])
-                accepted += 1
-            }
-            commit(mainTokens[accepted])  // correction / bonus token
-        } else {
-            let temp = parameters.temperature
-            var corrected = false
-            while accepted < draft.count {
-                let x = draft[accepted]
-                let pTarget = MLX.softmax(mainProcessed[accepted] / temp, axis: -1)
-                let pTargetX = (pTarget.ndim == 2 ? pTarget[0, x] : pTarget[x]).item(Float.self)
-                // Draft is deterministic (prompt-lookup) -> q(x)=1, accept prob = pTarget(x).
-                if Float.random(in: 0 ..< 1) < pTargetX {
-                    commit(x)
-                    accepted += 1
-                } else {
-                    commit(mainTokens[accepted])  // resample from target (q is a point mass)
-                    corrected = true
-                    break
-                }
-            }
-            if !corrected && accepted == draft.count { commit(mainTokens[accepted]) }
+        while accepted < draft.count && mainTokens[accepted] == draft[accepted] {
+            commit(mainTokens[accepted])
+            accepted += 1
         }
+        commit(mainTokens[accepted])  // correction / bonus token
 
         // Roll back rejected drafts from the cache.
         let rejected = draft.count - accepted
