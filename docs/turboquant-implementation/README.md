@@ -26,10 +26,16 @@ Current status:
   synthetic app-host smoke have passed in recent runs, but product promotion
   still requires same-report real-model quality/throughput evidence, physical
   device evidence, and compatibility-pair proof.
-- The current continuation anchor is
-  [TurboQuant Continuation Handoff - 2026-06-07](continuation-handoff-2026-06-07.md).
-  Start there before changing code. It records the latest implementation state,
-  artifacts, verified commands, known nonclaims, and the first rerun command.
+- The current continuation anchor for the **inference-speed overhaul** is
+  [Speed-Overhaul Continuation Handoff - 2026-06-07](continuation-handoff-2026-06-07-overhaul.md)
+  (with [inference-speed-roadmap](inference-speed-roadmap-2026-06-07.md) for the
+  measured evidence and [overhaul-plan](overhaul-plan-2026-06-07.md) for the lever
+  ladder). Start there for speed/throughput work. Lever ① (no-draft n-gram
+  self-speculation) is implemented and validated (byte-exact; 1.2–2.2× on
+  structured/long-context workloads).
+- The earlier same-day anchor
+  [TurboQuant Continuation Handoff - 2026-06-07](continuation-handoff-2026-06-07.md)
+  remains valid for the affine quality-gate work (state, artifacts, nonclaims).
 - The practical upstream-comparable route is affine K8/V4. Upstream's pinned
   README K8+V4 row is the mixed affine route, not the PolarWHT-V scaffold.
   Full `polarWHTV3` and `hybridK8PolarWHTV3/V4` remain experimental diagnostics
