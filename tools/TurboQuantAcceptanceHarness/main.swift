@@ -106,6 +106,13 @@ struct TurboQuantAcceptanceHarness {
                   --max-proposal <n>       max proposed tokens per round (default 8)
                   --eos <id>               stop token id (optional)
                   --output <path>          write JSON report
+
+                  --validate-speculative   plain greedy vs n-gram speculative (determinism + tok/s)
+                  --forward-scaling        full-model q_seq forward-cost microbench (N1 follow-up):
+                    --contexts <csv>          prefill lengths L to slice from prompt[0] (default 0,2048,8192,16384)
+                    --query-lengths <csv>     q_seq widths to time (default 1,2,4,8)
+                    --iterations <n>          timed forwards per (L,k), median (default 12)
+                    --warmup <n>              untimed warmup forwards (default 3)
                 """)
             return
         }
@@ -202,6 +209,132 @@ struct TurboQuantAcceptanceHarness {
             }
             print(
                 "\n=== determinism gate: \(allIdentical ? "PASS (all byte-identical)" : "FAIL (mismatch)") ===")
+            return
+        }
+
+        // ----- Full-model q_seq forward-scaling microbench (N1 follow-up) -----
+        // Times a SINGLE forward of q_seq=k tokens over a cache prefilled to length L.
+        // Reports the "speculation ceiling" = ms_forward(k=1) / ms_per_qtok(k): the max
+        // tok/s multiplier ① could reach at width k with 100% acceptance. If <1 at a
+        // context, even perfect acceptance loses there — the mechanism behind N1's 8K
+        // regression. Closes the unmeasured MLP+lm_head q_seq-scaling gap (gotcha #4):
+        // unlike TurboQuantNativeVxBenchmark (attention only) this is the full model.
+        if CommandLine.arguments.contains("--forward-scaling") {
+            let contexts = argInts("--contexts", default: [0, 2048, 8192, 16384])
+            let qls = argInts("--query-lengths", default: [1, 2, 4, 8])
+            let iters = argInt("--iterations", default: 12)
+            let warmup = argInt("--warmup", default: 3)
+            let prefillStep = argInt("--prefill-step", default: 1024)
+            guard let base = prompts.first?.ids else {
+                FileHandle.standardError.write(Data("forward-scaling needs a prompt to slice ids from\n".utf8))
+                exit(2)
+            }
+            let maxL = contexts.max() ?? 0
+            let maxK = qls.max() ?? 1
+            guard base.count >= maxL + maxK + 1 else {
+                FileHandle.standardError.write(Data(
+                    "prompt has \(base.count) ids; need >= maxContext(\(maxL)) + maxQueryLen(\(maxK)) + 1\n".utf8))
+                exit(2)
+            }
+
+            struct ScalingRow: Codable {
+                var context: Int
+                var queryLength: Int
+                var msForward: Double
+                var msPerQTok: Double
+                var specCeiling: Double  // ms_forward(k=1) / ms_per_qtok(k)
+                var trimmable: Bool
+            }
+            let rows: [ScalingRow] = try await container.perform { (ctx: ModelContext) in
+                func median(_ xs: [Double]) -> Double {
+                    let s = xs.sorted()
+                    guard !s.isEmpty else { return 0 }
+                    return s.count % 2 == 1 ? s[s.count / 2] : (s[s.count / 2 - 1] + s[s.count / 2]) / 2
+                }
+                var out: [ScalingRow] = []
+                let measuredKs = Array(Set(qls + [1])).sorted()
+                for L in contexts {
+                    var msForwardByK: [Int: Double] = [:]
+                    var trimByK: [Int: Bool] = [:]
+                    for k in measuredKs {
+                        let cache = ctx.model.newCache(parameters: nil)
+                        // Chunked prefill of the first L ids.
+                        var off = 0
+                        while off < L {
+                            let end = Swift.min(off + prefillStep, L)
+                            let chunk = MLXArray(base[off ..< end].map { Int32($0) })
+                            let o = ctx.model(
+                                LMInput.Text(tokens: chunk)[text: .newAxis], cache: cache, state: nil)
+                            eval(o.logits)
+                            off = end
+                        }
+                        Stream().synchronize()
+                        let canTrim = canTrimPromptCache(cache)
+                        trimByK[k] = canTrim
+                        let qTokens = MLXArray(base[L ..< L + k].map { Int32($0) })
+                        func oneForward() {
+                            let o = ctx.model(
+                                LMInput.Text(tokens: qTokens)[text: .newAxis], cache: cache, state: nil)
+                            eval(o.logits)
+                        }
+                        // Hold context at ~L by trimming the k just-appended tokens (if the
+                        // cache supports it). Without trim, context drifts by k per iter —
+                        // negligible at k<<L, recorded via `trimmable=false`.
+                        for _ in 0 ..< warmup {
+                            oneForward(); Stream().synchronize()
+                            if canTrim { _ = trimPromptCache(cache, numTokens: k) }
+                        }
+                        var samples: [Double] = []
+                        for _ in 0 ..< iters {
+                            let t0 = Date.timeIntervalSinceReferenceDate
+                            oneForward(); Stream().synchronize()
+                            samples.append((Date.timeIntervalSinceReferenceDate - t0) * 1000.0)
+                            if canTrim { _ = trimPromptCache(cache, numTokens: k) }
+                        }
+                        msForwardByK[k] = median(samples)
+                    }
+                    let ms1 = msForwardByK[1] ?? 0
+                    for k in qls {
+                        let msF = msForwardByK[k] ?? 0
+                        let msQ = msF / Double(k)
+                        out.append(
+                            ScalingRow(
+                                context: L, queryLength: k, msForward: msF, msPerQTok: msQ,
+                                specCeiling: msQ > 0 ? ms1 / msQ : 0, trimmable: trimByK[k] ?? false))
+                    }
+                }
+                return out
+            }
+
+            print("context   qLen   ms/forward   ms/qtok   specCeiling(k=1 vs k)   trim")
+            print("-------   ----   ----------   -------   --------------------   ----")
+            for r in rows {
+                print(
+                    [
+                        String(format: "%7d", r.context), String(format: "%4d", r.queryLength),
+                        String(format: "%10.3f", r.msForward), String(format: "%9.3f", r.msPerQTok),
+                        String(format: "%18.3fx", r.specCeiling),
+                        r.trimmable ? "  yes" : "   no",
+                    ].joined(separator: "   "))
+            }
+            print(
+                "\nspecCeiling = ms_forward(k=1) / ms_per_qtok(k): max tok/s multiplier ① could reach\n"
+                    + "at width k with 100% acceptance. <1.0 => speculation cannot win at that context.")
+            if let outputPath = arg("--output") {
+                struct ScalingReport: Codable {
+                    var schemaVersion = 1
+                    var model: String
+                    var iterations: Int
+                    var warmup: Int
+                    var rows: [ScalingRow]
+                }
+                let report = ScalingReport(
+                    model: modelURL.lastPathComponent, iterations: iters, warmup: warmup, rows: rows)
+                let enc = JSONEncoder()
+                enc.outputFormatting = [.prettyPrinted, .sortedKeys]
+                try enc.encode(report).write(to: URL(fileURLWithPath: outputPath), options: .atomic)
+                print("\nwrote report: \(outputPath)")
+            }
             return
         }
 

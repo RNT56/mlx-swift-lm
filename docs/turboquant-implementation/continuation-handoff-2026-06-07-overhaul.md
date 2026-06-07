@@ -91,9 +91,16 @@ reproduce: `artifacts/turboquant-acceptance-4b-20260607/N1-summary.md`. Build pr
 - **This corrects** the earlier "tiny-model artifact, vanishes at 4B" framing (§7) and the
   memory reframe's "speculative decode is the real tok/s lever ≤47K": ① is a **long-context
   (≥~16K) lever**, gated on context not model size.
-- **Next precision probe (optional):** full-model q_seq=1-vs-{2,4,8} forward microbench
-  (extends `TurboQuantNativeVxBenchmark --query-lengths` past attention into MLP+lm_head — the
-  unmeasured gap in gotcha #4) to pin the crossover analytically.
+- **Precision probe DONE (`--forward-scaling` mode, full-model q_seq microbench):** TWO stacked
+  causes, both measured (`artifacts/turboquant-acceptance-4b-20260607/forward-scaling-qwen3-4b.*`
+  + N1-summary §"Forward-scaling follow-up"). (1) The full-model forward scales with q_seq —
+  k=4 ≈ 2.7× k=1 — so the *synchronous* per-qtok speedup ceiling is only ~1.2–1.47× (NOT
+  weight-bandwidth-bound; MLP + 152K-vocab lm_head scale with q_seq). (2) **The baseline is
+  unfair:** plain `TokenIterator` is `asyncEval`-pipelined (27.2 ms/tok @8K, *below* a single
+  synchronous forward = 34.6 ms), but `NgramSpeculativeTokenIterator` is synchronous per round
+  (CPU propose/accept forces a drain). So ① wins only once async-plain ms/tok exceeds the ~28 ms
+  synchronous spec-per-qtok floor → 8K real ceiling 0.97× (lose), 16K 1.81× (win). **This
+  elevates N7 to the top speed lever** (see N7).
 
 ### N2. ① product wiring (admission-gate + Pines)
 - Add a `GenerateParameters` opt-in (e.g. `selfSpeculationMode = .promptLookup` + ngram/width)
@@ -151,9 +158,23 @@ Collapse the duplicated `eval+synchronize+clearCache` (`KVCache.swift:2864` inne
 alter output. Gate: KVCacheTests determinism + timing probe before any % claim. Only
 matters on the hybrid (no `MambaCache` on standard models).
 
-### N7. ① refinement — async-pipelined single-token fallback
-So the EMA-disabled path matches the plain iterator's throughput on small/fast models
-(removes the tiny-model regression). Lower priority (vanishes on the product target).
+### N7. ① async-pipelined verify forward — NOW THE TOP ① SPEED LEVER (was "refinement")
+**Promoted by the N1 forward-scaling probe.** Root cause of the sub-crossover regression is NOT
+the fallback path — it is that `NgramSpeculativeTokenIterator.speculateRound` runs **synchronously**
+(CPU propose/accept/trim drains the GPU each round via `.asArray`/`.item`) while plain
+`TokenIterator` overlaps with `asyncEval` (Evaluate.swift:1527). The synchronous spec forward
+per-qtok (~28 ms @8K) loses to async-plain per-token (27.2 ms @8K) even though the *synchronous*
+ceiling is positive (1.2–1.47×).
+- **Fix:** pipeline the verify forward — `asyncEval` the next round's proposal+verify before the
+  CPU reads/accepts the current round, mirroring `TokenIterator`'s `asyncEval(token)` pattern; keep
+  the greedy argmax-all-positions fast path; only sync when a rollback is actually needed.
+- **Expected:** the 1.2–1.47× synchronous ceiling becomes realizable at ALL contexts (not just
+  ≥16K), and the long-context win rises from ~1.4× toward the ~1.8× async-fair ceiling.
+- **Gate:** byte-identical determinism (the verify still makes it exact) + re-run
+  `--validate-speculative` short/8K/16K + re-run `--forward-scaling` to confirm the spec path now
+  tracks the synchronous ms/qtok. After it lands, **re-measure the N2 admission crossover** (should
+  drop well below 12K). Hard cap: forward q_seq scaling still bounds ① at ~1.4–1.8×; KV-byte cuts
+  do not move it.
 
 ## 5. Build / test / run
 ```bash
@@ -166,11 +187,17 @@ swift build -c release --product TurboQuantInferenceParity
 .build/release/TurboQuantAcceptanceHarness --model-dir <snap> \
   --prompt-ids-file <prompts.json> --validate-speculative \
   --max-tokens 256 --ngram 3 --max-proposal 4 --eos <eos_id>
-# roofline / amortization:
+# full-model q_seq forward-cost microbench (N1 follow-up — MLP+lm_head, not attention-only):
+.build/release/TurboQuantAcceptanceHarness --model-dir <snap> \
+  --prompt-ids-file <long-prompt.json> --forward-scaling \
+  --contexts 0,2048,8192,16384 --query-lengths 1,2,4,8 --output <out.json>
+# roofline / amortization (attention-isolated):
 .build/release/TurboQuantNativeVxBenchmark --contexts 32768,65536 \
   --value-bits 4 --query-lengths 1,4 --query-heads 16 --kv-heads 8 --head-dim 128
 ```
-Tokenize prompts to IDs (in-package tools have no swift-transformers; python has it):
+Tokenize prompts to IDs (in-package tools have no swift-transformers; python has it). Helper:
+`scripts/turboquant-build-acceptance-prompts.py --model-dir <snap> --short-out … --long-out …`
+builds the 5 short categories + structured long-context (8K/16K) prompts. Or inline:
 ```python
 from transformers import AutoTokenizer; import json
 tok = AutoTokenizer.from_pretrained("<snapshot dir>")
@@ -179,8 +206,10 @@ json.dump([{"label":k,"ids":tok.encode(v)} for k,v in prompts.items()], open("pr
 
 ## 6. Models / evidence
 - On disk: `Qwen3-0.6B-8bit` (standard-attn dev), `Qwen3.5-2B-4bit` (hybrid product),
-  `Qwen3-0.6B`, `bitnet-2B`. **Disk now ~41 GiB free** → pull `Qwen3-4B-4bit` for N1.
-- Artifacts: `artifacts/turboquant-roofline-20260607/`, `artifacts/turboquant-acceptance-20260607/`.
+  `Qwen3-0.6B`, `bitnet-2B`, **`Qwen3-4B-4bit` (N1 standard-attn validation target, pulled)**.
+- Artifacts: `artifacts/turboquant-roofline-20260607/`, `artifacts/turboquant-acceptance-20260607/`
+  (0.6B), **`artifacts/turboquant-acceptance-4b-20260607/`** (N1: `N1-summary.md` + validate-{short,
+  long,32k} + forward-scaling-qwen3-4b.{txt,json} + prompt-id inputs).
 
 ## 7. Caveats / non-claims
 - ① wins are **workload-gated AND context-gated** (N1): high on structured/repetitive
