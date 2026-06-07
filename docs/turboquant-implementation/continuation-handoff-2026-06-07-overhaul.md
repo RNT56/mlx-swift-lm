@@ -66,6 +66,7 @@ Qwen3-4B/Llama-3.2-3B for representative validation, disk now freed).
 | Instrumentation (roofline/amortization) | GB/s + ms/qtok | **DONE** |
 | Combined affine 16K gate | promotion artifact | **DONE** |
 | ① n-gram self-speculation | weight-stream amortization, bit-exact | **DONE + validated on 0.6B AND Qwen3-4B** (N1 done — context-gated, crossover ≈12–16K; needs product wiring) |
+| N7 ① async prefetch | overlap verify forward, bit-exact | **DONE + validated** (opt-in/default-off): 16K long-doc 1.43→**1.76×**, 8K regression nearly gone; long-context lever |
 | ③ banked lm_head | shrink the 30%-of-weights head | **gating microbench DONE** — kernel-viable (subset 2.6–4.1× at batch=1) but product-modest (~6% of forward latency); build only coupled with ① |
 | PolarQJL metadata diet | realize paper 4–7× compression | **pending (the focus)** |
 | recency-tiering | exact-recent + harder cold tail | pending (capacity/quality) |
@@ -164,8 +165,18 @@ Collapse the duplicated `eval+synchronize+clearCache` (`KVCache.swift:2864` inne
 alter output. Gate: KVCacheTests determinism + timing probe before any % claim. Only
 matters on the hybrid (no `MambaCache` on standard models).
 
-### N7. ① async-pipelined verify forward — NOW THE TOP ① SPEED LEVER (was "refinement")
-**Promoted by the N1 forward-scaling probe.** Root cause of the sub-crossover regression is NOT
+### N7. ① async-pipelined verify forward — DONE + VALIDATED (opt-in, default off)
+**Implemented and bit-exact.** `NgramSpeculativeTokenIterator(enablePrefetch:)` + harness
+`--validate-speculative --prefetch`. Full report: `artifacts/turboquant-acceptance-4b-20260607/
+N7-summary.md`. Determinism PASS (byte-identical) short+8K+16K (acceptance 0.25–0.95). Measured
+(vs synchronous spec): **8K long-code 0.80→0.93×, long-doc 0.80→1.02× (regression nearly gone);
+16K long-code 1.11→1.36×, long-doc 1.43→1.76×** — matches the predicted ~0.97× (8K) / ~1.81×
+(16K) ceilings. Short context still loses (cheap forwards) → long-context lever, ships gated +
+default off. Building blocks: `PromptLookupSpeculator.truncate(to:)` (+4 tests); the optimistic
+draft is `propose().dropFirst()` (model bonus supplies the seed). Remaining: wire into N2
+(admission-gated), on-device A-series, optional fake-model unit test for the cache rollback.
+
+Original rationale (kept for context): root cause of the sub-crossover regression is NOT
 the fallback path — it is that `NgramSpeculativeTokenIterator.speculateRound` runs **synchronously**
 (CPU propose/accept/trim drains the GPU each round via `.asArray`/`.item`) while plain
 `TokenIterator` overlaps with `asyncEval` (Evaluate.swift:1527). The synchronous spec forward

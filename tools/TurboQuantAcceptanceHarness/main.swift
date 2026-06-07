@@ -108,6 +108,7 @@ struct TurboQuantAcceptanceHarness {
                   --output <path>          write JSON report
 
                   --validate-speculative   plain greedy vs n-gram speculative (determinism + tok/s)
+                  --prefetch               (with --validate-speculative) enable N7 async optimistic prefetch
                   --forward-scaling        full-model q_seq forward-cost microbench (N1 follow-up):
                     --contexts <csv>          prefill lengths L to slice from prompt[0] (default 0,2048,8192,16384)
                     --query-lengths <csv>     q_seq widths to time (default 1,2,4,8)
@@ -141,6 +142,7 @@ struct TurboQuantAcceptanceHarness {
         // ----- End-to-end ① validation + speed: plain greedy vs n-gram speculative -----
         if CommandLine.arguments.contains("--validate-speculative") {
             let ngram = argInt("--ngram", default: 3)
+            let enablePrefetch = CommandLine.arguments.contains("--prefetch")
             let results: [ValidationResult] = try await container.perform { (ctx: ModelContext) in
                 var out: [ValidationResult] = []
                 for prompt in prompts {
@@ -163,7 +165,8 @@ struct TurboQuantAcceptanceHarness {
                     var spec = try NgramSpeculativeTokenIterator(
                         input: LMInput(text: LMInput.Text(tokens: MLXArray(prompt.ids.map { Int32($0) }))),
                         model: ctx.model, parameters: greedyParams(),
-                        ngram: ngram, maxProposalTokens: maxProposal)
+                        ngram: ngram, maxProposalTokens: maxProposal,
+                        enablePrefetch: enablePrefetch)
                     var specTokens: [Int] = []
                     let t1 = Date.timeIntervalSinceReferenceDate
                     for _ in 0 ..< maxTokens { guard let t = spec.next() else { break }; specTokens.append(t) }

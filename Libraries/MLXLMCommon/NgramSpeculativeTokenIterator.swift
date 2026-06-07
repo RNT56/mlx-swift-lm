@@ -53,6 +53,20 @@ public struct NgramSpeculativeTokenIterator: TokenIteratorProtocol {
     private var runtimeError: Error?
     private var requiresSynchronousGenerationEval = false
 
+    // N7 optimistic prefetch (opt-in; default off keeps the validated synchronous path).
+    // While the CPU reads + accepts round R, the GPU is already computing round R+1
+    // (issued on a full-acceptance assumption: R+1's seed = R's argmax-at-last kept as a
+    // LAZY MLXArray, R+1's draft proposed from history+R's drafts). On a misprediction the
+    // R+1 forward ran on a wrong cache state, so its KV appends + R's rejects are trimmed
+    // and the speculator is truncated back. Greedy / no-processor only.
+    private let enablePrefetch: Bool
+    private struct PendingVerify {
+        var logits: MLXArray  // [1, draft.count + 1, vocab], lazy/asyncEval'd
+        var draft: [Int]
+        var specMark: Int  // speculator.count BEFORE this round's draft was optimistically appended
+    }
+    private var inflight: PendingVerify?
+
     let quantizeKVCache: (inout [KVCache]) -> Void
 
     // Metrics (acceptance gate + speed proxy).
@@ -80,10 +94,14 @@ public struct NgramSpeculativeTokenIterator: TokenIteratorProtocol {
         // 0.5 protects free-form text from regressing on small models while keeping
         // the wins on structured/repetitive workloads.
         emaFloor: Double = 0.5,
-        emaWarmupRounds: Int = 8
+        emaWarmupRounds: Int = 8,
+        // N7: opt-in async prefetch pipeline. Default off — the synchronous path is the
+        // validated one; prefetch is a long-context (≥~16K) throughput lever.
+        enablePrefetch: Bool = false
     ) throws {
         self.model = model
         self.y = input.text
+        self.enablePrefetch = enablePrefetch
         let runtime = try resolvedGenerationParameters(for: model, parameters: parameters)
         self.cache = cache ?? model.newCache(parameters: runtime)
         self.sampler = runtime.sampler()
@@ -260,6 +278,126 @@ public struct NgramSpeculativeTokenIterator: TokenIteratorProtocol {
         syncRecurrentIfNeeded()
     }
 
+    // ----- N7 optimistic prefetch (opt-in) -----
+
+    private mutating func recordAccept(accepted: Int, drafted: Int) {
+        acceptedDraftTokens += accepted
+        totalDraftTokens += drafted
+        speculativeRounds += 1
+        let ratio = drafted > 0 ? Double(accepted) / Double(drafted) : 1.0
+        acceptanceEMA = emaAlpha * ratio + (1 - emaAlpha) * acceptanceEMA
+        roundsCompleted += 1
+    }
+
+    /// Build + issue (asyncEval) one verify forward of `[seed] + draft`, where the draft
+    /// is chosen from the speculator under the EMA gate and `remaining` budget. Mutates
+    /// the cache by `1 + draft.count`. Returns nil if no draft is proposed (caller decodes
+    /// a single token instead). Does NOT touch the speculator (the draft is tentative).
+    private mutating func issueVerify(seed: MLXArray, remaining: Int) -> PendingVerify? {
+        let gateOpen = roundsCompleted < emaWarmupRounds || acceptanceEMA >= emaFloor
+        guard gateOpen else { return nil }
+        let proposed = speculator.propose()
+        let budget = Swift.min(maxProposalTokens, Swift.max(0, remaining - 1))
+        guard !proposed.isEmpty, budget > 0 else { return nil }
+        let draft = Array(proposed.prefix(budget))
+        let verifyTokens = concatenated([seed, MLXArray(draft.map { Int32($0) })])
+        guard let result = forward(verifyTokens) else { return nil }
+        modelForwards += 1
+        asyncEval(result.logits)
+        return PendingVerify(logits: result.logits, draft: draft, specMark: speculator.count)
+    }
+
+    /// One pipelined speculative round: consume the in-flight verify (round R) while the
+    /// GPU computes round R+1 (issued optimistically on a full-acceptance assumption).
+    /// Bit-exact for greedy / no-processor (gated by the caller); rolls back R+1 + R's
+    /// rejects + the speculator on a misprediction.
+    mutating func prefetchRound() {
+        guard runtimeError == nil else { return }
+        // Recurrent caches require synchronous eval — fall back to the safe path.
+        if requiresSynchronousGenerationEval { speculateRound(); return }
+
+        let remaining = maxTokens.map { $0 - tokenCount } ?? maxProposalTokens
+        guard remaining > 0 else { return }
+
+        if inflight == nil {
+            guard let f = issueVerify(seed: y.tokens, remaining: remaining) else {
+                singleTokenStep()
+                return
+            }
+            inflight = f
+        }
+        let cur = inflight!
+        let curLast = cur.draft.count  // bonus position (argmax at the last verify slot)
+
+        // Optimistically pre-issue round R+1 assuming cur fully accepts: its seed is cur's
+        // argmax-at-last kept LAZY (no readback), its draft proposed from history+cur.draft.
+        var nextInflight: PendingVerify?
+        let remainingAfterCur = remaining - (cur.draft.count + 1)
+        if remainingAfterCur > 0 {
+            let nextSeedLazy = cur.logits[0, curLast, 0...].argMax(axis: -1).reshaped([1])
+            let specMarkNext = speculator.count
+            speculator.append(contentsOf: cur.draft)  // optimistic (full-accept); rolled back on mispredict
+            let gateOpen = roundsCompleted < emaWarmupRounds || acceptanceEMA >= emaFloor
+            var nextDraft = [Int]()
+            if gateOpen {
+                // propose() over history+cur.draft returns [predicted_bonus, e1, e2, ...].
+                // R+1's seed is the MODEL's bonus (nextSeedLazy), so R+1's draft must start
+                // AFTER the bonus — drop the proposal's first token (the predicted bonus).
+                let proposed = speculator.propose().dropFirst()
+                let budget = Swift.min(maxProposalTokens, Swift.max(0, remainingAfterCur - 1))
+                if !proposed.isEmpty, budget > 0 { nextDraft = Array(proposed.prefix(budget)) }
+            }
+            if !nextDraft.isEmpty {
+                let verifyTokens = concatenated([nextSeedLazy, MLXArray(nextDraft.map { Int32($0) })])
+                if let result = forward(verifyTokens) {
+                    modelForwards += 1
+                    asyncEval(result.logits)
+                    nextInflight = PendingVerify(
+                        logits: result.logits, draft: nextDraft, specMark: specMarkNext)
+                } else {
+                    speculator.truncate(to: specMarkNext)  // undo optimistic append on error
+                }
+            } else {
+                speculator.truncate(to: specMarkNext)  // not issuing next: undo optimistic append
+            }
+        }
+
+        // Read cur's argmax (blocks; the GPU is busy on R+1 if issued).
+        let positions = cur.draft.count + 1
+        let mainTokens = cur.logits[0, 0 ..< positions, 0...].argMax(axis: -1).asArray(Int.self)
+        var accepted = 0
+        while accepted < cur.draft.count && mainTokens[accepted] == cur.draft[accepted] {
+            accepted += 1
+        }
+        let bonus = mainTokens[accepted]
+
+        if accepted == cur.draft.count, let next = nextInflight {
+            // FULL accept and R+1 was issued on the correct assumption — keep both.
+            for i in 0 ..< accepted { pendingTokens.append(mainTokens[i]) }
+            pendingTokens.append(bonus)
+            speculator.append(bonus)  // speculator already holds cur.draft (optimistic append)
+            inflight = next  // bonus == next's lazy seed
+            y = .init(tokens: MLXArray([Int32(bonus)]))
+            recordAccept(accepted: accepted, drafted: cur.draft.count)
+        } else {
+            // Misprediction (or no R+1 issued): discard R+1 and commit cur synchronously.
+            if let next = nextInflight {
+                _ = trimPromptCache(cache, numTokens: next.draft.count + 1)  // R+1's KV appends
+                speculator.truncate(to: next.specMark)  // remove the optimistic cur.draft append
+            }
+            for i in 0 ..< accepted { commit(mainTokens[i]) }
+            commit(bonus)  // correction / bonus
+            let rejected = cur.draft.count - accepted
+            if rejected > 0 { _ = trimPromptCache(cache, numTokens: rejected) }
+            inflight = nil
+            y = .init(tokens: MLXArray([Int32(bonus)]))
+            recordAccept(accepted: accepted, drafted: cur.draft.count)
+        }
+
+        quantizeKVCache(&cache)
+        syncRecurrentIfNeeded()
+    }
+
     mutating public func next() -> Int? {
         guard runtimeError == nil else { return nil }
         if let maxTokens, tokenCount >= maxTokens { return nil }
@@ -272,7 +410,12 @@ public struct NgramSpeculativeTokenIterator: TokenIteratorProtocol {
         }
         pendingTokens.removeAll(keepingCapacity: true)
         pendingIndex = 0
-        speculateRound()
+        // Prefetch is exact only for greedy / no-processor (same gate as speculation).
+        if enablePrefetch && parameters.temperature == 0 && processor == nil {
+            prefetchRound()
+        } else {
+            speculateRound()
+        }
         guard runtimeError == nil, !pendingTokens.isEmpty else { return nil }
         let token = pendingTokens[pendingIndex]
         pendingIndex += 1
