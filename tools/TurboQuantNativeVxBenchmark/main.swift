@@ -42,10 +42,21 @@ private struct BenchmarkRow: Codable {
     var outputChecksum: Float
     var maxAbsVsK8V4: Double?
     var cosineVsK8V4: Double?
+    // Roofline / amortization instrumentation (P0-a, P0-b).
+    // gbPerSecond is the achieved KV-read bandwidth: compressed cache bytes read
+    // once per decode call / median seconds. msPerQueryToken exposes speculative
+    // amortization: if it falls as queryLength rises, one KV scan serves many
+    // query rows (the fused kernel amortizes); if it stays flat, KV is re-scanned
+    // per query row (no amortization).
+    var gbPerSecond: Double
+    var fp16GBPerSecond: Double
+    var bandwidthRatioToFP16: Double
+    var msPerQueryToken: Double
+    var fp16MsPerQueryToken: Double
 }
 
 private struct BenchmarkReport: Codable {
-    var schemaVersion: Int = 2
+    var schemaVersion: Int = 3
     var generatedAt: String
     var cooldownMilliseconds: Int
     var rows: [BenchmarkRow]
@@ -91,6 +102,7 @@ private func printUsage() {
         Options:
           --contexts <csv>      Default: 20480,32768,65536,131072
           --value-bits <csv>    Default: 4,3,2
+          --query-lengths <csv> Default: 1  (e.g. 1,4 to probe speculative KV amortization)
           --iterations <n>      Default: 7
           --warmup <n>          Default: 2
           --cooldown-ms <n>     Default: 25
@@ -184,7 +196,10 @@ private func pad(_ value: String, _ width: Int) -> String {
 
 private func runContext(
     context: Int,
+    queryLength: Int,
     valueBitsList: [Int],
+    keyGroupSize: Int,
+    valueGroupSize: Int,
     iterations: Int,
     warmup: Int,
     queryHeads: Int,
@@ -194,10 +209,7 @@ private func runContext(
     cooldownMilliseconds: Int
 ) throws -> [BenchmarkRow] {
     let batch = 1
-    let queryLength = 1
     let keyBits = 8
-    let keyGroupSize = 64
-    let valueGroupSize = 32
     let dtype = DType.float16
     let scale = Float(1 / sqrt(Double(headDimension)))
 
@@ -229,6 +241,9 @@ private func runContext(
     let fp16P95TokensPerSecond = Double(queryLength)
         / max(fp16TimedResult.p95, .leastNonzeroMagnitude)
     let denseBytes = denseKeys.nbytes + denseValues.nbytes
+    let fp16GBPerSecond = Double(denseBytes)
+        / max(fp16TimedResult.median, .leastNonzeroMagnitude) / 1_000_000_000
+    let fp16MsPerQueryToken = fp16TimedResult.median * 1_000 / Double(max(1, queryLength))
 
     let (quantizedKeys, keyScales, keyBiasesOptional) = quantized(
         denseKeys,
@@ -296,6 +311,9 @@ private func runContext(
             + keyBiases.nbytes + valueBiases.nbytes
         let tokensPerSecond = Double(queryLength) / max(timedResult.median, .leastNonzeroMagnitude)
         let p95TokensPerSecond = Double(queryLength) / max(timedResult.p95, .leastNonzeroMagnitude)
+        let gbPerSecond = Double(compressedBytes)
+            / max(timedResult.median, .leastNonzeroMagnitude) / 1_000_000_000
+        let msPerQueryToken = timedResult.median * 1_000 / Double(max(1, queryLength))
         rows.append(
             BenchmarkRow(
                 label: rowLabel(valueBits: valueBits),
@@ -337,7 +355,12 @@ private func runContext(
                 compressionRatioToDense: Double(denseBytes) / Double(max(1, compressedBytes)),
                 outputChecksum: checksum,
                 maxAbsVsK8V4: quality?.maxAbs,
-                cosineVsK8V4: quality?.cosine
+                cosineVsK8V4: quality?.cosine,
+                gbPerSecond: gbPerSecond,
+                fp16GBPerSecond: fp16GBPerSecond,
+                bandwidthRatioToFP16: gbPerSecond / max(fp16GBPerSecond, .leastNonzeroMagnitude),
+                msPerQueryToken: msPerQueryToken,
+                fp16MsPerQueryToken: fp16MsPerQueryToken
             )
         )
     }
@@ -354,6 +377,9 @@ struct TurboQuantNativeVxBenchmarkCLI {
 
         let contexts = argumentInts("--contexts", default: [20_480, 32_768, 65_536, 131_072])
         let valueBits = argumentInts("--value-bits", default: [4, 3, 2])
+        let queryLengths = argumentInts("--query-lengths", default: [1])
+        let keyGroupSize = argumentInt("--key-group-size", default: 64)
+        let valueGroupSize = argumentInt("--value-group-size", default: 32)
         let iterations = argumentInt("--iterations", default: 7)
         let warmup = argumentInt("--warmup", default: 2)
         let cooldownMilliseconds = argumentInt("--cooldown-ms", default: 25)
@@ -372,39 +398,45 @@ struct TurboQuantNativeVxBenchmarkCLI {
         }
 
         var allRows = [BenchmarkRow]()
-        print("ctx       config       median ms   p95 ms     tok/s      fp16x      memx        max abs    cosine")
-        print("-------   ----------   ---------   --------   --------   -------    ---------   --------   -------")
+        print("ctx       config       qL   median ms   ms/qtok   fp16 ms/qtok   GB/s      fp16 GB/s   BWx     fp16x     cosine")
+        print("-------   ----------   --   ---------   -------   ------------   -------   ---------   -----   -------   -------")
         for context in contexts {
-            let rows = try runContext(
-                context: context,
-                valueBitsList: valueBits,
-                iterations: iterations,
-                warmup: warmup,
-                queryHeads: queryHeads,
-                kvHeads: kvHeads,
-                headDimension: headDimension,
-                seed: seed,
-                cooldownMilliseconds: cooldownMilliseconds
-            )
-            for row in rows {
-                allRows.append(row)
-                let maxAbs = row.maxAbsVsK8V4.map { String(format: "%.5f", $0) } ?? "--"
-                let cosine = row.cosineVsK8V4.map { String(format: "%.5f", $0) } ?? "--"
-                print(
-                    [
-                        String(format: "%7d", row.context),
-                        pad(row.label, 10),
-                        String(format: "%9.3f", row.medianSeconds * 1_000),
-                        String(format: "%8.3f", row.p95Seconds * 1_000),
-                        String(format: "%8.3f", row.tokensPerSecond),
-                        String(format: "%7.3f", row.speedRatioToFP16),
-                        String(format: "%9.3f", row.memoryReductionRatioToFP16),
-                        pad(maxAbs, 8),
-                        pad(cosine, 7),
-                    ].joined(separator: "   ")
+            for queryLength in queryLengths {
+                let rows = try runContext(
+                    context: context,
+                    queryLength: queryLength,
+                    valueBitsList: valueBits,
+                    keyGroupSize: keyGroupSize,
+                    valueGroupSize: valueGroupSize,
+                    iterations: iterations,
+                    warmup: warmup,
+                    queryHeads: queryHeads,
+                    kvHeads: kvHeads,
+                    headDimension: headDimension,
+                    seed: seed,
+                    cooldownMilliseconds: cooldownMilliseconds
                 )
+                for row in rows {
+                    allRows.append(row)
+                    let cosine = row.cosineVsK8V4.map { String(format: "%.5f", $0) } ?? "--"
+                    print(
+                        [
+                            String(format: "%7d", row.context),
+                            pad(row.label, 10),
+                            String(format: "%2d", row.queryLength),
+                            String(format: "%9.3f", row.medianSeconds * 1_000),
+                            String(format: "%7.3f", row.msPerQueryToken),
+                            String(format: "%12.3f", row.fp16MsPerQueryToken),
+                            String(format: "%7.1f", row.gbPerSecond),
+                            String(format: "%9.1f", row.fp16GBPerSecond),
+                            String(format: "%5.2f", row.bandwidthRatioToFP16),
+                            String(format: "%7.3f", row.speedRatioToFP16),
+                            pad(cosine, 7),
+                        ].joined(separator: "   ")
+                    )
+                }
+                Memory.clearCache()
             }
-            Memory.clearCache()
         }
 
         if let outputPath {
