@@ -158,17 +158,27 @@ reproduce: `artifacts/turboquant-acceptance-4b-20260607/N1-summary.md`. Build pr
   synchronous spec-per-qtok floor → 8K real ceiling 0.97× (lose), 16K 1.81× (win). **This
   elevates N7 to the top speed lever** (see N7).
 
-### N2. ① product wiring (admission-gate + Pines)
-- Add a `GenerateParameters` opt-in (e.g. `selfSpeculationMode = .promptLookup` + ngram/width)
-  and route `generate()` to `NgramSpeculativeTokenIterator` when enabled.
-- **Admission rule (now data-backed by N1):** gate on **context ≥ ~16K**, NOT merely "large
-  model" — Qwen3-4B at 8K regresses 20% even on perfectly-repetitive content, and the EMA
-  floor alone does not prevent the short/medium-context regression. The crossover scales with
-  per-forward KV cost, so re-measure the threshold per model/cache (FP16 vs compressed). EMA
-  floor (default 0.5) stays an on-device tuning constant.
-- Wire through Pines `MLXRuntimeBridge` behind a flag; validate output identity in the app.
-- **Gate:** forced-rejection determinism test on the hybrid Qwen3.5 (MambaCache rollback
-  correctness is UNTESTED — see caveats); byte-identical greedy stream vs non-speculative.
+### N2. ① product wiring — CORE DONE + validated (mlx-swift-lm); Pines hand-off specced
+**mlx-swift-lm side DONE (commit 96cfb52):** `GenerateParameters.selfSpeculationMode` (.off default
+| .promptLookup) + `selfSpeculationNgram`/`MaxProposalTokens`/`Prefetch`/`MinPromptTokens` (admission
+floor, default 8192). `makeGenerationIterator(input:model:cache:parameters:)` is the routing chokepoint:
+`.promptLookup` AND prompt ≥ floor AND **trimmable cache** → `NgramSpeculativeTokenIterator(prefetch)`;
+otherwise (incl. non-trimmable hybrid MambaCache) → ordinary `TokenIterator`. `generate(...)` routes
+through it. **Validated:** harness `--validate-routing` (drives both `.off` and `.promptLookup` through
+the factory) is **byte-identical on Qwen3-4B (PASS)**. The hybrid falls back to exact decode (no
+MambaCache rollback risk — the iterator requires `canTrimPromptCache`, which the hybrid fails).
+- **Admission rule (data-backed by N1):** floor default 8192 (prefetch erases the ≥8K regression;
+  16K is the clean win). Re-measure per model/cache (FP16 vs compressed). EMA floor (0.5) stays a
+  tuning constant.
+- **Pines hand-off (NOT applied — pines has ~901 lines of prior-agent WIP + pin is far behind at
+  `725add5`; a blind large pin-jump + app xcodebuild amid WIP is unsafe).** Ready-to-apply:
+  1. Bump `Pines.xcodeproj/.../Package.resolved` mlx-swift-lm revision `725add5…` → `96cfb52…` (or later).
+  2. In `MLXRuntimeBridge.swift` `GenerateParameters(...)` (both PINES_TQ_WAVE6 branches), add (behind a
+     profile/env flag): `selfSpeculationMode: longContext ? .promptLookup : .off` where `longContext`
+     = `promptTokenCount >= <threshold>` (start ~12288), plus `selfSpeculationMinPromptTokens`,
+     `selfSpeculationPrefetch: true`. Greedy/no-processor only ships exact; temp>0 falls back.
+  3. Build the app (xcodebuild) + confirm output identity; the TurboQuantPinDriftTests pin gate must
+     be updated to the new revision. Apply alongside the prior-agent WIP, not on top of a clean tree.
 
 ### N3. ③ banked / candidate-subset lm_head — GATING microbench DONE (kernel-viable, product-modest)
 Ran `TurboQuantHeadBenchmark` (new tool, `tools/TurboQuantHeadBenchmark`) at Qwen3-4B head dims
