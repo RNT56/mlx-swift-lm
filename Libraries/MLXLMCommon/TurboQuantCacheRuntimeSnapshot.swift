@@ -3,7 +3,7 @@
 import Foundation
 
 public struct TurboQuantCacheRuntimeSnapshot: Hashable, Codable, Sendable {
-    public static let currentSchemaVersion = 2
+    public static let currentSchemaVersion = 4
 
     public var schemaVersion: Int
     public var lifecycleDescription: String
@@ -21,6 +21,8 @@ public struct TurboQuantCacheRuntimeSnapshot: Hashable, Codable, Sendable {
     public var quantizationMode: String?
     public var keyBits: Int?
     public var groupSize: Int?
+    public var valueBits: Int?
+    public var valueGroupSize: Int?
     public var selectedPath: String?
     public var fallbackReason: String?
     public var hybridDiagnostics: TurboQuantHybridDiagnostics?
@@ -35,6 +37,10 @@ public struct TurboQuantCacheRuntimeSnapshot: Hashable, Codable, Sendable {
     public var decodedActiveKeyBytes: Int
     public var decodedActiveValueBytes: Int
     public var activeCacheAllocated: Bool
+    public var polarWHTKeyBytes: Int
+    public var polarWHTKeyPayloadAllocated: Bool
+    public var polarWHTValueBytes: Int
+    public var polarWHTValuePayloadAllocated: Bool
 
     public init(
         schemaVersion: Int = TurboQuantCacheRuntimeSnapshot.currentSchemaVersion,
@@ -53,6 +59,8 @@ public struct TurboQuantCacheRuntimeSnapshot: Hashable, Codable, Sendable {
         quantizationMode: String? = nil,
         keyBits: Int? = nil,
         groupSize: Int? = nil,
+        valueBits: Int? = nil,
+        valueGroupSize: Int? = nil,
         selectedPath: String? = nil,
         fallbackReason: String? = nil,
         hybridDiagnostics: TurboQuantHybridDiagnostics? = nil,
@@ -66,7 +74,11 @@ public struct TurboQuantCacheRuntimeSnapshot: Hashable, Codable, Sendable {
         runtimeFallbackReason: String? = nil,
         decodedActiveKeyBytes: Int = 0,
         decodedActiveValueBytes: Int = 0,
-        activeCacheAllocated: Bool = false
+        activeCacheAllocated: Bool = false,
+        polarWHTKeyBytes: Int = 0,
+        polarWHTKeyPayloadAllocated: Bool = false,
+        polarWHTValueBytes: Int = 0,
+        polarWHTValuePayloadAllocated: Bool = false
     ) {
         self.schemaVersion = schemaVersion
         self.lifecycleDescription = lifecycleDescription
@@ -84,6 +96,8 @@ public struct TurboQuantCacheRuntimeSnapshot: Hashable, Codable, Sendable {
         self.quantizationMode = quantizationMode
         self.keyBits = keyBits
         self.groupSize = groupSize
+        self.valueBits = valueBits
+        self.valueGroupSize = valueGroupSize
         self.selectedPath = selectedPath ?? lastAttentionPath
         self.fallbackReason = fallbackReason ?? lastFailure
         self.hybridDiagnostics = hybridDiagnostics
@@ -98,6 +112,10 @@ public struct TurboQuantCacheRuntimeSnapshot: Hashable, Codable, Sendable {
         self.decodedActiveKeyBytes = max(0, decodedActiveKeyBytes)
         self.decodedActiveValueBytes = max(0, decodedActiveValueBytes)
         self.activeCacheAllocated = activeCacheAllocated
+        self.polarWHTKeyBytes = max(0, polarWHTKeyBytes)
+        self.polarWHTKeyPayloadAllocated = polarWHTKeyPayloadAllocated
+        self.polarWHTValueBytes = max(0, polarWHTValueBytes)
+        self.polarWHTValuePayloadAllocated = polarWHTValuePayloadAllocated
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -117,6 +135,8 @@ public struct TurboQuantCacheRuntimeSnapshot: Hashable, Codable, Sendable {
         case quantizationMode
         case keyBits
         case groupSize
+        case valueBits
+        case valueGroupSize
         case selectedPath
         case fallbackReason
         case hybridDiagnostics
@@ -131,6 +151,10 @@ public struct TurboQuantCacheRuntimeSnapshot: Hashable, Codable, Sendable {
         case decodedActiveKeyBytes
         case decodedActiveValueBytes
         case activeCacheAllocated
+        case polarWHTKeyBytes
+        case polarWHTKeyPayloadAllocated
+        case polarWHTValueBytes
+        case polarWHTValuePayloadAllocated
     }
 
     public init(from decoder: Decoder) throws {
@@ -165,6 +189,8 @@ public struct TurboQuantCacheRuntimeSnapshot: Hashable, Codable, Sendable {
             ),
             keyBits: try container.decodeIfPresent(Int.self, forKey: .keyBits),
             groupSize: try container.decodeIfPresent(Int.self, forKey: .groupSize),
+            valueBits: try container.decodeIfPresent(Int.self, forKey: .valueBits),
+            valueGroupSize: try container.decodeIfPresent(Int.self, forKey: .valueGroupSize),
             selectedPath: try container.decodeIfPresent(String.self, forKey: .selectedPath),
             fallbackReason: try container.decodeIfPresent(String.self, forKey: .fallbackReason),
             hybridDiagnostics: try container.decodeIfPresent(
@@ -214,6 +240,22 @@ public struct TurboQuantCacheRuntimeSnapshot: Hashable, Codable, Sendable {
             activeCacheAllocated: try container.decodeIfPresent(
                 Bool.self,
                 forKey: .activeCacheAllocated
+            ) ?? false,
+            polarWHTKeyBytes: try container.decodeIfPresent(
+                Int.self,
+                forKey: .polarWHTKeyBytes
+            ) ?? 0,
+            polarWHTKeyPayloadAllocated: try container.decodeIfPresent(
+                Bool.self,
+                forKey: .polarWHTKeyPayloadAllocated
+            ) ?? false,
+            polarWHTValueBytes: try container.decodeIfPresent(
+                Int.self,
+                forKey: .polarWHTValueBytes
+            ) ?? 0,
+            polarWHTValuePayloadAllocated: try container.decodeIfPresent(
+                Bool.self,
+                forKey: .polarWHTValuePayloadAllocated
             ) ?? false
         )
     }

@@ -236,7 +236,7 @@ class GLM4MoELiteAttention: Module {
         do {
             return try callThrowing(x, mask: mask, cache: cache)
         } catch {
-            fatalError(String(describing: error))
+            nonThrowingLanguageModelRuntimeFailure(error, owner: type(of: self))
         }
     }
 
@@ -459,7 +459,7 @@ class GLM4MoELiteDecoderLayer: Module {
         do {
             return try callThrowing(x, mask: mask, cache: cache)
         } catch {
-            fatalError(String(describing: error))
+            nonThrowingLanguageModelRuntimeFailure(error, owner: type(of: self))
         }
     }
 
@@ -500,7 +500,7 @@ public class GLM4MoELiteModelInner: Module, LayerPartitionable, StreamableMoE {
         do {
             return try callThrowing(inputs, cache: cache)
         } catch {
-            fatalError(String(describing: error))
+            nonThrowingLanguageModelRuntimeFailure(error, owner: type(of: self))
         }
     }
 
@@ -544,7 +544,7 @@ public class GLM4MoELiteModel: Module, LLMModel, KVCacheDimensionProvider, Throw
         do {
             return try callAsFunctionThrowing(inputs, cache: cache)
         } catch {
-            fatalError(String(describing: error))
+            nonThrowingLanguageModelRuntimeFailure(error, owner: type(of: self))
         }
     }
 

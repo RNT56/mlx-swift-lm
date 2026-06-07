@@ -1008,12 +1008,20 @@ enum Qwen35Language {
         }
 
         func makeCache(parameters: GenerateParameters?) -> [KVCache] {
-            model.layers.map { layer in
+            let attentionLayerCount = model.layers.filter { !$0.isLinear }.count
+            var attentionLayerIndex = 0
+            return model.layers.enumerated().map { layerIndex, layer in
                 if layer.isLinear {
                     return MambaCache()
                 }
+                let boundaryLayerIndex = attentionLayerIndex
+                attentionLayerIndex += 1
                 return makeAttentionKVCache(
-                    parameters: parameters
+                    parameters: parameters,
+                    layerIndex: layerIndex,
+                    layerCount: model.layers.count,
+                    boundaryLayerIndex: boundaryLayerIndex,
+                    boundaryLayerCount: attentionLayerCount
                 )
             }
         }

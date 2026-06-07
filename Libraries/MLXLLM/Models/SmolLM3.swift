@@ -64,7 +64,7 @@ class SmolLM3Attention: Module {
         do {
             return try callThrowing(x, mask: mask, cache: cache)
         } catch {
-            fatalError(String(describing: error))
+            nonThrowingLanguageModelRuntimeFailure(error, owner: type(of: self))
         }
     }
 
@@ -142,7 +142,7 @@ class SmolLM3TransformerBlock: Module {
         do {
             return try callThrowing(x, mask: mask, cache: cache)
         } catch {
-            fatalError(String(describing: error))
+            nonThrowingLanguageModelRuntimeFailure(error, owner: type(of: self))
         }
     }
 
@@ -179,7 +179,7 @@ public class SmolLM3ModelInner: Module {
         do {
             return try callThrowing(inputs, cache: cache)
         } catch {
-            fatalError(String(describing: error))
+            nonThrowingLanguageModelRuntimeFailure(error, owner: type(of: self))
         }
     }
 
@@ -230,7 +230,7 @@ public class SmolLM3Model: Module, LLMModel, KVCacheDimensionProvider, ThrowingL
         do {
             return try callAsFunctionThrowing(inputs, cache: cache)
         } catch {
-            fatalError(String(describing: error))
+            nonThrowingLanguageModelRuntimeFailure(error, owner: type(of: self))
         }
     }
 

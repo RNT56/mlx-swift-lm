@@ -57,7 +57,7 @@ class Qwen3Attention: Module {
         do {
             return try callThrowing(x, mask: mask, cache: cache)
         } catch {
-            fatalError(String(describing: error))
+            nonThrowingLanguageModelRuntimeFailure(error, owner: type(of: self))
         }
     }
 
@@ -134,7 +134,7 @@ class Qwen3TransformerBlock: Module {
         do {
             return try callThrowing(x, mask: mask, cache: cache)
         } catch {
-            fatalError(String(describing: error))
+            nonThrowingLanguageModelRuntimeFailure(error, owner: type(of: self))
         }
     }
 
@@ -172,7 +172,7 @@ public class Qwen3ModelInner: Module {
         do {
             return try callThrowing(inputs, cache: cache)
         } catch {
-            fatalError(String(describing: error))
+            nonThrowingLanguageModelRuntimeFailure(error, owner: type(of: self))
         }
     }
 
@@ -241,7 +241,7 @@ public class Qwen3Model: Module, LLMModel, KVCacheDimensionProvider, ThrowingLan
         do {
             return try callAsFunctionThrowing(inputs, cache: cache)
         } catch {
-            fatalError(String(describing: error))
+            nonThrowingLanguageModelRuntimeFailure(error, owner: type(of: self))
         }
     }
 

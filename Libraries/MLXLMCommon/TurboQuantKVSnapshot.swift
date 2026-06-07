@@ -55,7 +55,7 @@ public struct TurboQuantKVSnapshotArrayDescriptor: Hashable, Codable, Sendable {
 }
 
 public struct TurboQuantKVSnapshotManifest: Hashable, Codable, Sendable {
-    public static let currentSchemaVersion = 2
+    public static let currentSchemaVersion = 4
 
     public var schemaVersion: Int
     public var snapshotID: UUID
@@ -105,6 +105,16 @@ public struct TurboQuantKVSnapshotManifest: Hashable, Codable, Sendable {
     public var runtimeFallbackReason: String?
     public var selectedPath: String?
     public var fallbackReason: String?
+    public var polarWHTKeyBytes: Int64
+    public var polarWHTKeyPayloadAllocated: Bool
+    public var polarWHTKeyBits: Int?
+    public var polarWHTKeySeed: UInt64?
+    public var polarWHTKeyPackedWordsPerVector: Int?
+    public var polarWHTValueBytes: Int64
+    public var polarWHTValuePayloadAllocated: Bool
+    public var polarWHTValueBits: Int?
+    public var polarWHTValueSeed: UInt64?
+    public var polarWHTValuePackedWordsPerVector: Int?
     public var arrays: [TurboQuantKVSnapshotArrayDescriptor]
 
     public init(
@@ -149,6 +159,16 @@ public struct TurboQuantKVSnapshotManifest: Hashable, Codable, Sendable {
         runtimeFallbackReason: String? = nil,
         selectedPath: String? = nil,
         fallbackReason: String? = nil,
+        polarWHTKeyBytes: Int64 = 0,
+        polarWHTKeyPayloadAllocated: Bool = false,
+        polarWHTKeyBits: Int? = nil,
+        polarWHTKeySeed: UInt64? = nil,
+        polarWHTKeyPackedWordsPerVector: Int? = nil,
+        polarWHTValueBytes: Int64 = 0,
+        polarWHTValuePayloadAllocated: Bool = false,
+        polarWHTValueBits: Int? = nil,
+        polarWHTValueSeed: UInt64? = nil,
+        polarWHTValuePackedWordsPerVector: Int? = nil,
         arrays: [TurboQuantKVSnapshotArrayDescriptor]
     ) {
         self.schemaVersion = schemaVersion
@@ -203,6 +223,16 @@ public struct TurboQuantKVSnapshotManifest: Hashable, Codable, Sendable {
         self.runtimeFallbackReason = runtimeFallbackReason
         self.selectedPath = selectedPath
         self.fallbackReason = fallbackReason ?? runtimeFallbackReason
+        self.polarWHTKeyBytes = max(0, polarWHTKeyBytes)
+        self.polarWHTKeyPayloadAllocated = polarWHTKeyPayloadAllocated
+        self.polarWHTKeyBits = polarWHTKeyBits
+        self.polarWHTKeySeed = polarWHTKeySeed
+        self.polarWHTKeyPackedWordsPerVector = polarWHTKeyPackedWordsPerVector
+        self.polarWHTValueBytes = max(0, polarWHTValueBytes)
+        self.polarWHTValuePayloadAllocated = polarWHTValuePayloadAllocated
+        self.polarWHTValueBits = polarWHTValueBits
+        self.polarWHTValueSeed = polarWHTValueSeed
+        self.polarWHTValuePackedWordsPerVector = polarWHTValuePackedWordsPerVector
         self.arrays = arrays
     }
 
@@ -254,6 +284,16 @@ public struct TurboQuantKVSnapshotManifest: Hashable, Codable, Sendable {
         case runtimeFallbackReason
         case selectedPath
         case fallbackReason
+        case polarWHTKeyBytes
+        case polarWHTKeyPayloadAllocated
+        case polarWHTKeyBits
+        case polarWHTKeySeed
+        case polarWHTKeyPackedWordsPerVector
+        case polarWHTValueBytes
+        case polarWHTValuePayloadAllocated
+        case polarWHTValueBits
+        case polarWHTValueSeed
+        case polarWHTValuePackedWordsPerVector
         case arrays
     }
 
@@ -350,6 +390,46 @@ public struct TurboQuantKVSnapshotManifest: Hashable, Codable, Sendable {
             ),
             selectedPath: try container.decodeIfPresent(String.self, forKey: .selectedPath),
             fallbackReason: try container.decodeIfPresent(String.self, forKey: .fallbackReason),
+            polarWHTKeyBytes: try container.decodeIfPresent(
+                Int64.self,
+                forKey: .polarWHTKeyBytes
+            ) ?? 0,
+            polarWHTKeyPayloadAllocated: try container.decodeIfPresent(
+                Bool.self,
+                forKey: .polarWHTKeyPayloadAllocated
+            ) ?? false,
+            polarWHTKeyBits: try container.decodeIfPresent(
+                Int.self,
+                forKey: .polarWHTKeyBits
+            ),
+            polarWHTKeySeed: try container.decodeIfPresent(
+                UInt64.self,
+                forKey: .polarWHTKeySeed
+            ),
+            polarWHTKeyPackedWordsPerVector: try container.decodeIfPresent(
+                Int.self,
+                forKey: .polarWHTKeyPackedWordsPerVector
+            ),
+            polarWHTValueBytes: try container.decodeIfPresent(
+                Int64.self,
+                forKey: .polarWHTValueBytes
+            ) ?? 0,
+            polarWHTValuePayloadAllocated: try container.decodeIfPresent(
+                Bool.self,
+                forKey: .polarWHTValuePayloadAllocated
+            ) ?? false,
+            polarWHTValueBits: try container.decodeIfPresent(
+                Int.self,
+                forKey: .polarWHTValueBits
+            ),
+            polarWHTValueSeed: try container.decodeIfPresent(
+                UInt64.self,
+                forKey: .polarWHTValueSeed
+            ),
+            polarWHTValuePackedWordsPerVector: try container.decodeIfPresent(
+                Int.self,
+                forKey: .polarWHTValuePackedWordsPerVector
+            ),
             arrays: try container.decode(
                 [TurboQuantKVSnapshotArrayDescriptor].self,
                 forKey: .arrays
@@ -472,29 +552,83 @@ extension TurboQuantKVSnapshotManifest {
                 "batch, head, group, and value bit fields must be positive"
             )
         }
-        guard compressedKeyBytes >= 0, compressedValueBytes >= 0,
-            blobByteCount >= compressedKeyBytes + compressedValueBytes
+        guard compressedKeyBytes >= 0, compressedValueBytes >= 0, polarWHTKeyBytes >= 0,
+            polarWHTValueBytes >= 0,
+            blobByteCount
+                >= compressedKeyBytes + compressedValueBytes + polarWHTKeyBytes
+                    + polarWHTValueBytes
         else {
             throw TurboQuantKVSnapshotError.invalidManifest(
                 "compressed byte counts are inconsistent"
             )
         }
+        if polarWHTKeyPayloadAllocated {
+            guard kvCodec == .polarWHT else {
+                throw TurboQuantKVSnapshotError.invalidManifest(
+                    "PolarWHT key payload requires polarWHT codec"
+                )
+            }
+            guard polarWHTKeyBytes > 0,
+                (polarWHTKeyBits ?? 0) > 0,
+                polarWHTKeySeed != nil,
+                (polarWHTKeyPackedWordsPerVector ?? 0) > 0
+            else {
+                throw TurboQuantKVSnapshotError.invalidManifest(
+                    "PolarWHT key payload metadata is incomplete"
+                )
+            }
+        }
+        if polarWHTValuePayloadAllocated {
+            guard kvCodec == .polarWHT else {
+                throw TurboQuantKVSnapshotError.invalidManifest(
+                    "PolarWHT value payload requires polarWHT codec"
+                )
+            }
+            guard polarWHTValueBytes > 0,
+                (polarWHTValueBits ?? 0) > 0,
+                polarWHTValueSeed != nil,
+                (polarWHTValuePackedWordsPerVector ?? 0) > 0
+            else {
+                throw TurboQuantKVSnapshotError.invalidManifest(
+                    "PolarWHT value payload metadata is incomplete"
+                )
+            }
+        }
     }
 
     public func validateArrayDescriptors(against arraysByName: [String: MLXArray]) throws {
         let required = Set(TurboQuantKVSnapshotArrayName.ordered)
+        let optionalKey = Set(TurboQuantKVSnapshotArrayName.polarWHTKeyOrdered)
+        let optionalValue = Set(TurboQuantKVSnapshotArrayName.polarWHTValueOrdered)
+        let optional = optionalKey.union(optionalValue)
+        let known = required.union(optional)
         let descriptorNames = Set(arrays.map(\.name))
-        guard arrays.count == required.count, descriptorNames == required else {
+        guard required.isSubset(of: descriptorNames),
+            descriptorNames.isSubset(of: known)
+        else {
             let missing = required.subtracting(descriptorNames).sorted().joined(separator: ",")
-            let extra = descriptorNames.subtracting(required).sorted().joined(separator: ",")
+            let extra = descriptorNames.subtracting(known).sorted().joined(separator: ",")
             throw TurboQuantKVSnapshotError.invalidArrayMetadata(
-                "expected exactly the compressed KV arrays; missing [\(missing)] extra [\(extra)]"
+                "expected compressed KV arrays plus optional PolarWHT payloads; missing [\(missing)] extra [\(extra)]"
             )
         }
-        guard Set(arraysByName.keys) == required else {
+        let descriptorKeySidecarNames = descriptorNames.intersection(optionalKey)
+        guard descriptorKeySidecarNames.isEmpty || descriptorKeySidecarNames == optionalKey else {
+            throw TurboQuantKVSnapshotError.invalidArrayMetadata(
+                "PolarWHT key payload descriptors must be all-or-none"
+            )
+        }
+        let descriptorValueSidecarNames = descriptorNames.intersection(optionalValue)
+        guard descriptorValueSidecarNames.isEmpty || descriptorValueSidecarNames == optionalValue else {
+            throw TurboQuantKVSnapshotError.invalidArrayMetadata(
+                "PolarWHT value payload descriptors must be all-or-none"
+            )
+        }
+        let payloadNames = Set(arraysByName.keys)
+        guard payloadNames == descriptorNames else {
             let names = Set(arraysByName.keys)
-            let missing = required.subtracting(names).sorted().joined(separator: ",")
-            let extra = names.subtracting(required).sorted().joined(separator: ",")
+            let missing = descriptorNames.subtracting(names).sorted().joined(separator: ",")
+            let extra = names.subtracting(descriptorNames).sorted().joined(separator: ",")
             throw TurboQuantKVSnapshotError.invalidArrayMetadata(
                 "payload arrays do not match manifest; missing [\(missing)] extra [\(extra)]"
             )
@@ -561,4 +695,20 @@ public enum TurboQuantKVSnapshotArrayName {
         "value.residualSigns",
         "value.scales",
     ]
+
+    public static let polarWHTValuePackedIndices = "polarWHTValue.packedIndices"
+    public static let polarWHTValueNorms = "polarWHTValue.norms"
+    public static let polarWHTValueOrdered = [
+        polarWHTValuePackedIndices,
+        polarWHTValueNorms,
+    ]
+
+    public static let polarWHTKeyPackedIndices = "polarWHTKey.packedIndices"
+    public static let polarWHTKeyNorms = "polarWHTKey.norms"
+    public static let polarWHTKeyOrdered = [
+        polarWHTKeyPackedIndices,
+        polarWHTKeyNorms,
+    ]
+
+    public static let allKnown = ordered + polarWHTKeyOrdered + polarWHTValueOrdered
 }

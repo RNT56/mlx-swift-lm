@@ -377,20 +377,29 @@ private class LanguageModel: Module, KVCacheDimensionProvider {
         var caches: [any KVCache] = []
         let slidingWindow = config.slidingWindow > 0 ? config.slidingWindow : 4096
         let slidingWindowPattern = config.slidingWindowPattern
+        let globalLayerCount = (0 ..< config.hiddenLayers).filter {
+            $0 % slidingWindowPattern == slidingWindowPattern - 1
+        }.count
+        var globalLayerIndex = 0
         for i in 0 ..< config.hiddenLayers {
             let isGlobalLayer = (i % slidingWindowPattern == slidingWindowPattern - 1)
             if isGlobalLayer {
+                let boundaryLayerIndex = globalLayerIndex
+                globalLayerIndex += 1
                 caches.append(
                     makeAttentionKVCache(
                         parameters: parameters,
                         layerIndex: i,
-                        layerCount: config.hiddenLayers
+                        layerCount: config.hiddenLayers,
+                        boundaryLayerIndex: boundaryLayerIndex,
+                        boundaryLayerCount: globalLayerCount
                     ))
             } else {
                 caches.append(
                     makeAttentionKVCache(
                         parameters: parameters, maxKVSize: slidingWindow, keep: 0,
-                        layerIndex: i, layerCount: config.hiddenLayers))
+                        layerIndex: i, layerCount: config.hiddenLayers,
+                        boundaryLayerIndex: -1, boundaryLayerCount: globalLayerCount))
             }
         }
         return caches

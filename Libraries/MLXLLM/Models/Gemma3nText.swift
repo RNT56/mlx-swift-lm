@@ -266,7 +266,7 @@ class Gemma3nAttention: Module {
                 sharedKV: sharedKV
             )
         } catch {
-            fatalError(String(describing: error))
+            nonThrowingLanguageModelRuntimeFailure(error, owner: type(of: self))
         }
     }
 
@@ -640,7 +640,7 @@ class Gemma3nDecoderLayer: Module {
                 cachePosition: cachePosition
             )
         } catch {
-            fatalError(String(describing: error))
+            nonThrowingLanguageModelRuntimeFailure(error, owner: type(of: self))
         }
     }
 
@@ -760,21 +760,30 @@ public class Gemma3nLanguageModel: Module {
         let firstKvSharedLayerIdx = config.numHiddenLayers - config.numKvSharedLayers
         let layerTypes =
             config.layerTypes ?? Array(repeating: "global_attention", count: config.numHiddenLayers)
+        let fullAttentionLayerCount = layerTypes.prefix(firstKvSharedLayerIdx).filter {
+            $0 == "full_attention" || $0 == "global_attention"
+        }.count
+        var fullAttentionLayerIndex = 0
 
         for i in 0 ..< firstKvSharedLayerIdx {
             let layerType = layerTypes[i]
-            if layerType == "full_attention" {
+            if layerType == "full_attention" || layerType == "global_attention" {
+                let boundaryLayerIndex = fullAttentionLayerIndex
+                fullAttentionLayerIndex += 1
                 caches.append(
                     makeAttentionKVCache(
                         parameters: parameters,
                         layerIndex: i,
-                        layerCount: firstKvSharedLayerIdx
+                        layerCount: firstKvSharedLayerIdx,
+                        boundaryLayerIndex: boundaryLayerIndex,
+                        boundaryLayerCount: fullAttentionLayerCount
                     ))
             } else if layerType == "sliding_attention" {
                 caches.append(
                     makeAttentionKVCache(
                         parameters: parameters, maxKVSize: slidingWindow, keep: 0,
-                        layerIndex: i, layerCount: firstKvSharedLayerIdx))
+                        layerIndex: i, layerCount: firstKvSharedLayerIdx,
+                        boundaryLayerIndex: -1, boundaryLayerCount: fullAttentionLayerCount))
             } else {
                 fatalError("Unknown layer type: \(layerType) for layer \(i)")
             }
@@ -886,7 +895,7 @@ public class Gemma3nLanguageModel: Module {
                 perLayerInputs: perLayerInputs
             )
         } catch {
-            fatalError(String(describing: error))
+            nonThrowingLanguageModelRuntimeFailure(error, owner: type(of: self))
         }
     }
 
@@ -1109,7 +1118,7 @@ public class Gemma3nTextModel: Module, LLMModel, KVCacheDimensionProvider, Throw
                 cache: cache
             )
         } catch {
-            fatalError(String(describing: error))
+            nonThrowingLanguageModelRuntimeFailure(error, owner: type(of: self))
         }
     }
 

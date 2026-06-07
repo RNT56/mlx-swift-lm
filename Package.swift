@@ -46,11 +46,20 @@ let package = Package(
         .executable(
             name: "TurboQuantInferenceParity",
             targets: ["TurboQuantInferenceParity"]),
+        .executable(
+            name: "TurboQuantNativeVxBenchmark",
+            targets: ["TurboQuantNativeVxBenchmark"]),
+        .executable(
+            name: "TurboQuantCacheUpdateBenchmark",
+            targets: ["TurboQuantCacheUpdateBenchmark"]),
+        .executable(
+            name: "TurboQuantLowerV2Calibrate",
+            targets: ["TurboQuantLowerV2Calibrate"]),
     ],
     dependencies: [
         .package(
             url: "https://github.com/RNT56/mlx-swift",
-            revision: "609e8333671419ee1dbe928eeee7f48a24682631"),
+            revision: "6bfa04e2924152c52c56eac5c3420a7cc7e8d720"),
         .package(url: "https://github.com/swiftlang/swift-syntax.git", "600.0.0" ..< "604.0.0"),
     ],
     targets: [
@@ -108,6 +117,7 @@ let package = Package(
             name: "BenchmarkHelpers",
             dependencies: [
                 "MLXLMCommon",
+                "IntegrationTestHelpers",
                 "MLXLLM",
                 "MLXVLM",
                 "MLXEmbedders",
@@ -161,6 +171,28 @@ let package = Package(
             ],
             path: "tools/TurboQuantInferenceParity"
         ),
+        .executableTarget(
+            name: "TurboQuantNativeVxBenchmark",
+            dependencies: [
+                .product(name: "MLX", package: "mlx-swift"),
+            ],
+            path: "tools/TurboQuantNativeVxBenchmark"
+        ),
+        .executableTarget(
+            name: "TurboQuantCacheUpdateBenchmark",
+            dependencies: [
+                "MLXLMCommon",
+                .product(name: "MLX", package: "mlx-swift"),
+            ],
+            path: "tools/TurboQuantCacheUpdateBenchmark"
+        ),
+        .executableTarget(
+            name: "TurboQuantLowerV2Calibrate",
+            dependencies: [
+                "MLXLMCommon"
+            ],
+            path: "tools/TurboQuantLowerV2Calibrate"
+        ),
         .testTarget(
             name: "MLXLMTests",
             dependencies: [
@@ -171,6 +203,7 @@ let package = Package(
                 "MLXLLM",
                 "MLXVLM",
                 "MLXEmbedders",
+                "IntegrationTestHelpers",
                 "TurboQuantBench",
             ],
             path: "Tests/MLXLMTests",

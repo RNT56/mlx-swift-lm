@@ -243,6 +243,10 @@ extension LanguageModel {
     }
 }
 
+public func nonThrowingLanguageModelRuntimeFailure(_ error: Error, owner: Any.Type) -> Never {
+    fatalError("Non-throwing language model compatibility wrapper for \(owner) has no recoverable output: \(error)")
+}
+
 /// Optional protocol that can be implemented by ``LanguageModel`` and will
 /// provide an automatic implementation of ``LanguageModel/newCache(parameters:)``
 public protocol KVCacheDimensionProvider {
@@ -254,9 +258,11 @@ extension LanguageModel where Self: KVCacheDimensionProvider {
         let parameters: GenerateParameters? =
             if let original = parameters {
                 {
-                    let attentionLayerCount = kvHeads.filter { $0 > 0 }.count
-                    let layerCount = attentionLayerCount > 0 ? attentionLayerCount : kvHeads.count
-                    return (try? original.resolvedForTurboQuantRuntime(layerCount: layerCount))
+                    let topology = KVLayerTopology(kvHeads: kvHeads)
+                    return (try? original.resolvedForTurboQuantRuntime(
+                        layerCount: topology.admissionLayerCount,
+                        kvLayerTopology: topology
+                    ))
                         ?? original
                 }()
             } else {

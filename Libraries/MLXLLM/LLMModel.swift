@@ -1,7 +1,31 @@
 // Copyright © 2024 Apple Inc.
 
+import Foundation
 import MLX
 import MLXLMCommon
+
+private func turboQuantPrefillSynchronizationInterval(
+    promptLength: Int,
+    stepSize: Int
+) -> Int? {
+    let environment = ProcessInfo.processInfo.environment
+    let explicit = environment["TQ_PREFILL_SYNC_INTERVAL"]
+        ?? environment["TURBOQUANT_PREFILL_SYNC_INTERVAL"]
+    if let explicit, let value = Int(explicit.trimmingCharacters(in: .whitespaces)) {
+        return value > 0 ? value : nil
+    }
+
+    guard promptLength >= 65_536 else { return nil }
+    let targetTokensPerCommandBuffer = 8_192
+    return max(1, targetTokensPerCommandBuffer / max(1, stepSize))
+}
+
+private func turboQuantFlushPrefillCommandBuffer(clearCache: Bool = false) {
+    Stream.gpu.synchronize()
+    if clearCache {
+        Memory.clearCache()
+    }
+}
 
 /// Marker protocol for LLMModels
 public protocol LLMModel: LanguageModel, LoRAModel {
@@ -23,6 +47,11 @@ extension LLMModel {
     {
         let prefillStepSize = windowSize ?? 512
         var y = input.text
+        let prefillSyncInterval = turboQuantPrefillSynchronizationInterval(
+            promptLength: y.tokens.size,
+            stepSize: prefillStepSize
+        )
+        var chunksSinceSync = 0
 
         // Prepare the prompt in chunks if larger than the prefill size.
         // asyncEval lets the CPU build chunk N+1's graph while the GPU evaluates
@@ -39,11 +68,20 @@ extension LLMModel {
                 _ = self(input, cache: cache.isEmpty ? nil : cache, state: nil)
             }
             asyncEval(cache)
+            chunksSinceSync += 1
+            if let prefillSyncInterval,
+                chunksSinceSync % prefillSyncInterval == 0
+            {
+                turboQuantFlushPrefillCommandBuffer(clearCache: chunksSinceSync > 0)
+            }
             y = y[prefillStepSize...]
         }
 
         // Single sync after the loop to flush any remaining async work.
         eval(cache)
+        if prefillSyncInterval != nil {
+            Stream.gpu.synchronize()
+        }
 
         return .tokens(y)
     }

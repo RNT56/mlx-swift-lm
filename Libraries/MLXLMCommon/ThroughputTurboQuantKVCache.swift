@@ -15,6 +15,7 @@ public final class ThroughputTurboQuantKVCache: BaseKVCache, TurboQuantCompresse
     public let resolvedRuntimeMode: TurboQuantRuntimeMode
     public let precisionPolicy: TurboQuantKVPrecisionPolicy
     public let sparseValuePolicy: TurboQuantSparseValuePolicy
+    public let sparseValueSelection: TurboQuantSparseValueSelection
     public let boundaryProtectedLayerCount: Int
     public let boundaryProtectionReason: String?
 
@@ -26,6 +27,7 @@ public final class ThroughputTurboQuantKVCache: BaseKVCache, TurboQuantCompresse
         groupSize: Int = 64,
         mode: QuantizationMode = .affine,
         backend: TurboQuantBackend = .metalPolarQJL,
+        kvCodec: TurboQuantKVCodec? = nil,
         optimizationPolicy: TurboQuantOptimizationPolicy = .preferThroughput,
         fallbackPolicy: TurboQuantFallbackPolicy = .compressedDecodeAllowed,
         seed: UInt64 = 0x9E37_79B9_7F4A_7C15,
@@ -33,21 +35,32 @@ public final class ThroughputTurboQuantKVCache: BaseKVCache, TurboQuantCompresse
         precisionPolicy: TurboQuantKVPrecisionPolicy? = nil,
         requestedRuntimeMode: TurboQuantRuntimeMode = .auto,
         sparseValuePolicy: TurboQuantSparseValuePolicy = .off,
+        sparseValueSelection: TurboQuantSparseValueSelection = .off,
         boundaryProtectedLayerCount: Int = 0,
         boundaryProtectionReason: String? = nil,
         residentBudgetBytes: Int? = nil
     ) {
+        let backingKVCodec = turboQuantCompressedKVCodec(
+            requested: kvCodec,
+            backend: backend
+        )
+        let requestedValueBits = turboQuantDefaultValueBits(
+            preset: preset,
+            kvCodec: backingKVCodec,
+            requestedValueBits: valueBits
+        )
         let policy =
             precisionPolicy
-            ?? TurboQuantKVPrecisionPolicy.legacy(preset: preset, valueBits: valueBits)
+            ?? TurboQuantKVPrecisionPolicy.legacy(preset: preset, valueBits: requestedValueBits)
         self.requestedRuntimeMode = requestedRuntimeMode
         self.resolvedRuntimeMode = .throughputTurboQuant
         self.precisionPolicy = policy
         self.sparseValuePolicy = sparseValuePolicy
+        self.sparseValueSelection = sparseValueSelection
         self.boundaryProtectedLayerCount = max(0, boundaryProtectedLayerCount)
         self.boundaryProtectionReason = boundaryProtectionReason
         let backingPreset = policy.compressedKeyPreset
-        let backingValueBits = policy.resolvedValueBits ?? valueBits ?? backingPreset.defaultValueBits
+        let backingValueBits = policy.resolvedValueBits ?? requestedValueBits
 
         if let maxSize {
             self.activeCache = RotatingKVCache(maxSize: maxSize, keep: keep, step: step)
@@ -59,10 +72,13 @@ public final class ThroughputTurboQuantKVCache: BaseKVCache, TurboQuantCompresse
                 groupSize: groupSize,
                 mode: mode,
                 backend: backend,
+                kvCodec: backingKVCodec,
                 optimizationPolicy: optimizationPolicy,
                 fallbackPolicy: fallbackPolicy,
                 seed: seed,
                 valueBits: backingValueBits,
+                sparseValuePolicy: sparseValuePolicy,
+                sparseValueSelection: sparseValueSelection,
                 residentBudgetBytes: residentBudgetBytes
             )
         } else {
@@ -74,10 +90,13 @@ public final class ThroughputTurboQuantKVCache: BaseKVCache, TurboQuantCompresse
                 groupSize: groupSize,
                 mode: mode,
                 backend: backend,
+                kvCodec: backingKVCodec,
                 optimizationPolicy: optimizationPolicy,
                 fallbackPolicy: fallbackPolicy,
                 seed: seed,
                 valueBits: backingValueBits,
+                sparseValuePolicy: sparseValuePolicy,
+                sparseValueSelection: sparseValueSelection,
                 residentBudgetBytes: residentBudgetBytes
             )
         }
@@ -89,6 +108,7 @@ public final class ThroughputTurboQuantKVCache: BaseKVCache, TurboQuantCompresse
     public override var isTrimmable: Bool { activeCache.isTrimmable }
 
     public var preset: TurboQuantPreset { backingCache.preset }
+    public var kvCodec: TurboQuantKVCodec { backingCache.kvCodec }
     public var requestedBackend: TurboQuantBackend { backingCache.requestedBackend }
     public var activeBackend: TurboQuantBackend { backingCache.activeBackend }
     public var optimizationPolicy: TurboQuantOptimizationPolicy { backingCache.optimizationPolicy }
@@ -96,6 +116,28 @@ public final class ThroughputTurboQuantKVCache: BaseKVCache, TurboQuantCompresse
     public var compressedState: (TurboQuantAttentionCode, TurboQuantAttentionCode)? {
         backingCache.compressedState
     }
+    public var hybridAffineKeyState: QuantizedKVStorage? {
+        backingCache.hybridAffineKeyState
+    }
+    public var hybridAffineKeyStateForAttention: QuantizedKVStorage? {
+        backingCache.hybridAffineKeyStateForAttention
+    }
+    public var polarWHTKeyState: TurboQuantPolarWHTAttentionValueCode? {
+        backingCache.polarWHTKeyState
+    }
+    public var polarWHTValueState: TurboQuantPolarWHTAttentionValueCode? {
+        backingCache.polarWHTValueState
+    }
+    public var polarWHTKeyStateForAttention: TurboQuantPolarWHTAttentionValueCode? {
+        backingCache.polarWHTKeyStateForAttention
+    }
+    public var polarWHTValueStateForAttention: TurboQuantPolarWHTAttentionValueCode? {
+        backingCache.polarWHTValueStateForAttention
+    }
+    public var keyPageSummary: MLXArray? { backingCache.keyPageSummary }
+    public func ensureKeyPageSummary() { backingCache.ensureKeyPageSummary() }
+    public var keyCandidateSketch: MLXArray? { backingCache.keyCandidateSketch }
+    public func ensureKeyCandidateSketch() { backingCache.ensureKeyCandidateSketch() }
     public var cacheLifecycle: TurboQuantCacheLifecycle { backingCache.cacheLifecycle }
     public var fallbackResults: [TurboQuantFallbackResult] { backingCache.fallbackResults }
 
@@ -117,6 +159,10 @@ public final class ThroughputTurboQuantKVCache: BaseKVCache, TurboQuantCompresse
         return TurboQuantAttentionDiagnostics(
             metalAttentionAvailable: diagnostics.metalAttentionAvailable,
             activeAttentionPath: lastAttentionPath,
+            nativeBackend: diagnostics.nativeBackend,
+            nativeBackendVersion: diagnostics.nativeBackendVersion,
+            nativeFallbackReason: diagnostics.nativeFallbackReason,
+            nativeSparseVSkipRatio: diagnostics.nativeSparseVSkipRatio,
             selectedKernelProfile: diagnostics.selectedKernelProfile,
             selfTestStatus: diagnostics.selfTestStatus,
             selfTestFailureReason: diagnostics.selfTestFailureReason,
@@ -126,11 +172,34 @@ public final class ThroughputTurboQuantKVCache: BaseKVCache, TurboQuantCompresse
             rawFallbackAllocated: true,
             cacheLifecycle: diagnostics.cacheLifecycle,
             lastFallback: diagnostics.lastFallback,
-            sparseVEnabled: false,
-            sparseVThreshold: nil,
-            sparseVSkipRatio: nil,
+            sparseVEnabled: diagnostics.sparseVEnabled,
+            sparseVThreshold: diagnostics.sparseVThreshold,
+            sparseVSelectionMode: diagnostics.sparseVSelectionMode,
+            sparseVTopK: diagnostics.sparseVTopK,
+            sparseVCumulativeMass: diagnostics.sparseVCumulativeMass,
+            sparseVMaxTopK: diagnostics.sparseVMaxTopK,
+            sparseVRecentTokenCount: diagnostics.sparseVRecentTokenCount,
+            sparseVOlderTokenCount: diagnostics.sparseVOlderTokenCount,
+            sparseVPageCandidateCount: diagnostics.sparseVPageCandidateCount,
+            sparseVSkippedTokens: diagnostics.sparseVSkippedTokens,
+            sparseVTotalTokens: diagnostics.sparseVTotalTokens,
+            sparseVActive: diagnostics.sparseVActive,
+            sparseVSkipRatio: diagnostics.sparseVSkipRatio,
+            sparseVRetainedMass: diagnostics.sparseVRetainedMass,
             boundaryProtectedLayerCount: boundaryProtectedLayerCount,
-            boundaryProtectionReason: boundaryProtectionReason
+            boundaryProtectionReason: boundaryProtectionReason,
+            keyBits: diagnostics.keyBits,
+            valueBits: diagnostics.valueBits,
+            keyGroupSize: diagnostics.keyGroupSize,
+            valueGroupSize: diagnostics.valueGroupSize,
+            keyPageSummaryAvailable: diagnostics.keyPageSummaryAvailable,
+            keyPageSummaryShape: diagnostics.keyPageSummaryShape,
+            keyPageSummaryUnavailableReason: diagnostics.keyPageSummaryUnavailableReason,
+            keyCandidateSketchAvailable: diagnostics.keyCandidateSketchAvailable,
+            keyCandidateSketchShape: diagnostics.keyCandidateSketchShape,
+            keyCandidateSketchUnavailableReason: diagnostics.keyCandidateSketchUnavailableReason,
+            polarWHTValueBytes: diagnostics.polarWHTValueBytes,
+            polarWHTValuePayloadAllocated: diagnostics.polarWHTValuePayloadAllocated
         )
     }
 
@@ -209,6 +278,7 @@ public final class ThroughputTurboQuantKVCache: BaseKVCache, TurboQuantCompresse
             preset: preset,
             groupSize: (backingCache as? any QuantizedKVCacheProtocol)?.groupSize ?? 64,
             backend: requestedBackend,
+            kvCodec: kvCodec,
             optimizationPolicy: optimizationPolicy,
             fallbackPolicy: fallbackPolicy,
             seed: (backingCache as? TurboQuantKVCache)?.seed
@@ -218,6 +288,7 @@ public final class ThroughputTurboQuantKVCache: BaseKVCache, TurboQuantCompresse
             precisionPolicy: precisionPolicy,
             requestedRuntimeMode: requestedRuntimeMode,
             sparseValuePolicy: sparseValuePolicy,
+            sparseValueSelection: sparseValueSelection,
             boundaryProtectedLayerCount: boundaryProtectedLayerCount,
             boundaryProtectionReason: boundaryProtectionReason
         )

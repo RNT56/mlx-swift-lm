@@ -95,3 +95,7 @@ iOSInjectionProject/
 .idea
 .vscode
 
+# Local TurboQuant runs
+artifacts/
+.turboquant.env
+scripts/__pycache__/

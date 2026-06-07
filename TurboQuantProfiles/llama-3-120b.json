@@ -1,5 +1,5 @@
 {
-  "schema_version": 3,
+  "schema_version": 4,
   "id": "llama-3-120b",
   "exact_model_ids": [],
   "model_patterns": [

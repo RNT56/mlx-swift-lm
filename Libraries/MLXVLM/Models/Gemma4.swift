@@ -1092,20 +1092,30 @@ private final class Gemma4TextLanguageModel: Module, KVCacheDimensionProvider {
     func newCache(parameters: GenerateParameters?) -> [any KVCache] {
         let slidingWindow = config.slidingWindow > 0 ? config.slidingWindow : 4096
         let layerCount = config.hiddenLayers - config.numKVSharedLayers
+        let fullAttentionLayerCount = config.layerTypes.prefix(layerCount).filter {
+            $0 == "full_attention"
+        }.count
+        var fullAttentionLayerIndex = 0
         return config.layerTypes.prefix(layerCount).enumerated().map { index, layerType in
             if layerType == "full_attention" {
-                makeAttentionKVCache(
+                let boundaryLayerIndex = fullAttentionLayerIndex
+                fullAttentionLayerIndex += 1
+                return makeAttentionKVCache(
                     parameters: parameters,
                     layerIndex: index,
-                    layerCount: layerCount
+                    layerCount: layerCount,
+                    boundaryLayerIndex: boundaryLayerIndex,
+                    boundaryLayerCount: fullAttentionLayerCount
                 )
             } else {
-                makeAttentionKVCache(
+                return makeAttentionKVCache(
                     parameters: parameters,
                     maxKVSize: slidingWindow,
                     keep: 0,
                     layerIndex: index,
-                    layerCount: layerCount
+                    layerCount: layerCount,
+                    boundaryLayerIndex: -1,
+                    boundaryLayerCount: fullAttentionLayerCount
                 )
             }
         }

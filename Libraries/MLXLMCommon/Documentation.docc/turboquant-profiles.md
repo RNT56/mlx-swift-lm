@@ -135,6 +135,7 @@ Use the benchmark entrypoints to generate profile evidence:
 swift run TurboQuantBenchmark --iterations 25
 swift run TurboQuantModelBenchmark --iterations 25
 swift run TurboQuantQwenProof --release-matrix --strict --iterations 25 --dtype float16 --min-extended-tokens-per-second 20
+swift run TurboQuantInferenceParity --model-dir /path/to/mlx-model --contexts 32768,65536 --configs fp16,affineK8V4,affineK8V3,affineK8V3-optimized,affineK8V2,mlxAffine-q8,affineInt4,turbo4v2,turbo3_5,turbo8 --quality-gates --quality-contexts 32768
 ```
 
 The core benchmark records kernel-level decode, matmul, QK/AV, and fused-attention
@@ -148,6 +149,16 @@ throughput on the p95-latency token rate; use explicit
 `--query-lengths` values for wider prompt/prefill stress sweeps. Promote bundled profile fields from pending to measured only when
 the JSON includes the model revision, device, OS, latency, memory, and quality
 data needed to reproduce the decision.
+
+`TurboQuantInferenceParity` is the current real-model gate for compressed speed
+routes. It runs the full decode loop and can compare FP16, affine K8/V4,
+affine K8/V3, affine K8/V2, MLX affine Q8, affine int4, and Polar/QJL
+TurboQuant presets under one model. `--list-configs` prints the supported
+labels, and
+`scripts/run-turboquant-current-benchmarks.sh` runs the current core plus
+real-model matrix into a timestamped artifact directory. Evidence runs should
+use `--strict-configs` or `TQ_BENCH_STRICT=1` through the script so unknown
+config labels fail instead of shrinking the matrix.
 
 Production decode hardening keeps normal model attention layouts recoverable:
 Q/K/V tensors are canonicalized before compressed cache encode and compressed

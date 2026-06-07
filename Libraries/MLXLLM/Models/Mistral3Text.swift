@@ -78,7 +78,7 @@ class Mistral3Attention: Module {
         do {
             return try callThrowing(x, attnScale: attnScale, mask: mask, cache: cache)
         } catch {
-            fatalError(String(describing: error))
+            nonThrowingLanguageModelRuntimeFailure(error, owner: type(of: self))
         }
     }
 
@@ -174,7 +174,7 @@ class Mistral3TextTransformerBlock: Module {
         do {
             return try callThrowing(x, attnScale: attnScale, mask: mask, cache: cache)
         } catch {
-            fatalError(String(describing: error))
+            nonThrowingLanguageModelRuntimeFailure(error, owner: type(of: self))
         }
     }
 
@@ -243,7 +243,7 @@ public class Mistral3TextModelInner: Module {
         do {
             return try callThrowing(inputs, cache: cache, inputEmbeddings: inputEmbeddings)
         } catch {
-            fatalError(String(describing: error))
+            nonThrowingLanguageModelRuntimeFailure(error, owner: type(of: self))
         }
     }
 
@@ -338,7 +338,7 @@ public class Mistral3TextModel: Module, LLMModel, KVCacheDimensionProvider,
         do {
             return try callThrowing(inputs, cache: cache, inputEmbeddings: inputEmbeddings)
         } catch {
-            fatalError(String(describing: error))
+            nonThrowingLanguageModelRuntimeFailure(error, owner: type(of: self))
         }
     }
 

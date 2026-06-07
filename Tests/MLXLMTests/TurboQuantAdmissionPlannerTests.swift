@@ -28,6 +28,9 @@ extension MLXRuntimeSwiftTests {
             #expect(admission.downgradeReasons.isEmpty)
             #expect(admission.memoryPlan.runtimeZones.compressedKVBytes > 0)
             #expect(!admission.memoryPlan.usesRawShadow)
+            #expect(admission.memoryPlan.boundaryLayerCount == 4)
+            #expect(admission.memoryPlan.boundaryCachePrecision == .affineK8V4)
+            #expect(admission.memoryPlan.boundaryKVBytes > 0)
             #expect(admission.memoryPlan.rawBoundaryLayerCount == 0)
             #expect(admission.memoryPlan.rawBoundaryKVBytes == 0)
             #expect(admission.memoryPlan.runtimeZones.rawShadowBytes == 0)
@@ -49,6 +52,8 @@ extension MLXRuntimeSwiftTests {
             #expect(admission.admitted)
             #expect(admission.selectedMode == .fastest)
             #expect(!admission.memoryPlan.usesRawShadow)
+            #expect(admission.memoryPlan.boundaryLayerCount == 0)
+            #expect(admission.memoryPlan.boundaryKVBytes == 0)
             #expect(admission.memoryPlan.runtimeZones.rawShadowBytes
                 == admission.memoryPlan.rawBoundaryKVBytes)
         }
@@ -213,7 +218,7 @@ extension MLXRuntimeSwiftTests {
             )
         }
 
-        @Test func testAdmissionAccountsForRawBoundaryLayerMemory() {
+        @Test func testAdmissionAccountsForK8V4BoundaryLayerMemory() {
             let planner = Self.planner()
             let profile = Self.profile(weightGiB: 2, layers: 8)
             let contextLength = 4096
@@ -229,6 +234,20 @@ extension MLXRuntimeSwiftTests {
                     preset: .turbo3_5,
                     valueBits: nil,
                     boundary: .profileDefault
+                ),
+                memorySample: sample
+            )
+            let rawBoundary = planner.admit(
+                profile: profile,
+                requestedContextLength: contextLength,
+                userMode: .maxContext,
+                fallbackPolicy: .fatalOnFailure,
+                preset: .turbo3_5,
+                precisionPolicy: .legacy(
+                    preset: .turbo3_5,
+                    valueBits: nil,
+                    boundary: .profileDefault,
+                    boundaryCachePrecision: .raw
                 ),
                 memorySample: sample
             )
@@ -248,21 +267,125 @@ extension MLXRuntimeSwiftTests {
 
             let rawBytesPerTokenPerLayer =
                 boundary.memoryPlan.rawBytesPerToken / max(1, profile.layerCount)
+            let k8v4BytesPerTokenPerLayer = profile.affineK8V4BytesPerTokenPerLayer()
             #expect(boundary.admitted)
+            #expect(rawBoundary.admitted)
             #expect(disabled.admitted)
-            #expect(boundary.memoryPlan.rawBoundaryLayerCount == 4)
+            #expect(boundary.memoryPlan.boundaryLayerCount == 4)
+            #expect(boundary.memoryPlan.boundaryCachePrecision == .affineK8V4)
             #expect(
-                boundary.memoryPlan.rawBoundaryKVBytes
-                    == rawBytesPerTokenPerLayer * 4 * contextLength
+                boundary.memoryPlan.boundaryKVBytes
+                    == k8v4BytesPerTokenPerLayer * 4 * contextLength
             )
+            #expect(boundary.memoryPlan.rawBoundaryLayerCount == 0)
+            #expect(boundary.memoryPlan.rawBoundaryKVBytes == 0)
             #expect(
                 boundary.memoryPlan.runtimeZones.rawShadowBytes
                     == boundary.memoryPlan.rawBoundaryKVBytes
             )
-            #expect(disabled.memoryPlan.rawBoundaryKVBytes == 0)
             #expect(
                 boundary.memoryPlan.runtimeZones.compressedKVBytes
-                    < disabled.memoryPlan.runtimeZones.compressedKVBytes
+                    == boundary.memoryPlan.layerFootprint.bytesPerTokenPerLayer
+                        * (profile.layerCount - 4)
+                        * contextLength
+                        + boundary.memoryPlan.boundaryKVBytes
+            )
+            #expect(rawBoundary.memoryPlan.boundaryCachePrecision == .raw)
+            #expect(rawBoundary.memoryPlan.rawBoundaryLayerCount == 4)
+            #expect(
+                rawBoundary.memoryPlan.rawBoundaryKVBytes
+                    == rawBytesPerTokenPerLayer * 4 * contextLength
+            )
+            #expect(boundary.memoryPlan.boundaryKVBytes < rawBoundary.memoryPlan.rawBoundaryKVBytes)
+            #expect(disabled.memoryPlan.rawBoundaryKVBytes == 0)
+            #expect(disabled.memoryPlan.boundaryKVBytes == 0)
+        }
+
+        @Test func testAffineK8VxAdmissionMemoryUsesLowerValueBitsAndK8V4Boundaries() {
+            let planner = Self.planner()
+            let profile = Self.profile(weightGiB: 2, layers: 24)
+            let contextLength = 4096
+            let policy = TurboQuantKVPrecisionPolicy(
+                key: .affineQ8,
+                value: .compressed(bits: 3),
+                boundary: .protectedEdges(first: 2, last: 2),
+                boundaryCachePrecision: .affineK8V4
+            )
+
+            let admission = planner.admit(
+                profile: profile,
+                requestedContextLength: contextLength,
+                userMode: .maxContext,
+                fallbackPolicy: .fatalOnFailure,
+                preset: .turbo8,
+                valueBits: 3,
+                precisionPolicy: policy,
+                memorySample: Self.sample(availableGiB: 16, modelGiB: 2)
+            )
+
+            let middle = profile.affineK8VxKeyValueBytesPerTokenPerLayer(valueBits: 3)
+            let boundary = profile.affineK8VxKeyValueBytesPerTokenPerLayer(valueBits: 4)
+            let middleLayerCount = profile.layerCount - 4
+            #expect(admission.admitted)
+            #expect(admission.memoryPlan.valueBits == 3)
+            #expect(admission.memoryPlan.precisionPolicy?.key == .affineQ8)
+            #expect(admission.memoryPlan.boundaryLayerCount == 4)
+            #expect(admission.memoryPlan.boundaryCachePrecision == .affineK8V4)
+            #expect(
+                admission.memoryPlan.runtimeZones.compressedKVBytes
+                    == (middle.total * middleLayerCount + boundary.total * 4) * contextLength
+            )
+            #expect(
+                admission.memoryPlan.compressedKeyBytes
+                    == (middle.key * middleLayerCount + boundary.key * 4) * contextLength
+            )
+            #expect(
+                admission.memoryPlan.compressedValueBytes
+                    == (middle.value * middleLayerCount + boundary.value * 4) * contextLength
+            )
+        }
+
+        @Test func testKVLayerPolicyAdmissionMemoryCountsRawAndAffineK8VxLayers() {
+            let planner = Self.planner()
+            let profile = Self.profile(weightGiB: 2, layers: 8)
+            let contextLength = 1024
+            let policy = KVLayerPolicy.affineK8VxProtectedEdges(
+                layerCount: profile.layerCount,
+                valueBits: 2,
+                boundaryCachePrecision: .raw,
+                first: 1,
+                last: 1
+            )
+
+            let admission = planner.admit(
+                profile: profile,
+                requestedContextLength: contextLength,
+                userMode: .maxContext,
+                fallbackPolicy: .fatalOnFailure,
+                preset: .turbo8,
+                valueBits: 2,
+                precisionPolicy: TurboQuantKVPrecisionPolicy(
+                    key: .affineQ8,
+                    value: .compressed(bits: 2),
+                    boundary: .protectedEdges(first: 1, last: 1),
+                    boundaryCachePrecision: .raw
+                ),
+                kvLayerPolicy: policy,
+                memorySample: Self.sample(availableGiB: 16, modelGiB: 2)
+            )
+
+            let middle = profile.affineK8VxKeyValueBytesPerTokenPerLayer(valueBits: 2)
+            let rawPerLayer = admission.memoryPlan.rawBytesPerToken / profile.layerCount
+            #expect(admission.admitted)
+            #expect(admission.memoryPlan.rawBoundaryLayerCount == 2)
+            #expect(admission.memoryPlan.rawBoundaryKVBytes == rawPerLayer * 2 * contextLength)
+            #expect(
+                admission.memoryPlan.runtimeZones.compressedKVBytes
+                    == middle.total * 6 * contextLength
+            )
+            #expect(
+                admission.memoryPlan.runtimeZones.rawShadowBytes
+                    == admission.memoryPlan.rawBoundaryKVBytes
             )
         }
 
@@ -308,6 +431,143 @@ extension MLXRuntimeSwiftTests {
                     valueBits: 4,
                     groupSize: 64
                 ) == 49_152 * 65_536
+            )
+        }
+
+        @Test func testPolarWHTFootprintUsesPackedIndicesAndNorms() {
+            let profile = Self.profile(weightGiB: 2, layers: 32)
+            let generic = profile.turboQuantLayerCacheFootprint(
+                preset: .turbo4v2,
+                valueBits: TurboQuantKVCodec.polarWHTDefaultValueBits,
+                groupSize: 64
+            )
+            let polarKeyBytes = profile.polarWHTKeyBytesPerTokenPerLayer(preset: .turbo4v2)
+            let polarValueBytes = profile.polarWHTValueBytesPerTokenPerLayer()
+            let polarLayerBytes = profile.polarWHTLayerCacheBytesPerTokenPerLayer(
+                preset: .turbo4v2,
+                valueBits: TurboQuantKVCodec.polarWHTDefaultValueBits,
+                groupSize: 64
+            )
+
+            #expect(polarKeyBytes == 544)
+            #expect(polarValueBytes == 416)
+            #expect(
+                polarLayerBytes
+                    == generic.keyBytesPerTokenPerLayer + polarKeyBytes + polarValueBytes
+            )
+            #expect(polarKeyBytes + polarValueBytes < generic.bytesPerTokenPerLayer)
+        }
+
+        @Test func testPolarWHTAdmissionUsesPackedKeyAndValueFootprint() {
+            let profile = Self.profile(weightGiB: 2, layers: 32)
+            let valueBits = TurboQuantKVCodec.polarWHTDefaultValueBits
+            let expectedKeyBytes = profile.turboQuantLayerCacheFootprint(
+                preset: .turbo4v2,
+                valueBits: valueBits,
+                groupSize: 64
+            ).keyBytesPerTokenPerLayer
+                + profile.polarWHTKeyBytesPerTokenPerLayer(preset: .turbo4v2)
+            let expectedValueBytes = profile.polarWHTValueBytesPerTokenPerLayer(
+                valueBits: valueBits
+            )
+            let precisionPolicy = TurboQuantKVPrecisionPolicy.legacy(
+                preset: .turbo4v2,
+                valueBits: valueBits,
+                boundary: .disabled
+            )
+            let expectedLayerBytes = profile.polarWHTLayerCacheBytesPerTokenPerLayer(
+                preset: .turbo4v2,
+                valueBits: valueBits,
+                groupSize: 64
+            )
+
+            let admission = Self.planner().admit(
+                profile: profile,
+                requestedContextLength: 8192,
+                userMode: .fastest,
+                fallbackPolicy: .fatalOnFailure,
+                preset: .turbo4v2,
+                valueBits: valueBits,
+                precisionPolicy: precisionPolicy,
+                kvCodec: .polarWHT,
+                turboQuantBackend: .polarWHTReference,
+                memorySample: Self.sample(availableGiB: 3, modelGiB: 2)
+            )
+
+            #expect(admission.admitted)
+            #expect(!admission.recommendsPlainKVCache)
+            #expect(admission.memoryPlan.boundaryLayerCount == 0)
+            #expect(admission.memoryPlan.compressedBytesPerToken == expectedLayerBytes * 32)
+            #expect(
+                admission.memoryPlan.compressedKeyBytes
+                    == expectedKeyBytes
+                        * 32
+                        * admission.admittedContextLength
+            )
+            #expect(
+                admission.memoryPlan.compressedValueBytes
+                    == expectedValueBytes
+                        * 32
+                        * admission.admittedContextLength
+            )
+        }
+
+        @Test func testPolarWHTLayerPolicyUsesBackendSpecificFootprint() {
+            let profile = Self.profile(weightGiB: 2, layers: 32)
+            let valueBits = TurboQuantKVCodec.polarWHTDefaultValueBits
+            let expectedKeyBytes = profile.turboQuantLayerCacheFootprint(
+                preset: .turbo4v2,
+                valueBits: valueBits,
+                groupSize: 64
+            ).keyBytesPerTokenPerLayer
+                + profile.polarWHTKeyBytesPerTokenPerLayer(preset: .turbo4v2)
+            let expectedValueBytes = profile.polarWHTValueBytesPerTokenPerLayer(
+                valueBits: valueBits
+            )
+            let policy = KVLayerPolicy(
+                defaultCodec: .turboQuant(
+                    preset: .turbo4v2,
+                    valueBits: valueBits,
+                    groupSize: 64,
+                    backend: .metalPolarWHT
+                )
+            )
+            let precisionPolicy = TurboQuantKVPrecisionPolicy.legacy(
+                preset: .turbo4v2,
+                valueBits: valueBits,
+                boundary: .disabled
+            )
+            let expectedLayerBytes = profile.polarWHTLayerCacheBytesPerTokenPerLayer(
+                preset: .turbo4v2,
+                valueBits: valueBits,
+                groupSize: 64
+            )
+
+            let admission = Self.planner().admit(
+                profile: profile,
+                requestedContextLength: 8192,
+                userMode: .fastest,
+                fallbackPolicy: .fatalOnFailure,
+                preset: .turbo4v2,
+                valueBits: valueBits,
+                precisionPolicy: precisionPolicy,
+                kvLayerPolicy: policy,
+                memorySample: Self.sample(availableGiB: 3, modelGiB: 2)
+            )
+
+            #expect(admission.admitted)
+            #expect(admission.memoryPlan.compressedBytesPerToken == expectedLayerBytes * 32)
+            #expect(
+                admission.memoryPlan.compressedKeyBytes
+                    == expectedKeyBytes
+                        * 32
+                        * admission.admittedContextLength
+            )
+            #expect(
+                admission.memoryPlan.compressedValueBytes
+                    == expectedValueBytes
+                        * 32
+                        * admission.admittedContextLength
             )
         }
 
@@ -402,6 +662,43 @@ extension MLXRuntimeSwiftTests {
             #expect(resolved.turboQuantResolvedRuntimeMode == .capacityTurboQuant)
             #expect(resolved.turboQuantRuntimeFallbackReason?.contains("decoded active KV") == true)
             #expect(resolved.quantizedKVStart == 0)
+            #expect((resolved.turboQuantPerCacheResidentBudgetBytes ?? 0) > 0)
+        }
+
+        @Test func testAdaptiveTurboQuantExactPrefillDelaysCompressedCacheConstruction() throws {
+            let planner = Self.planner()
+            let profile = Self.profile(weightGiB: 2, layers: 32)
+            let admission = planner.admit(
+                profile: profile,
+                requestedContextLength: 8192,
+                userMode: .balanced,
+                fallbackPolicy: .compressedDecodeAllowed,
+                preset: .turbo8,
+                memorySample: TurboQuantRuntimeMemorySample(
+                    availableAppMemoryBytes: Self.gib(3) + Self.mib(200),
+                    modelResidentBytes: Self.gib(2),
+                    tokenizerBytes: 0,
+                    promptBytes: 0,
+                    uiReserveBytes: 0,
+                    thermalState: .nominal
+                )
+            )
+            #expect(admission.admitted)
+            #expect(!admission.memoryPlan.rawSDPAFits(contextLength: 8192))
+            let parameters = GenerateParameters(
+                kvCacheStrategy: .adaptiveTurboQuant,
+                turboQuantBackend: .metalPolarWHT,
+                turboQuantAdmission: admission,
+                turboQuantRawSDPAThreshold: 16_384,
+                turboQuantExactPrefill: true
+            )
+
+            let resolved = try parameters.resolvedForTurboQuantRuntime(layerCount: 32)
+
+            #expect(resolved.kvCacheStrategy == .adaptiveTurboQuant)
+            #expect(resolved.turboQuantResolvedRuntimeMode == .capacityTurboQuant)
+            #expect(resolved.quantizedKVStart == 0)
+            #expect(resolved.turboQuantExactPrefill)
             #expect((resolved.turboQuantPerCacheResidentBudgetBytes ?? 0) > 0)
         }
 
@@ -538,6 +835,26 @@ extension MLXRuntimeSwiftTests {
             #expect(throughput is ThroughputTurboQuantKVCache)
             #expect(capacity is RotatingTurboQuantKVCache)
             #expect(raw is RotatingKVCache)
+        }
+
+        @Test func testEnvironmentCanForceAffineK8VxValueBitsWithProtectedEdges() throws {
+            setenv("TURBOQUANT_FORCE_AFFINE_K8VX", "1", 1)
+            setenv("TURBOQUANT_AFFINE_VALUE_BITS", "3", 1)
+            defer {
+                unsetenv("TURBOQUANT_FORCE_AFFINE_K8VX")
+                unsetenv("TURBOQUANT_AFFINE_VALUE_BITS")
+            }
+
+            let resolved = try GenerateParameters().resolvedForTurboQuantRuntime(layerCount: 8)
+
+            #expect(resolved.kvCacheStrategy == .affineK8Vx)
+            #expect(resolved.kvCodec == .affineK8Vx)
+            #expect(resolved.turboQuantValueBits == 3)
+            #expect(resolved.turboQuantPrecisionPolicy?.key == .affineQ8)
+            #expect(resolved.turboQuantPrecisionPolicy?.value == .turbo3_5)
+            #expect(resolved.kvLayerPolicy?.defaultCodec == .affineK8Vx(valueBits: 3))
+            #expect(resolved.kvLayerPolicy?.codec(forLayerIndex: 0) == .affineK8V4)
+            #expect(resolved.kvLayerPolicy?.codec(forLayerIndex: 3) == .affineK8Vx(valueBits: 3))
         }
 
         private static func planner() -> TurboQuantAdmissionPlanner {

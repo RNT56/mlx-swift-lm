@@ -48,7 +48,7 @@ class PhiAttention: Module {
         do {
             return try callThrowing(x, mask: mask, cache: cache)
         } catch {
-            fatalError(String(describing: error))
+            nonThrowingLanguageModelRuntimeFailure(error, owner: type(of: self))
         }
     }
 
@@ -126,7 +126,7 @@ class PhiDecoderLayer: Module {
         do {
             return try callThrowing(x, mask: mask, cache: cache)
         } catch {
-            fatalError(String(describing: error))
+            nonThrowingLanguageModelRuntimeFailure(error, owner: type(of: self))
         }
     }
 
@@ -165,7 +165,7 @@ public class PhiModelInner: Module {
         do {
             return try callThrowing(x, mask: mask, cache: cache)
         } catch {
-            fatalError(String(describing: error))
+            nonThrowingLanguageModelRuntimeFailure(error, owner: type(of: self))
         }
     }
 
@@ -202,7 +202,7 @@ public class PhiModel: Module, LLMModel, KVCacheDimensionProvider, ThrowingLangu
         do {
             return try callAsFunctionThrowing(x, cache: cache)
         } catch {
-            fatalError(String(describing: error))
+            nonThrowingLanguageModelRuntimeFailure(error, owner: type(of: self))
         }
     }
 

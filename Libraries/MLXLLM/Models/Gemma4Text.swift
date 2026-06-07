@@ -270,7 +270,7 @@ private class Gemma4Attention: Module {
                 positionOffset: positionOffset
             )
         } catch {
-            fatalError(String(describing: error))
+            nonThrowingLanguageModelRuntimeFailure(error, owner: type(of: self))
         }
     }
 
@@ -445,7 +445,7 @@ private class Gemma4DecoderLayer: Module {
                 positionOffset: positionOffset
             )
         } catch {
-            fatalError(String(describing: error))
+            nonThrowingLanguageModelRuntimeFailure(error, owner: type(of: self))
         }
     }
 
@@ -566,7 +566,7 @@ private class Gemma4TextModelInner: Module {
         do {
             return try callThrowing(inputs, cache: cache)
         } catch {
-            fatalError(String(describing: error))
+            nonThrowingLanguageModelRuntimeFailure(error, owner: type(of: self))
         }
     }
 
@@ -691,7 +691,7 @@ public class Gemma4TextModel: Module, LLMModel, KVCacheDimensionProvider, Throwi
         do {
             return try callAsFunctionThrowing(inputs, cache: cache)
         } catch {
-            fatalError(String(describing: error))
+            nonThrowingLanguageModelRuntimeFailure(error, owner: type(of: self))
         }
     }
 
@@ -730,21 +730,30 @@ public class Gemma4TextModel: Module, LLMModel, KVCacheDimensionProvider, Throwi
 
     public func newCache(parameters: GenerateParameters?) -> [any KVCache] {
         let firstKvShared = config.numHiddenLayers - config.numKvSharedLayers
+        let fullAttentionLayerCount = config.layerTypes.prefix(firstKvShared).filter {
+            $0 == "full_attention"
+        }.count
+        var fullAttentionLayerIndex = 0
 
         var caches = [any KVCache]()
         for i in 0 ..< firstKvShared {
             if config.layerTypes[i] == "full_attention" {
+                let boundaryLayerIndex = fullAttentionLayerIndex
+                fullAttentionLayerIndex += 1
                 caches.append(
                     makeAttentionKVCache(
                         parameters: parameters,
                         layerIndex: i,
-                        layerCount: firstKvShared
+                        layerCount: firstKvShared,
+                        boundaryLayerIndex: boundaryLayerIndex,
+                        boundaryLayerCount: fullAttentionLayerCount
                     ))
             } else {
                 caches.append(
                     makeAttentionKVCache(
                         parameters: parameters, maxKVSize: config.slidingWindow, keep: 0,
-                        layerIndex: i, layerCount: firstKvShared))
+                        layerIndex: i, layerCount: firstKvShared,
+                        boundaryLayerIndex: -1, boundaryLayerCount: fullAttentionLayerCount))
             }
         }
         return caches

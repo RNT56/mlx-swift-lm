@@ -47,7 +47,7 @@ extension MLXRuntimeSwiftTests {
 
             #expect(caches.count == 2)
             #expect(caches[0] is RotatingTurboQuantKVCache)
-            #expect(caches[1] is TurboQuantKVCache)
+            #expect(caches.allSatisfy { $0 is TurboQuantCompressedKVCacheProtocol })
             #expect(!(caches[0] is RawOnlyKVCache))
             #expect(!(caches[1] is RawOnlyKVCache))
         }
@@ -106,7 +106,7 @@ extension MLXRuntimeSwiftTests {
                 parameters: GenerateParameters(kvCacheStrategy: .turboQuant))
 
             #expect(caches.count == 2)
-            #expect(caches.allSatisfy { $0 is TurboQuantKVCache })
+            #expect(caches.allSatisfy { $0 is TurboQuantCompressedKVCacheProtocol })
             #expect(!caches.contains { $0 is RawOnlyKVCache })
         }
     }

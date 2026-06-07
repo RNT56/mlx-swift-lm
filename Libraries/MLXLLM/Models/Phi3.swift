@@ -72,7 +72,7 @@ class Phi3Attention: Module {
         do {
             return try callThrowing(x, mask: mask, cache: cache)
         } catch {
-            fatalError(String(describing: error))
+            nonThrowingLanguageModelRuntimeFailure(error, owner: type(of: self))
         }
     }
 
@@ -151,7 +151,7 @@ class Phi3TransformerBlock: Module {
         do {
             return try callThrowing(x, mask: mask, cache: cache)
         } catch {
-            fatalError(String(describing: error))
+            nonThrowingLanguageModelRuntimeFailure(error, owner: type(of: self))
         }
     }
 
@@ -192,7 +192,7 @@ public class Phi3ModelInner: Module {
         do {
             return try callThrowing(inputs, cache: cache)
         } catch {
-            fatalError(String(describing: error))
+            nonThrowingLanguageModelRuntimeFailure(error, owner: type(of: self))
         }
     }
 
@@ -234,7 +234,7 @@ public class Phi3Model: Module, LLMModel, KVCacheDimensionProvider, ThrowingLang
         do {
             return try callAsFunctionThrowing(inputs, cache: cache)
         } catch {
-            fatalError(String(describing: error))
+            nonThrowingLanguageModelRuntimeFailure(error, owner: type(of: self))
         }
     }
 

@@ -142,16 +142,33 @@ public protocol QuantizedKVCacheProtocol: KVCache {
 /// Marker for first-class affine int4 caches that must use native quantized SDPA only.
 public protocol NativeAffineInt4KVCacheProtocol: QuantizedKVCacheProtocol {}
 
-/// Marker for mixed affine caches that keep keys at K8 and values at V4.
+public struct AffineK8VxResidualState: @unchecked Sendable {
+    public var laneIndices: MLXArray
+    public var values: MLXArray
+    public var residualsPerGroup: Int
+
+    public init(laneIndices: MLXArray, values: MLXArray, residualsPerGroup: Int) {
+        self.laneIndices = laneIndices
+        self.values = values
+        self.residualsPerGroup = max(0, residualsPerGroup)
+    }
+}
+
+/// Marker for mixed affine caches that keep keys at K8 and values at Vx.
 public protocol NativeAffineK8V4KVCacheProtocol: QuantizedKVCacheProtocol {
     var keyGroupSize: Int { get }
     var keyBits: Int { get }
     var valueGroupSize: Int { get }
     var valueBits: Int { get }
+    var residualsPerGroup: Int { get }
+    var sparseValuePolicy: TurboQuantSparseValuePolicy { get }
+    var sparseValueRuntimeMode: TurboQuantRuntimeMode { get }
+    var attentionDiagnostics: TurboQuantAttentionDiagnostics { get }
     func recordNativeAffineK8V4AttentionPath(
         _ path: TurboQuantAttentionPath,
         failureReason: String?
     )
+    func getValueResidualState() -> AffineK8VxResidualState?
 }
 
 extension NativeAffineK8V4KVCacheProtocol {
@@ -159,6 +176,9 @@ extension NativeAffineK8V4KVCacheProtocol {
         _ path: TurboQuantAttentionPath,
         failureReason: String?
     ) {}
+
+    public var sparseValuePolicy: TurboQuantSparseValuePolicy { .off }
+    public var sparseValueRuntimeMode: TurboQuantRuntimeMode { .capacityTurboQuant }
 }
 
 private struct ResolvedQuantizationParameters {
@@ -181,6 +201,54 @@ private func resolvedQuantizationParameters(
     case .nvfp4:
         return .init(groupSize: 16, bits: 4)
     }
+}
+
+func compatibleAffineGroupSize(
+    configuredGroupSize: Int,
+    keyDimension: Int,
+    valueDimension: Int
+) -> Int {
+    let configuredGroupSize = max(1, configuredGroupSize)
+    guard keyDimension > 0, valueDimension > 0 else { return configuredGroupSize }
+    guard !keyDimension.isMultiple(of: configuredGroupSize)
+        || !valueDimension.isMultiple(of: configuredGroupSize)
+    else {
+        return configuredGroupSize
+    }
+
+    for candidate in [128, 64, 32] where candidate <= configuredGroupSize {
+        if keyDimension.isMultiple(of: candidate), valueDimension.isMultiple(of: candidate) {
+            return candidate
+        }
+    }
+    return configuredGroupSize
+}
+
+func supportsMLXAffineQuantization(dimension: Int, groupSize: Int) -> Bool {
+    [32, 64, 128].contains(groupSize) && dimension.isMultiple(of: groupSize)
+}
+
+func supportsMLXAffineKVQuantization(
+    keyDimension: Int,
+    valueDimension: Int,
+    keyGroupSize: Int,
+    valueGroupSize: Int
+) -> Bool {
+    supportsMLXAffineQuantization(dimension: keyDimension, groupSize: keyGroupSize)
+        && supportsMLXAffineQuantization(dimension: valueDimension, groupSize: valueGroupSize)
+}
+
+func placeholderQuantizedTuple(
+    for array: MLXArray,
+    bits: Int,
+    includeBiases: Bool = true
+) -> (MLXArray, MLXArray, MLXArray?) {
+    let packedWidth = max(1, (array.dim(3) * max(1, bits) + 31) / 32)
+    let shape = [array.dim(0), array.dim(1), array.dim(2)]
+    let weights = MLXArray.zeros(shape + [packedWidth], dtype: .uint32)
+    let scales = MLXArray.ones(shape + [1], dtype: .float32)
+    let biases = includeBiases ? MLXArray.zeros(shape + [1], dtype: .float32) : nil
+    return (weights, scales, biases)
 }
 
 private func inferredQuantizationMode(
@@ -560,8 +628,26 @@ public class KVCacheSimple: BaseKVCache, CustomDebugStringConvertible {
         return cache
     }
 
-    public func toAffineK8V4() -> AffineK8V4KVCache {
-        let cache = AffineK8V4KVCache()
+    public func toAffineK8V4(
+        valueBits: Int = TurboQuantKVCodec.affineK8V4ValueBits,
+        valueGroupSize: Int = TurboQuantKVCodec.affineK8V4ValueGroupSize,
+        residualsPerGroup: Int = 0,
+        sparseValuePolicy: TurboQuantSparseValuePolicy = .off,
+        sparseValueRuntimeMode: TurboQuantRuntimeMode = .capacityTurboQuant,
+        layerIndex: Int? = nil,
+        boundaryProtectedLayerCount: Int = 0,
+        boundaryProtectionReason: String? = nil
+    ) -> AffineK8V4KVCache {
+        let cache = AffineK8V4KVCache(
+            valueGroupSize: valueGroupSize,
+            valueBits: valueBits,
+            residualsPerGroup: residualsPerGroup,
+            sparseValuePolicy: sparseValuePolicy,
+            sparseValueRuntimeMode: sparseValueRuntimeMode,
+            layerIndex: layerIndex,
+            boundaryProtectedLayerCount: boundaryProtectedLayerCount,
+            boundaryProtectionReason: boundaryProtectionReason
+        )
         let s = state
         if !s.isEmpty {
             cache.setUnquantizedState(keys: s[0], values: s[1], offset: offset)
@@ -912,8 +998,28 @@ public class RotatingKVCache: BaseKVCache, CustomDebugStringConvertible {
         return cache
     }
 
-    public func toAffineK8V4() -> AffineK8V4KVCache {
-        let cache = AffineK8V4KVCache(maxSize: maxCacheSize, keep: keep)
+    public func toAffineK8V4(
+        valueBits: Int = TurboQuantKVCodec.affineK8V4ValueBits,
+        valueGroupSize: Int = TurboQuantKVCodec.affineK8V4ValueGroupSize,
+        residualsPerGroup: Int = 0,
+        sparseValuePolicy: TurboQuantSparseValuePolicy = .off,
+        sparseValueRuntimeMode: TurboQuantRuntimeMode = .capacityTurboQuant,
+        layerIndex: Int? = nil,
+        boundaryProtectedLayerCount: Int = 0,
+        boundaryProtectionReason: String? = nil
+    ) -> AffineK8V4KVCache {
+        let cache = AffineK8V4KVCache(
+            maxSize: maxCacheSize,
+            keep: keep,
+            valueGroupSize: valueGroupSize,
+            valueBits: valueBits,
+            residualsPerGroup: residualsPerGroup,
+            sparseValuePolicy: sparseValuePolicy,
+            sparseValueRuntimeMode: sparseValueRuntimeMode,
+            layerIndex: layerIndex,
+            boundaryProtectedLayerCount: boundaryProtectedLayerCount,
+            boundaryProtectionReason: boundaryProtectionReason
+        )
         let s = state
         if !s.isEmpty {
             cache.setUnquantizedState(keys: s[0], values: s[1], offset: offset)
@@ -943,7 +1049,7 @@ public class QuantizedKVCache: BaseKVCache, QuantizedKVCacheProtocol {
     private var keys: (MLXArray, MLXArray, MLXArray?)?
     private var values: (MLXArray, MLXArray, MLXArray?)?
     private let step: Int
-    public let groupSize: Int
+    public var groupSize: Int
     public let bits: Int
     public let mode: QuantizationMode
 
@@ -958,6 +1064,19 @@ public class QuantizedKVCache: BaseKVCache, QuantizedKVCacheProtocol {
         self.step = 256
         self.mode = mode
         super.init()
+    }
+
+    fileprivate func adoptCompatibleAffineGroupSize(
+        keyDimension: Int,
+        valueDimension: Int,
+        storageIsEmpty: Bool
+    ) {
+        guard storageIsEmpty, mode == .affine else { return }
+        groupSize = compatibleAffineGroupSize(
+            configuredGroupSize: groupSize,
+            keyDimension: keyDimension,
+            valueDimension: valueDimension
+        )
     }
 
     public override func innerState() -> [MLXArray] {
@@ -1041,6 +1160,11 @@ public class QuantizedKVCache: BaseKVCache, QuantizedKVCacheProtocol {
         let kHeadDim = keys.dim(3)
         let vHeadDim = values.dim(3)
         let prev = offset
+        adoptCompatibleAffineGroupSize(
+            keyDimension: kHeadDim,
+            valueDimension: vHeadDim,
+            storageIsEmpty: self.keys == nil && self.values == nil
+        )
 
         // Check if we need to expand the cache
         if self.keys == nil || (prev + numSteps) > self.keys!.0.dim(-2) {
@@ -1226,38 +1350,128 @@ public final class AffineInt4KVCache: QuantizedKVCache, NativeAffineInt4KVCacheP
     }
 }
 
-public final class AffineK8V4KVCache: BaseKVCache, NativeAffineK8V4KVCacheProtocol {
+public final class AffineK8V4KVCache: BaseKVCache, NativeAffineK8V4KVCacheProtocol,
+    TurboQuantCompressedKVCacheProtocol
+{
     private typealias QuantizedTuple = (MLXArray, MLXArray, MLXArray?)
+    private typealias ResidualTuple = (laneIndices: MLXArray, values: MLXArray)
 
     private var keys: QuantizedTuple?
     private var values: QuantizedTuple?
+    private var valueResiduals: ResidualTuple?
+    private var rawFallbackCache: KVCacheSimple?
     private let capacity: Int?
     private let keep: Int
     private let step = 256
     private var activeLength: Int = 0
-    private var lastAttentionPath: TurboQuantAttentionPath = .affineK8V4Native
+    private var lastAttentionPath: TurboQuantAttentionPath
     private var lastAttentionFailureReason: String?
 
-    public let keyGroupSize = TurboQuantKVCodec.affineK8V4KeyGroupSize
-    public let keyBits = TurboQuantKVCodec.affineK8V4KeyBits
-    public let valueGroupSize = TurboQuantKVCodec.affineK8V4ValueGroupSize
-    public let valueBits = TurboQuantKVCodec.affineK8V4ValueBits
-    public let groupSize = TurboQuantKVCodec.affineK8V4KeyGroupSize
-    public let bits = TurboQuantKVCodec.affineK8V4KeyBits
+    public private(set) var keyGroupSize: Int
+    public private(set) var keyBits: Int
+    public private(set) var valueGroupSize: Int
+    public private(set) var valueBits: Int
+    public private(set) var residualsPerGroup: Int
+    public let sparseValuePolicy: TurboQuantSparseValuePolicy
+    public let sparseValueRuntimeMode: TurboQuantRuntimeMode
+    public let layerIndex: Int?
+    public let boundaryProtectedLayerCount: Int
+    public let boundaryProtectionReason: String?
+    public var groupSize: Int { keyGroupSize }
+    public var bits: Int { keyBits }
     public let mode = QuantizationMode.affine
+    public var precisionPolicy: TurboQuantKVPrecisionPolicy {
+        TurboQuantKVPrecisionPolicy(
+            key: .affineQ8,
+            value: .compressed(bits: valueBits),
+            boundary: .disabled
+        )
+    }
 
     public override var maxSize: Int? { capacity }
     public override var isTrimmable: Bool { true }
 
-    public init(maxSize: Int? = nil, keep: Int = 0) {
+    public init(
+        maxSize: Int? = nil,
+        keep: Int = 0,
+        keyGroupSize: Int = TurboQuantKVCodec.affineK8V4KeyGroupSize,
+        keyBits: Int = TurboQuantKVCodec.affineK8V4KeyBits,
+        valueGroupSize: Int = TurboQuantKVCodec.affineK8V4ValueGroupSize,
+        valueBits: Int = TurboQuantKVCodec.affineK8V4ValueBits,
+        residualsPerGroup: Int = 0,
+        sparseValuePolicy: TurboQuantSparseValuePolicy = .off,
+        sparseValueRuntimeMode: TurboQuantRuntimeMode = .capacityTurboQuant,
+        layerIndex: Int? = nil,
+        boundaryProtectedLayerCount: Int = 0,
+        boundaryProtectionReason: String? = nil
+    ) {
+        precondition(keyBits == TurboQuantKVCodec.affineK8V4KeyBits, "Affine K8/Vx requires 8-bit keys")
+        precondition(
+            TurboQuantKVCodec.affineK8VxSupportedValueBits.contains(valueBits),
+            "Affine K8/Vx value bits must be 2, 3, or 4"
+        )
+        precondition(
+            residualsPerGroup == 0 || (valueBits == 2 && residualsPerGroup == 1),
+            "Residual affine K8/Vx currently supports only V2 with residualsPerGroup == 1"
+        )
         self.capacity = maxSize
         self.keep = max(0, keep)
+        self.keyGroupSize = keyGroupSize
+        self.keyBits = keyBits
+        self.valueGroupSize = valueGroupSize
+        self.valueBits = valueBits
+        self.residualsPerGroup = max(0, residualsPerGroup)
+        self.sparseValuePolicy = sparseValuePolicy
+        self.sparseValueRuntimeMode = sparseValueRuntimeMode
+        self.layerIndex = layerIndex
+        self.boundaryProtectedLayerCount = max(0, boundaryProtectedLayerCount)
+        self.boundaryProtectionReason = boundaryProtectionReason
+        self.lastAttentionPath = (
+            valueBits == TurboQuantKVCodec.affineK8V4ValueBits ? .affineK8V4Native
+                : residualsPerGroup > 0 ? .affineK8VxResidual : .affineK8VxNative
+        )
         super.init()
     }
 
+    private func adoptCompatibleGroupSizes(keyDimension: Int, valueDimension: Int) {
+        guard keys == nil, values == nil else { return }
+        keyGroupSize = compatibleAffineGroupSize(
+            configuredGroupSize: keyGroupSize,
+            keyDimension: keyDimension,
+            valueDimension: keyDimension
+        )
+        valueGroupSize = compatibleAffineGroupSize(
+            configuredGroupSize: valueGroupSize,
+            keyDimension: valueDimension,
+            valueDimension: valueDimension
+        )
+    }
+
     public func setUnquantizedState(keys: MLXArray, values: MLXArray, offset: Int) {
+        adoptCompatibleGroupSizes(keyDimension: keys.dim(3), valueDimension: values.dim(3))
+        guard supportsMLXAffineKVQuantization(
+            keyDimension: keys.dim(3),
+            valueDimension: values.dim(3),
+            keyGroupSize: keyGroupSize,
+            valueGroupSize: valueGroupSize
+        ) else {
+            let rawCache = KVCacheSimple()
+            _ = rawCache.update(keys: keys, values: values)
+            rawCache.offset = offset
+            rawFallbackCache = rawCache
+            self.keys = nil
+            self.values = nil
+            self.valueResiduals = nil
+            self.activeLength = keys.dim(2)
+            self.offset = offset
+            return
+        }
+        rawFallbackCache = nil
         self.keys = quantizedTuple(keys, groupSize: keyGroupSize, bits: keyBits)
         self.values = quantizedTuple(values, groupSize: valueGroupSize, bits: valueBits)
+        if residualsPerGroup > 0, let quantizedValues = self.values {
+            self.valueResiduals = residualTuple(values, quantizedValues: quantizedValues)
+        }
         self.activeLength = keys.dim(2)
         self.offset = offset
         enforceCapacity()
@@ -1286,8 +1500,19 @@ public final class AffineK8V4KVCache: BaseKVCache, NativeAffineK8V4KVCacheProtoc
         tuple.0.dim(-2)
     }
 
+    private func residualLength(_ tuple: ResidualTuple) -> Int {
+        tuple.values.dim(-2)
+    }
+
     private func sliceTuple(_ tuple: QuantizedTuple, _ range: Range<Int>) -> QuantizedTuple {
         mapTuple(tuple) { $0[.ellipsis, range, 0...] }
+    }
+
+    private func sliceResidualTuple(_ tuple: ResidualTuple, _ range: Range<Int>) -> ResidualTuple {
+        (
+            tuple.laneIndices[.ellipsis, range, 0...],
+            tuple.values[.ellipsis, range, 0...]
+        )
     }
 
     private func concatTuple(_ lhs: QuantizedTuple, _ rhs: QuantizedTuple) -> QuantizedTuple {
@@ -1301,6 +1526,13 @@ public final class AffineK8V4KVCache: BaseKVCache, NativeAffineK8V4KVCacheProtoc
             concatenated([lhs.0, rhs.0], axis: -2),
             concatenated([lhs.1, rhs.1], axis: -2),
             biases
+        )
+    }
+
+    private func concatResidualTuple(_ lhs: ResidualTuple, _ rhs: ResidualTuple) -> ResidualTuple {
+        (
+            concatenated([lhs.laneIndices, rhs.laneIndices], axis: -2),
+            concatenated([lhs.values, rhs.values], axis: -2)
         )
     }
 
@@ -1318,6 +1550,14 @@ public final class AffineK8V4KVCache: BaseKVCache, NativeAffineK8V4KVCacheProtoc
         )
     }
 
+    private func initResiduals(shape: [Int], groupCount: Int, dtype: DType) -> ResidualTuple? {
+        guard residualsPerGroup > 0 else { return nil }
+        return (
+            MLXArray.zeros(shape + [groupCount], dtype: .uint8),
+            MLXArray.zeros(shape + [groupCount], dtype: dtype)
+        )
+    }
+
     private func expandTuple(_ tuple: QuantizedTuple, newShape: [Int]) -> QuantizedTuple {
         mapTuple(tuple) { array in
             concatenated(
@@ -1325,6 +1565,62 @@ public final class AffineK8V4KVCache: BaseKVCache, NativeAffineK8V4KVCacheProtoc
                 axis: -2
             )
         }
+    }
+
+    private func expandResidualTuple(_ tuple: ResidualTuple, newShape: [Int]) -> ResidualTuple {
+        (
+            concatenated(
+                [
+                    tuple.laneIndices,
+                    MLXArray.zeros(
+                        newShape + [tuple.laneIndices.dim(-1)],
+                        dtype: tuple.laneIndices.dtype
+                    ),
+                ],
+                axis: -2
+            ),
+            concatenated(
+                [
+                    tuple.values,
+                    MLXArray.zeros(newShape + [tuple.values.dim(-1)], dtype: tuple.values.dtype),
+                ],
+                axis: -2
+            )
+        )
+    }
+
+    private func residualTuple(
+        _ originalValues: MLXArray,
+        quantizedValues: QuantizedTuple
+    ) -> ResidualTuple? {
+        guard residualsPerGroup > 0 else { return nil }
+        let valueDim = originalValues.dim(-1)
+        guard valueDim > 0, valueDim % valueGroupSize == 0 else { return nil }
+        let groupCount = valueDim / valueGroupSize
+        let decoded = dequantized(
+            quantizedValues.0,
+            scales: quantizedValues.1,
+            biases: quantizedValues.2,
+            groupSize: valueGroupSize,
+            bits: valueBits,
+            mode: .affine,
+            dtype: originalValues.dtype
+        )
+        let groupedResiduals = (originalValues - decoded).reshaped(
+            [
+                originalValues.dim(0),
+                originalValues.dim(1),
+                originalValues.dim(2),
+                groupCount,
+                valueGroupSize,
+            ])
+        let laneIndices = argMax(groupedResiduals.abs(), axis: -1)
+        let residualValues = takeAlong(
+            groupedResiduals,
+            expandedDimensions(laneIndices, axis: -1),
+            axis: -1
+        ).squeezed(axis: -1)
+        return (laneIndices.asType(.uint8), residualValues)
     }
 
     private func roundedStorageLength(for requiredLength: Int) -> Int {
@@ -1350,6 +1646,15 @@ public final class AffineK8V4KVCache: BaseKVCache, NativeAffineK8V4KVCacheProtoc
             let shape = [batch, kvHeads, growBy]
             keys = expandTuple(currentKeys, newShape: shape)
             values = expandTuple(currentValues, newShape: shape)
+            if let currentResiduals = valueResiduals {
+                valueResiduals = expandResidualTuple(currentResiduals, newShape: shape)
+            } else if residualsPerGroup > 0 {
+                valueResiduals = initResiduals(
+                    shape: [batch, kvHeads, targetLength],
+                    groupCount: valueDim / valueGroupSize,
+                    dtype: dtype
+                )
+            }
         } else {
             let shape = [batch, kvHeads, targetLength]
             keys = initQuant(
@@ -1365,6 +1670,11 @@ public final class AffineK8V4KVCache: BaseKVCache, NativeAffineK8V4KVCacheProtoc
                 dtype: dtype,
                 groupSize: valueGroupSize,
                 bits: valueBits
+            )
+            valueResiduals = initResiduals(
+                shape: shape,
+                groupCount: valueDim / valueGroupSize,
+                dtype: dtype
             )
         }
     }
@@ -1385,8 +1695,17 @@ public final class AffineK8V4KVCache: BaseKVCache, NativeAffineK8V4KVCacheProtoc
         let tailStart = max(preservedPrefix, trimCount + preservedPrefix)
         let keyTail = sliceTuple(keys, tailStart ..< currentActiveLength)
         let valueTail = sliceTuple(values, tailStart ..< currentActiveLength)
+        let residualPrefix: ResidualTuple? =
+            preservedPrefix > 0 ? valueResiduals.map { sliceResidualTuple($0, 0 ..< preservedPrefix) } : nil
+        let residualTail = valueResiduals.map {
+            sliceResidualTuple($0, tailStart ..< currentActiveLength)
+        }
         self.keys = prefix.map { concatTuple($0, keyTail) } ?? keyTail
         self.values = valuePrefix.map { concatTuple($0, valueTail) } ?? valueTail
+        if let residualTail {
+            self.valueResiduals = residualPrefix.map { concatResidualTuple($0, residualTail) }
+                ?? residualTail
+        }
         activeLength = min(capacity, currentActiveLength)
     }
 
@@ -1398,8 +1717,30 @@ public final class AffineK8V4KVCache: BaseKVCache, NativeAffineK8V4KVCacheProtoc
         let steps = keys.dim(2)
         let keyDim = keys.dim(3)
         let valueDim = values.dim(3)
+        adoptCompatibleGroupSizes(keyDimension: keyDim, valueDimension: valueDim)
+        guard supportsMLXAffineKVQuantization(
+            keyDimension: keyDim,
+            valueDimension: valueDim,
+            keyGroupSize: keyGroupSize,
+            valueGroupSize: valueGroupSize
+        ) else {
+            let rawCache = rawFallbackCache ?? KVCacheSimple()
+            let (rawKeys, rawValues) = rawCache.update(keys: keys, values: values)
+            rawFallbackCache = rawCache
+            self.keys = nil
+            self.values = nil
+            self.valueResiduals = nil
+            offset = rawCache.offset
+            activeLength = rawKeys.dim(2)
+            return (
+                placeholderQuantizedTuple(for: rawKeys, bits: keyBits),
+                placeholderQuantizedTuple(for: rawValues, bits: valueBits)
+            )
+        }
+        rawFallbackCache = nil
         let keyUpdate = quantizedTuple(keys, groupSize: keyGroupSize, bits: keyBits)
         let valueUpdate = quantizedTuple(values, groupSize: valueGroupSize, bits: valueBits)
+        let residualUpdate = residualTuple(values, quantizedValues: valueUpdate)
 
         if capacity.map({ activeLength + steps <= $0 }) ?? true {
             ensureStorage(
@@ -1411,7 +1752,7 @@ public final class AffineK8V4KVCache: BaseKVCache, NativeAffineK8V4KVCacheProtoc
                 dtype: keys.dtype
             )
             guard self.keys != nil, self.values != nil else {
-                fatalError("AffineK8V4KVCache storage was not initialized")
+                fatalError("AffineK8VxKVCache storage was not initialized")
             }
             let range = activeLength ..< (activeLength + steps)
             self.keys!.0[.ellipsis, range, 0...] = keyUpdate.0
@@ -1424,6 +1765,17 @@ public final class AffineK8V4KVCache: BaseKVCache, NativeAffineK8V4KVCacheProtoc
             if let valueBiases = valueUpdate.2 {
                 self.values!.2![.ellipsis, range, 0...] = valueBiases
             }
+            if let residualUpdate {
+                if valueResiduals == nil {
+                    valueResiduals = initResiduals(
+                        shape: [batch, kvHeads, tupleLength(self.values!)],
+                        groupCount: valueDim / valueGroupSize,
+                        dtype: values.dtype
+                    )
+                }
+                valueResiduals!.laneIndices[.ellipsis, range, 0...] = residualUpdate.laneIndices
+                valueResiduals!.values[.ellipsis, range, 0...] = residualUpdate.values
+            }
             activeLength += steps
         } else {
             // Capacity overflow is not the normal long-context benchmark path: it only
@@ -1431,10 +1783,18 @@ public final class AffineK8V4KVCache: BaseKVCache, NativeAffineK8V4KVCacheProtoc
             // prefix and latest tail while keeping the hot update semantics correct.
             let currentKeys = getQuantizedState()?.0
             let currentValues = getQuantizedState()?.1
+            let currentResiduals = getValueResidualTuple()
             let combinedKeys = currentKeys.map { concatTuple($0, keyUpdate) } ?? keyUpdate
             let combinedValues = currentValues.map { concatTuple($0, valueUpdate) } ?? valueUpdate
             self.keys = combinedKeys
             self.values = combinedValues
+            self.valueResiduals =
+                if let residualUpdate {
+                    currentResiduals.map { concatResidualTuple($0, residualUpdate) }
+                        ?? residualUpdate
+                } else {
+                    nil
+                }
             activeLength = tupleLength(combinedKeys)
             enforceCapacity()
         }
@@ -1454,6 +1814,28 @@ public final class AffineK8V4KVCache: BaseKVCache, NativeAffineK8V4KVCacheProtoc
         )
     }
 
+    public func exactRawStateIfComplete() -> (keys: MLXArray, values: MLXArray)? {
+        guard let rawState = rawFallbackCache?.state, rawState.count == 2 else { return nil }
+        return (rawState[0], rawState[1])
+    }
+
+    private func getValueResidualTuple() -> ResidualTuple? {
+        guard let valueResiduals, activeLength > 0 else { return nil }
+        return sliceResidualTuple(
+            valueResiduals,
+            0 ..< min(activeLength, residualLength(valueResiduals))
+        )
+    }
+
+    public func getValueResidualState() -> AffineK8VxResidualState? {
+        guard let residuals = getValueResidualTuple(), residualsPerGroup > 0 else { return nil }
+        return AffineK8VxResidualState(
+            laneIndices: residuals.laneIndices,
+            values: residuals.values,
+            residualsPerGroup: residualsPerGroup
+        )
+    }
+
     public override func update(keys: MLXArray, values: MLXArray) -> (MLXArray, MLXArray) {
         fatalError(
             "`update` was called on `AffineK8V4KVCache`. Use `updateQuantized` instead."
@@ -1465,24 +1847,40 @@ public final class AffineK8V4KVCache: BaseKVCache, NativeAffineK8V4KVCacheProtoc
             guard let keys, let values else { return [] }
             let activeKeys = sliceTuple(keys, 0 ..< min(activeLength, tupleLength(keys)))
             let activeValues = sliceTuple(values, 0 ..< min(activeLength, tupleLength(values)))
-            return [
+            var arrays = [
                 activeKeys.0, activeKeys.1, activeKeys.2, activeValues.0, activeValues.1,
                 activeValues.2,
             ].compactMap { $0 }
+            if let residuals = getValueResidualTuple() {
+                arrays.append(residuals.laneIndices)
+                arrays.append(residuals.values)
+            }
+            return arrays
         }
         set {
             switch newValue.count {
             case 4:
                 keys = (newValue[0], newValue[1], nil)
                 values = (newValue[2], newValue[3], nil)
+                valueResiduals = nil
                 activeLength = tupleLength(keys!)
             case 6:
                 keys = (newValue[0], newValue[1], newValue[2])
                 values = (newValue[3], newValue[4], newValue[5])
+                valueResiduals = nil
+                activeLength = tupleLength(keys!)
+            case 8:
+                keys = (newValue[0], newValue[1], newValue[2])
+                values = (newValue[3], newValue[4], newValue[5])
+                valueResiduals = (
+                    newValue[6].dtype == .uint8 ? newValue[6] : newValue[6].asType(.uint8),
+                    newValue[7]
+                )
                 activeLength = tupleLength(keys!)
             default:
                 keys = nil
                 values = nil
+                valueResiduals = nil
                 offset = 0
                 activeLength = 0
             }
@@ -1503,11 +1901,21 @@ public final class AffineK8V4KVCache: BaseKVCache, NativeAffineK8V4KVCacheProtoc
                 String(activeLength),
                 lastAttentionPath.rawValue,
                 lastAttentionFailureReason ?? "None",
+                String(residualsPerGroup),
             ]
         }
         set {
             guard let offsetValue = newValue.first.flatMap(Int.init) else { return }
             offset = offsetValue
+            if newValue.count >= 7 {
+                keyGroupSize = Int(newValue[3]) ?? keyGroupSize
+                keyBits = Int(newValue[4]) ?? keyBits
+                valueGroupSize = Int(newValue[5]) ?? valueGroupSize
+                valueBits = Int(newValue[6]) ?? valueBits
+            }
+            if newValue.count >= 12 {
+                residualsPerGroup = max(0, Int(newValue[11]) ?? residualsPerGroup)
+            }
             if newValue.count >= 9, let restoredActiveLength = Int(newValue[8]) {
                 activeLength = restoredActiveLength
             } else if let keys {
@@ -1538,16 +1946,65 @@ public final class AffineK8V4KVCache: BaseKVCache, NativeAffineK8V4KVCacheProtoc
         lastAttentionFailureReason
     }
 
+    public var attentionDiagnostics: TurboQuantAttentionDiagnostics {
+        let availability = TurboQuantKernelAvailability.current
+        let sparseSelection = TurboQuantSparseValueSelection.off.resolved(
+            runtimeMode: sparseValueRuntimeMode,
+            contextLength: activeLength,
+            policy: sparseValuePolicy
+        )
+        let lifecycle: TurboQuantCacheLifecycle =
+            activeLength > 0
+            ? .compressedCommitted(
+                logicalLength: activeLength,
+                capacity: keys.map(tupleLength) ?? activeLength
+            )
+            : .empty
+        return TurboQuantAttentionDiagnostics(
+            layerIndex: layerIndex,
+            metalAttentionAvailable: availability.supportsMetalPolarQJLAttention,
+            activeAttentionPath: lastAttentionPath,
+            nativeBackend: availability.attentionCapabilities.nativeCompressedAttention == true
+                ? "nativeMLX" : nil,
+            nativeBackendVersion: availability.attentionCapabilities.nativeBackendVersion,
+            nativeFallbackReason: lastAttentionFailureReason
+                ?? availability.attentionCapabilities.nativeFallbackReason,
+            selectedKernelProfile: availability.selectedKernelProfile,
+            selfTestStatus: availability.selfTestStatus,
+            selfTestFailureReason: availability.selfTestFailureReason,
+            optimizationPolicy: .preferThroughput,
+            fallbackReason: lastAttentionFailureReason,
+            lastUnsupportedShape: nil,
+            rawFallbackAllocated: false,
+            cacheLifecycle: lifecycle,
+            sparseVEnabled: sparseSelection.isEnabled,
+            sparseVThreshold: sparseSelection.resolvedThreshold,
+            sparseVSelectionMode: sparseSelection.mode,
+            sparseVTopK: sparseSelection.topK,
+            sparseVCumulativeMass: sparseSelection.cumulativeMass,
+            sparseVMaxTopK: sparseSelection.maxTopK,
+            boundaryProtectedLayerCount: boundaryProtectedLayerCount,
+            boundaryProtectionReason: boundaryProtectionReason,
+            keyBits: keyBits,
+            valueBits: valueBits,
+            keyGroupSize: keyGroupSize,
+            valueGroupSize: valueGroupSize
+        )
+    }
+
     public func runtimeSnapshot() -> TurboQuantCacheRuntimeSnapshot {
         let activeKeys = keys.map { sliceTuple($0, 0 ..< min(activeLength, tupleLength($0))) }
         let activeValues = values.map { sliceTuple($0, 0 ..< min(activeLength, tupleLength($0))) }
+        let activeResiduals = getValueResidualTuple()
         let keyBytes = activeKeys.map(tupleBytes) ?? 0
-        let valueBytes = activeValues.map(tupleBytes) ?? 0
+        let valueBytes = (activeValues.map(tupleBytes) ?? 0)
+            + (activeResiduals.map(residualBytes) ?? 0)
         let storageCapacity = keys.map(tupleLength) ?? capacity ?? 0
+        let residualSuffix = residualsPerGroup > 0 ? "ResidualR\(residualsPerGroup)" : ""
 
         return TurboQuantCacheRuntimeSnapshot(
             lifecycleDescription:
-                "affineK8V4Native(logicalLength:\(activeLength),capacity:\(storageCapacity))",
+                "affineK8V\(valueBits)\(residualSuffix)Native(logicalLength:\(activeLength),capacity:\(storageCapacity))",
             logicalLength: activeLength,
             capacity: storageCapacity,
             pinnedPrefixLength: min(keep, activeLength),
@@ -1558,10 +2015,12 @@ public final class AffineK8V4KVCache: BaseKVCache, NativeAffineK8V4KVCacheProtoc
             packedFallbackAllocated: false,
             lastAttentionPath: lastAttentionPath.rawValue,
             lastFailure: lastAttentionFailureReason,
-            kvCodec: .affineK8V4,
+            kvCodec: valueBits == TurboQuantKVCodec.affineK8V4ValueBits ? .affineK8V4 : .affineK8Vx,
             quantizationMode: mode.rawValue,
             keyBits: keyBits,
             groupSize: keyGroupSize,
+            valueBits: valueBits,
+            valueGroupSize: valueGroupSize,
             selectedPath: lastAttentionPath.rawValue,
             fallbackReason: lastAttentionFailureReason,
             activeCacheAllocated: false
@@ -1570,6 +2029,10 @@ public final class AffineK8V4KVCache: BaseKVCache, NativeAffineK8V4KVCacheProtoc
 
     private func tupleBytes(_ tuple: QuantizedTuple) -> Int {
         tuple.0.nbytes + tuple.1.nbytes + (tuple.2?.nbytes ?? 0)
+    }
+
+    private func residualBytes(_ tuple: ResidualTuple) -> Int {
+        tuple.laneIndices.nbytes + tuple.values.nbytes
     }
 
     @discardableResult
@@ -1584,12 +2047,14 @@ public final class AffineK8V4KVCache: BaseKVCache, NativeAffineK8V4KVCacheProtoc
         if retainedLength == 0 {
             self.keys = nil
             self.values = nil
+            self.valueResiduals = nil
         } else if retainedLength < tupleLength(keys) && retainedLength < step {
             // Trim small speculative prefixes to avoid carrying oversized scratch
             // storage after a rollback to the beginning of a prompt.
             let keepRange = 0 ..< retainedLength
             self.keys = sliceTuple(keys, keepRange)
             self.values = sliceTuple(values, keepRange)
+            self.valueResiduals = valueResiduals.map { sliceResidualTuple($0, keepRange) }
         } else {
             self.keys = keys
             self.values = values
@@ -1599,7 +2064,20 @@ public final class AffineK8V4KVCache: BaseKVCache, NativeAffineK8V4KVCacheProtoc
     }
 
     public override func copy() -> any KVCache {
-        let new = AffineK8V4KVCache(maxSize: capacity, keep: keep)
+        let new = AffineK8V4KVCache(
+            maxSize: capacity,
+            keep: keep,
+            keyGroupSize: keyGroupSize,
+            keyBits: keyBits,
+            valueGroupSize: valueGroupSize,
+            valueBits: valueBits,
+            residualsPerGroup: residualsPerGroup,
+            sparseValuePolicy: sparseValuePolicy,
+            sparseValueRuntimeMode: sparseValueRuntimeMode,
+            layerIndex: layerIndex,
+            boundaryProtectedLayerCount: boundaryProtectedLayerCount,
+            boundaryProtectionReason: boundaryProtectionReason
+        )
         let s = state
         if !s.isEmpty {
             new.state = s.map { $0[.ellipsis] }
@@ -1780,6 +2258,11 @@ public class RotatingQuantizedKVCache: QuantizedKVCache {
         let steps = keys.dim(2)
         let keyDim = keys.dim(3)
         let valueDim = values.dim(3)
+        adoptCompatibleAffineGroupSize(
+            keyDimension: keyDim,
+            valueDimension: valueDim,
+            storageIsEmpty: self.keys == nil && self.values == nil
+        )
         let keyUpdate = quantizedTuple(keys)
         let valueUpdate = quantizedTuple(values)
 
@@ -2585,10 +3068,12 @@ private func restoreCacheFromMetaState(
             metaState.count > 6
             ? UInt64(metaState[6]) ?? defaultTurboQuantSeed : defaultTurboQuantSeed
         let valueBits = turboQuantValueBits(from: metaState)
+        let kvCodec = turboQuantKVCodec(from: metaState, backend: backend)
         let cache = TurboQuantKVCache(
             preset: preset,
             groupSize: groupSize,
             backend: backend,
+            kvCodec: kvCodec,
             optimizationPolicy: .auto,
             seed: seed,
             valueBits: valueBits
@@ -2623,6 +3108,7 @@ private func restoreCacheFromMetaState(
             metaState.count > 8
             ? UInt64(metaState[8]) ?? defaultTurboQuantSeed : defaultTurboQuantSeed
         let valueBits = turboQuantValueBits(from: metaState)
+        let kvCodec = turboQuantKVCodec(from: metaState, backend: backend)
         let cache = RotatingTurboQuantKVCache(
             maxSize: maxSize,
             keep: keep,
@@ -2630,6 +3116,7 @@ private func restoreCacheFromMetaState(
             preset: preset,
             groupSize: groupSize,
             backend: backend,
+            kvCodec: kvCodec,
             optimizationPolicy: .auto,
             seed: seed,
             valueBits: valueBits
@@ -2681,6 +3168,20 @@ private func turboQuantValueBits(from metaState: [String]) -> Int? {
         }
     }
     return nil
+}
+
+private func turboQuantKVCodec(
+    from metaState: [String],
+    backend: TurboQuantBackend
+) -> TurboQuantKVCodec {
+    for item in metaState {
+        if item.hasPrefix("kvCodec="),
+            let codec = TurboQuantKVCodec(rawValue: String(item.dropFirst("kvCodec=".count)))
+        {
+            return codec
+        }
+    }
+    return turboQuantCompressedKVCodec(backend: backend)
 }
 
 /// Unflatten arrays from tree_flatten format (e.g., "0.1", "1.0") to nested structure
@@ -2808,20 +3309,47 @@ public func makePromptCacheWithLayerCount(
 private func turboQuantProtectsBoundaryLayer(
     parameters: GenerateParameters?,
     layerIndex: Int?,
-    layerCount: Int?
+    layerCount: Int?,
+    boundaryLayerIndex: Int? = nil,
+    boundaryLayerCount: Int? = nil
 ) -> Bool {
+    let effectiveLayerIndex = boundaryLayerIndex ?? layerIndex
+    let effectiveLayerCount = boundaryLayerCount ?? layerCount
     guard parameters?.kvCacheStrategy.createsTurboQuantCacheImmediately == true,
-        let layerIndex,
-        let layerCount,
-        layerIndex >= 0,
-        layerCount > 0
+        let effectiveLayerIndex,
+        let effectiveLayerCount,
+        effectiveLayerIndex >= 0,
+        effectiveLayerCount > 0
     else {
         return false
     }
     return parameters?.effectiveTurboQuantPrecisionPolicy.protectsBoundaryLayer(
-        layerIndex: layerIndex,
-        layerCount: layerCount
+        layerIndex: effectiveLayerIndex,
+        layerCount: effectiveLayerCount
     ) ?? false
+}
+
+private func turboQuantBoundaryDiagnosticsMetadata(
+    parameters: GenerateParameters?,
+    layerCount: Int?
+) -> (protectedLayerCount: Int, reason: String?) {
+    let precisionPolicy = parameters?.effectiveTurboQuantPrecisionPolicy
+    let protectedLayerCount =
+        layerCount.map {
+            precisionPolicy?.protectedBoundaryLayerIndexes(layerCount: $0).count ?? 0
+        } ?? 0
+    let reason =
+        protectedLayerCount > 0
+        ? {
+            switch precisionPolicy?.boundaryCachePrecision ?? .affineK8V4 {
+            case .affineK8V4:
+                return "K8/V4 boundary protection for low-bit K/V policy"
+            case .raw:
+                return "rawKV boundary protection for explicit compatibility policy"
+            }
+        }()
+        : nil
+    return (protectedLayerCount, reason)
 }
 
 private func resolvedAffineInt4GroupSize(
@@ -2835,13 +3363,301 @@ private func resolvedAffineInt4GroupSize(
     return kvGroupSize
 }
 
+private func resolvedAffineK8VxValueBits(
+    kvCodec: TurboQuantKVCodec,
+    requestedValueBits: Int?
+) -> Int {
+    let valueBits = requestedValueBits ?? TurboQuantKVCodec.affineK8V4ValueBits
+    guard kvCodec == .affineK8Vx || requestedValueBits != nil else {
+        return TurboQuantKVCodec.affineK8V4ValueBits
+    }
+    return TurboQuantKVCodec.affineK8VxSupportedValueBits.contains(valueBits)
+        ? valueBits : TurboQuantKVCodec.affineK8V4ValueBits
+}
+
+private func resolvedAffineK8VxValueGroupSize(requestedValueGroupSize: Int?) -> Int {
+    guard let requestedValueGroupSize else {
+        return TurboQuantKVCodec.affineK8V4ValueGroupSize
+    }
+    return (requestedValueGroupSize == 32 || requestedValueGroupSize == 64)
+        ? requestedValueGroupSize
+        : TurboQuantKVCodec.affineK8V4ValueGroupSize
+}
+
+private func resolvedTurboQuantValueBits(
+    preset: TurboQuantPreset,
+    kvCodec: TurboQuantKVCodec,
+    requestedValueBits: Int?
+) -> Int? {
+    requestedValueBits
+        ?? (kvCodec == .polarWHT ? TurboQuantKVCodec.polarWHTDefaultValueBits : nil)
+}
+
+private func resolvedTurboQuantPrecisionPolicy(
+    parameters: GenerateParameters?,
+    preset: TurboQuantPreset,
+    kvCodec: TurboQuantKVCodec,
+    valueBits: Int?
+) -> TurboQuantKVPrecisionPolicy? {
+    if let resolved = parameters?.turboQuantResolvedPrecisionPolicy {
+        return resolved
+    }
+    if let explicit = parameters?.turboQuantPrecisionPolicy {
+        return explicit
+    }
+    guard parameters != nil else { return nil }
+    guard kvCodec == .polarWHT else {
+        return parameters?.effectiveTurboQuantPrecisionPolicy
+    }
+    return TurboQuantKVPrecisionPolicy.legacy(preset: preset, valueBits: valueBits)
+}
+
+private func rawAttentionKVCache(maxKVSize: Int?, keep: Int) -> KVCache {
+    if let maxKVSize {
+        return RotatingKVCache(maxSize: maxKVSize, keep: keep)
+    }
+    return KVCacheSimple()
+}
+
+private func makeTurboQuantBoundaryKVCache(
+    parameters: GenerateParameters?,
+    maxKVSize: Int?,
+    keep: Int,
+    layerIndex: Int?,
+    boundaryProtectedLayerCount: Int,
+    boundaryProtectionReason: String?
+) -> KVCache {
+    switch parameters?.effectiveTurboQuantPrecisionPolicy.boundaryCachePrecision ?? .affineK8V4 {
+    case .affineK8V4:
+        return AffineK8V4KVCache(
+            maxSize: maxKVSize,
+            keep: keep,
+            sparseValuePolicy: parameters?.effectiveTurboQuantSparseValuePolicy ?? .off,
+            sparseValueRuntimeMode: parameters?.turboQuantResolvedRuntimeMode
+                ?? parameters?.turboQuantRuntimeMode
+                ?? .capacityTurboQuant,
+            layerIndex: layerIndex,
+            boundaryProtectedLayerCount: boundaryProtectedLayerCount,
+            boundaryProtectionReason: boundaryProtectionReason
+        )
+    case .raw:
+        return rawAttentionKVCache(maxKVSize: maxKVSize, keep: keep)
+    }
+}
+
+private func resolvedKVLayerCodec(
+    parameters: GenerateParameters?,
+    layerIndex: Int?
+) -> KVLayerCodec? {
+    guard let policy = parameters?.kvLayerPolicy else { return nil }
+    let codec =
+        if let layerIndex {
+            policy.codec(forLayerIndex: layerIndex)
+        } else {
+            policy.defaultCodec ?? .inherit
+        }
+    if case .inherit = codec { return nil }
+    return codec
+}
+
+private func makeAttentionKVCache(
+    codec: KVLayerCodec,
+    parameters: GenerateParameters?,
+    maxKVSize: Int?,
+    keep: Int,
+    layerIndex: Int?,
+    layerCount: Int?
+) -> KVCache {
+    let quantizedKVStart = parameters?.quantizedKVStart ?? 0
+    let boundaryMetadata = turboQuantBoundaryDiagnosticsMetadata(
+        parameters: parameters,
+        layerCount: layerCount
+    )
+    switch codec {
+    case .inherit:
+        return rawAttentionKVCache(maxKVSize: maxKVSize, keep: keep)
+    case .rawFP16:
+        return rawAttentionKVCache(maxKVSize: maxKVSize, keep: keep)
+    case .mlxAffine(let bits, let groupSize):
+        guard quantizedKVStart <= 0 else {
+            return rawAttentionKVCache(maxKVSize: maxKVSize, keep: keep)
+        }
+        if let maxKVSize {
+            return RotatingQuantizedKVCache(
+                maxSize: maxKVSize,
+                keep: keep,
+                groupSize: groupSize,
+                bits: bits,
+                mode: .affine
+            )
+        }
+        return QuantizedKVCache(groupSize: groupSize, bits: bits, mode: .affine)
+    case .affineK8V4:
+        guard quantizedKVStart <= 0 else {
+            return rawAttentionKVCache(maxKVSize: maxKVSize, keep: keep)
+        }
+        return AffineK8V4KVCache(
+            maxSize: maxKVSize,
+            keep: keep,
+            sparseValuePolicy: parameters?.effectiveTurboQuantSparseValuePolicy ?? .off,
+            sparseValueRuntimeMode: parameters?.turboQuantResolvedRuntimeMode
+                ?? parameters?.turboQuantRuntimeMode
+                ?? .capacityTurboQuant,
+            layerIndex: layerIndex,
+            boundaryProtectedLayerCount: boundaryMetadata.protectedLayerCount,
+            boundaryProtectionReason: boundaryMetadata.reason
+        )
+    case .affineK8Vx(let valueBits):
+        guard quantizedKVStart <= 0 else {
+            return rawAttentionKVCache(maxKVSize: maxKVSize, keep: keep)
+        }
+        let resolvedValueBits = (
+            TurboQuantKVCodec.affineK8VxSupportedValueBits.contains(valueBits)
+                ? valueBits : TurboQuantKVCodec.affineK8V4ValueBits
+        )
+        let resolvedValueGroupSize = resolvedAffineK8VxValueGroupSize(
+            requestedValueGroupSize: parameters?.turboQuantValueGroupSize
+        )
+        return AffineK8V4KVCache(
+            maxSize: maxKVSize,
+            keep: keep,
+            valueGroupSize: resolvedValueGroupSize,
+            valueBits: resolvedValueBits,
+            sparseValuePolicy: parameters?.effectiveTurboQuantSparseValuePolicy ?? .off,
+            sparseValueRuntimeMode: parameters?.turboQuantResolvedRuntimeMode
+                ?? parameters?.turboQuantRuntimeMode
+                ?? .capacityTurboQuant,
+            layerIndex: layerIndex,
+            boundaryProtectedLayerCount: boundaryMetadata.protectedLayerCount,
+            boundaryProtectionReason: boundaryMetadata.reason
+        )
+    case .affineK8VxResidual(let valueBits, let residualsPerGroup):
+        guard quantizedKVStart <= 0 else {
+            return rawAttentionKVCache(maxKVSize: maxKVSize, keep: keep)
+        }
+        let resolvedValueBits = valueBits == 2 ? valueBits : 2
+        let resolvedResidualsPerGroup = residualsPerGroup == 1 ? 1 : 0
+        return AffineK8V4KVCache(
+            maxSize: maxKVSize,
+            keep: keep,
+            valueBits: resolvedValueBits,
+            residualsPerGroup: resolvedResidualsPerGroup,
+            sparseValuePolicy: parameters?.effectiveTurboQuantSparseValuePolicy ?? .off,
+            sparseValueRuntimeMode: parameters?.turboQuantResolvedRuntimeMode
+                ?? parameters?.turboQuantRuntimeMode
+                ?? .capacityTurboQuant,
+            layerIndex: layerIndex,
+            boundaryProtectedLayerCount: boundaryMetadata.protectedLayerCount,
+            boundaryProtectionReason: boundaryMetadata.reason
+        )
+    case .affineInt4:
+        guard quantizedKVStart <= 0 else {
+            return rawAttentionKVCache(maxKVSize: maxKVSize, keep: keep)
+        }
+        let groupSize = resolvedAffineInt4GroupSize(
+            kvGroupSize: parameters?.kvGroupSize ?? TurboQuantKVCodec.affineInt4DefaultGroupSize,
+            kvBits: parameters?.kvBits,
+            kvCodec: parameters?.kvCodec ?? .polarQJL
+        )
+        if let maxKVSize {
+            return RotatingAffineInt4KVCache(
+                maxSize: maxKVSize,
+                keep: keep,
+                groupSize: groupSize
+            )
+        }
+        return AffineInt4KVCache(groupSize: groupSize)
+    case .turboQuant(let preset, let valueBits, let groupSize, let backend):
+        guard quantizedKVStart <= 0 else {
+            return rawAttentionKVCache(maxKVSize: maxKVSize, keep: keep)
+        }
+        let policy = parameters?.turboQuantOptimizationPolicy ?? .auto
+        let fallbackPolicy = parameters?.turboQuantFallbackPolicy ?? .compressedDecodeAllowed
+        let seed = parameters?.turboQuantSeed ?? defaultTurboQuantSeed
+        let runtimeMode = parameters?.turboQuantResolvedRuntimeMode
+            ?? parameters?.turboQuantRuntimeMode
+            ?? .capacityTurboQuant
+        let kvCodec = turboQuantCompressedKVCodec(backend: backend)
+        let resolvedValueBits = resolvedTurboQuantValueBits(
+            preset: preset,
+            kvCodec: kvCodec,
+            requestedValueBits: valueBits
+        )
+        let precisionPolicy = TurboQuantKVPrecisionPolicy.legacy(
+            preset: preset,
+            valueBits: resolvedValueBits
+        )
+        let sparseValuePolicy = parameters?.effectiveTurboQuantSparseValuePolicy ?? .off
+        let sparseValueSelection = parameters?.effectiveTurboQuantSparseValueSelection ?? .off
+        if runtimeMode == .throughputTurboQuant {
+            return ThroughputTurboQuantKVCache(
+                maxSize: maxKVSize,
+                keep: keep,
+                preset: preset,
+                groupSize: groupSize,
+                backend: backend,
+                kvCodec: kvCodec,
+                optimizationPolicy: policy,
+                fallbackPolicy: fallbackPolicy,
+                seed: seed,
+                valueBits: resolvedValueBits,
+                precisionPolicy: precisionPolicy,
+                requestedRuntimeMode: parameters?.turboQuantRuntimeMode ?? .auto,
+                sparseValuePolicy: sparseValuePolicy,
+                sparseValueSelection: sparseValueSelection,
+                residentBudgetBytes: parameters?.turboQuantPerCacheResidentBudgetBytes
+            )
+        }
+        if let maxKVSize {
+            return RotatingTurboQuantKVCache(
+                maxSize: maxKVSize,
+                keep: keep,
+                preset: preset,
+                groupSize: groupSize,
+                backend: backend,
+                kvCodec: kvCodec,
+                optimizationPolicy: policy,
+                fallbackPolicy: fallbackPolicy,
+                seed: seed,
+                valueBits: resolvedValueBits,
+                precisionPolicy: precisionPolicy,
+                requestedRuntimeMode: parameters?.turboQuantRuntimeMode ?? .auto,
+                resolvedRuntimeMode: runtimeMode,
+                sparseValuePolicy: sparseValuePolicy,
+                sparseValueSelection: sparseValueSelection,
+                layerIndex: layerIndex,
+                residentBudgetBytes: parameters?.turboQuantPerCacheResidentBudgetBytes
+            )
+        }
+        return TurboQuantKVCache(
+            preset: preset,
+            groupSize: groupSize,
+            backend: backend,
+            kvCodec: kvCodec,
+            optimizationPolicy: policy,
+            fallbackPolicy: fallbackPolicy,
+            seed: seed,
+            valueBits: resolvedValueBits,
+            precisionPolicy: precisionPolicy,
+            requestedRuntimeMode: parameters?.turboQuantRuntimeMode ?? .auto,
+            resolvedRuntimeMode: runtimeMode,
+            sparseValuePolicy: sparseValuePolicy,
+            sparseValueSelection: sparseValueSelection,
+            layerIndex: layerIndex,
+            residentBudgetBytes: parameters?.turboQuantPerCacheResidentBudgetBytes
+        )
+    }
+}
+
 /// Construct a single standard attention KV cache, honoring TurboQuant generation parameters.
 public func makeAttentionKVCache(
     parameters: GenerateParameters? = nil,
     maxKVSize: Int? = nil,
     keep: Int = 4,
     layerIndex: Int? = nil,
-    layerCount: Int? = nil
+    layerCount: Int? = nil,
+    boundaryLayerIndex: Int? = nil,
+    boundaryLayerCount: Int? = nil
 ) -> KVCache {
     let resolvedMaxKVSize: Int? =
         if let requested = parameters?.maxKVSize, let local = maxKVSize {
@@ -2849,16 +3665,40 @@ public func makeAttentionKVCache(
         } else {
             parameters?.maxKVSize ?? maxKVSize
         }
+    let effectiveBoundaryLayerCount = boundaryLayerCount ?? layerCount
+    let boundaryMetadata = turboQuantBoundaryDiagnosticsMetadata(
+        parameters: parameters,
+        layerCount: effectiveBoundaryLayerCount
+    )
+    let effectiveKeep =
+        parameters?.effectiveTurboQuantSparseValueSelection.mode == .pageTopK ? 0 : keep
+
+    if let codec = resolvedKVLayerCodec(parameters: parameters, layerIndex: layerIndex) {
+        return makeAttentionKVCache(
+            codec: codec,
+            parameters: parameters,
+            maxKVSize: resolvedMaxKVSize,
+            keep: effectiveKeep,
+            layerIndex: layerIndex,
+            layerCount: layerCount
+        )
+    }
 
     if turboQuantProtectsBoundaryLayer(
         parameters: parameters,
         layerIndex: layerIndex,
-        layerCount: layerCount
+        layerCount: layerCount,
+        boundaryLayerIndex: boundaryLayerIndex,
+        boundaryLayerCount: boundaryLayerCount
     ) {
-        if let maxKVSize = resolvedMaxKVSize {
-            return RotatingKVCache(maxSize: maxKVSize, keep: keep)
-        }
-        return KVCacheSimple()
+        return makeTurboQuantBoundaryKVCache(
+            parameters: parameters,
+            maxKVSize: resolvedMaxKVSize,
+            keep: effectiveKeep,
+            layerIndex: layerIndex,
+            boundaryProtectedLayerCount: boundaryMetadata.protectedLayerCount,
+            boundaryProtectionReason: boundaryMetadata.reason
+        )
     }
 
     if parameters?.kvCacheStrategy == .hybridTurboQuant {
@@ -2870,12 +3710,30 @@ public func makeAttentionKVCache(
         )
     }
 
-    if parameters?.kvCacheStrategy.createsAffineK8V4CacheImmediately == true,
+    if parameters?.kvCacheStrategy.createsAffineK8VxCacheImmediately == true,
         (parameters?.quantizedKVStart ?? 0) <= 0
     {
+        let valueBits = resolvedAffineK8VxValueBits(
+            kvCodec: parameters?.kvCodec ?? .affineK8V4,
+            requestedValueBits: parameters?.turboQuantValueBits
+        )
+        let valueGroupSize = resolvedAffineK8VxValueGroupSize(
+            requestedValueGroupSize: parameters?.turboQuantValueGroupSize
+        )
+        let sparseValueRuntimeMode =
+            parameters?.turboQuantResolvedRuntimeMode
+            ?? parameters?.turboQuantRuntimeMode
+            ?? .capacityTurboQuant
         return AffineK8V4KVCache(
             maxSize: resolvedMaxKVSize,
-            keep: keep
+            keep: effectiveKeep,
+            valueGroupSize: valueGroupSize,
+            valueBits: valueBits,
+            sparseValuePolicy: parameters?.effectiveTurboQuantSparseValuePolicy ?? .off,
+            sparseValueRuntimeMode: sparseValueRuntimeMode,
+            layerIndex: layerIndex,
+            boundaryProtectedLayerCount: boundaryMetadata.protectedLayerCount,
+            boundaryProtectionReason: boundaryMetadata.reason
         )
     }
 
@@ -2890,7 +3748,7 @@ public func makeAttentionKVCache(
         if let maxKVSize = resolvedMaxKVSize {
             return RotatingAffineInt4KVCache(
                 maxSize: maxKVSize,
-                keep: keep,
+                keep: effectiveKeep,
                 groupSize: groupSize
             )
         }
@@ -2900,31 +3758,35 @@ public func makeAttentionKVCache(
     if parameters?.kvCacheStrategy.createsTurboQuantCacheImmediately == true {
         let preset = parameters?.turboQuantPreset ?? .turbo3_5
         let backend = parameters?.turboQuantBackend ?? .metalPolarQJL
+        let kvCodec = parameters?.kvCodec ?? turboQuantCompressedKVCodec(backend: backend)
         let groupSize = parameters?.kvGroupSize ?? 64
         let policy = parameters?.turboQuantOptimizationPolicy ?? .auto
         let fallbackPolicy = parameters?.turboQuantFallbackPolicy ?? .compressedDecodeAllowed
         let seed = parameters?.turboQuantSeed ?? defaultTurboQuantSeed
-        let valueBits = parameters?.turboQuantValueBits
+        let valueBits = resolvedTurboQuantValueBits(
+            preset: preset,
+            kvCodec: kvCodec,
+            requestedValueBits: parameters?.turboQuantValueBits
+        )
         let runtimeMode = parameters?.turboQuantResolvedRuntimeMode
             ?? parameters?.turboQuantRuntimeMode
             ?? .capacityTurboQuant
-        let precisionPolicy = parameters?.effectiveTurboQuantPrecisionPolicy
+        let precisionPolicy = resolvedTurboQuantPrecisionPolicy(
+            parameters: parameters,
+            preset: preset,
+            kvCodec: kvCodec,
+            valueBits: valueBits
+        )
         let sparseValuePolicy = parameters?.effectiveTurboQuantSparseValuePolicy ?? .off
-        let boundaryProtectedLayerCount =
-            layerCount.map {
-                precisionPolicy?.protectedBoundaryLayerIndexes(layerCount: $0).count ?? 0
-            } ?? 0
-        let boundaryProtectionReason =
-            boundaryProtectedLayerCount > 0
-            ? "rawKV boundary protection for low-bit V or compressed K policy"
-            : nil
+        let sparseValueSelection = parameters?.effectiveTurboQuantSparseValueSelection ?? .off
         if runtimeMode == .throughputTurboQuant {
             return ThroughputTurboQuantKVCache(
                 maxSize: resolvedMaxKVSize,
-                keep: keep,
+                keep: effectiveKeep,
                 preset: preset,
                 groupSize: groupSize,
                 backend: backend,
+                kvCodec: kvCodec,
                 optimizationPolicy: policy,
                 fallbackPolicy: fallbackPolicy,
                 seed: seed,
@@ -2932,18 +3794,20 @@ public func makeAttentionKVCache(
                 precisionPolicy: precisionPolicy,
                 requestedRuntimeMode: parameters?.turboQuantRuntimeMode ?? .auto,
                 sparseValuePolicy: sparseValuePolicy,
-                boundaryProtectedLayerCount: boundaryProtectedLayerCount,
-                boundaryProtectionReason: boundaryProtectionReason,
+                sparseValueSelection: sparseValueSelection,
+                boundaryProtectedLayerCount: boundaryMetadata.protectedLayerCount,
+                boundaryProtectionReason: boundaryMetadata.reason,
                 residentBudgetBytes: parameters?.turboQuantPerCacheResidentBudgetBytes
             )
         }
         if let maxKVSize = resolvedMaxKVSize {
             return RotatingTurboQuantKVCache(
                 maxSize: maxKVSize,
-                keep: keep,
+                keep: effectiveKeep,
                 preset: preset,
                 groupSize: groupSize,
                 backend: backend,
+                kvCodec: kvCodec,
                 optimizationPolicy: policy,
                 fallbackPolicy: fallbackPolicy,
                 seed: seed,
@@ -2952,8 +3816,10 @@ public func makeAttentionKVCache(
                 requestedRuntimeMode: parameters?.turboQuantRuntimeMode ?? .auto,
                 resolvedRuntimeMode: runtimeMode,
                 sparseValuePolicy: sparseValuePolicy,
-                boundaryProtectedLayerCount: boundaryProtectedLayerCount,
-                boundaryProtectionReason: boundaryProtectionReason,
+                sparseValueSelection: sparseValueSelection,
+                layerIndex: layerIndex,
+                boundaryProtectedLayerCount: boundaryMetadata.protectedLayerCount,
+                boundaryProtectionReason: boundaryMetadata.reason,
                 residentBudgetBytes: parameters?.turboQuantPerCacheResidentBudgetBytes
             )
         }
@@ -2961,6 +3827,7 @@ public func makeAttentionKVCache(
             preset: preset,
             groupSize: groupSize,
             backend: backend,
+            kvCodec: kvCodec,
             optimizationPolicy: policy,
             fallbackPolicy: fallbackPolicy,
             seed: seed,
@@ -2969,14 +3836,16 @@ public func makeAttentionKVCache(
             requestedRuntimeMode: parameters?.turboQuantRuntimeMode ?? .auto,
             resolvedRuntimeMode: runtimeMode,
             sparseValuePolicy: sparseValuePolicy,
-            boundaryProtectedLayerCount: boundaryProtectedLayerCount,
-            boundaryProtectionReason: boundaryProtectionReason,
+            sparseValueSelection: sparseValueSelection,
+            layerIndex: layerIndex,
+            boundaryProtectedLayerCount: boundaryMetadata.protectedLayerCount,
+            boundaryProtectionReason: boundaryMetadata.reason,
             residentBudgetBytes: parameters?.turboQuantPerCacheResidentBudgetBytes
         )
     }
 
     if let maxKVSize = resolvedMaxKVSize {
-        return RotatingKVCache(maxSize: maxKVSize, keep: keep)
+        return RotatingKVCache(maxSize: maxKVSize, keep: effectiveKeep)
     }
     return KVCacheSimple()
 }
@@ -3232,6 +4101,9 @@ public func supportsNativeAffineK8V4ScaledDotProductAttention(
     if ProcessInfo.processInfo.environment["MLX_TURBOQUANT_DISABLE_K8V4_NATIVE"] == "1" {
         return false
     }
+    guard Device.defaultDevice().deviceType == .gpu else {
+        return false
+    }
 
     guard keyGroupSize > 0, valueGroupSize > 0, keyBits > 0, valueBits > 0 else {
         return false
@@ -3247,6 +4119,10 @@ public func supportsNativeAffineK8V4ScaledDotProductAttention(
         valueBiases.ndim == 4
     else { return false }
 
+    guard queries.dim(-2) <= 32,
+        queries.dim(-2) <= quantizedKeys.0.dim(-2)
+    else { return false }
+
     guard queries.dtype == .float16 || queries.dtype == .bfloat16 || queries.dtype == .float32,
         quantizedKeys.0.dtype == .uint32,
         quantizedValues.0.dtype == .uint32
@@ -3259,6 +4135,9 @@ public func supportsNativeAffineK8V4ScaledDotProductAttention(
         queries.dim(-1) % keyGroupSize == 0,
         queries.dim(-1) % valueGroupSize == 0
     else { return false }
+    guard [64, 128, 256, 512].contains(queries.dim(-1)) else {
+        return false
+    }
 
     guard queries.dim(0) == quantizedKeys.0.dim(0),
         queries.dim(0) == quantizedValues.0.dim(0),
@@ -3267,6 +4146,10 @@ public func supportsNativeAffineK8V4ScaledDotProductAttention(
         quantizedKeys.0.dim(-2) == quantizedValues.0.dim(-2),
         queries.dim(-3) % quantizedKeys.0.dim(-3) == 0
     else { return false }
+    let gqaFactor = queries.dim(-3) / quantizedKeys.0.dim(-3)
+    guard gqaFactor <= 32 else {
+        return false
+    }
 
     let expectedKeyScaleDimension = queries.dim(-1) / keyGroupSize
     let expectedValueScaleDimension = queries.dim(-1) / valueGroupSize
@@ -3282,8 +4165,8 @@ public func supportsNativeAffineK8V4ScaledDotProductAttention(
 
     guard (keyGroupSize == 32 || keyGroupSize == 64),
         (valueGroupSize == 32 || valueGroupSize == 64),
-        (keyBits == 4 || keyBits == 6 || keyBits == 8),
-        (valueBits == 4 || valueBits == 6 || valueBits == 8)
+        keyBits == TurboQuantKVCodec.affineK8V4KeyBits,
+        TurboQuantKVCodec.affineK8VxSupportedValueBits.contains(valueBits)
     else { return false }
 
     if case .array(let maskArray) = mask, maskArray.ndim > 4 {
@@ -3310,10 +4193,23 @@ public func mixedAffineK8V4ScaledDotProductAttention(
     keyGroupSize: Int = TurboQuantKVCodec.affineK8V4KeyGroupSize,
     keyBits: Int = TurboQuantKVCodec.affineK8V4KeyBits,
     valueGroupSize: Int = TurboQuantKVCodec.affineK8V4ValueGroupSize,
-    valueBits: Int = TurboQuantKVCodec.affineK8V4ValueBits
+    valueBits: Int = TurboQuantKVCodec.affineK8V4ValueBits,
+    sparseVThreshold: Float? = nil
 ) throws -> MLXArray {
     let nativeMask = normalizedQuantizedAttentionMask(mask)
-    if supportsNativeAffineK8V4ScaledDotProductAttention(
+    let resolvedSparseVThreshold = sparseVThreshold.flatMap { $0 > 0 ? $0 : nil }
+    let sparseNativeSupported: Bool = {
+        guard resolvedSparseVThreshold != nil else { return true }
+        if sinks != nil || queries.dim(2) != 1 { return false }
+        switch nativeMask {
+        case .none, .causal:
+            return true
+        case .array, .arrays:
+            return false
+        }
+    }()
+    if sparseNativeSupported,
+        supportsNativeAffineK8V4ScaledDotProductAttention(
         queries: queries,
         quantizedKeys: quantizedKeys,
         quantizedValues: quantizedValues,
@@ -3324,6 +4220,27 @@ public func mixedAffineK8V4ScaledDotProductAttention(
         valueGroupSize: valueGroupSize,
         valueBits: valueBits
     ), let keyBiases = quantizedKeys.2, let valueBiases = quantizedValues.2 {
+        if let resolvedSparseVThreshold {
+            return try MLXFast.mixedQuantizedScaledDotProductAttention(
+                queries: queries,
+                keys: quantizedKeys.0,
+                keyScales: quantizedKeys.1,
+                values: quantizedValues.0,
+                valueScales: quantizedValues.1,
+                keyBiases: keyBiases,
+                valueBiases: valueBiases,
+                mask: nativeMask,
+                sinks: sinks,
+                options: MixedQuantizedScaledDotProductAttentionOptions(
+                    scale: scale,
+                    keyGroupSize: keyGroupSize,
+                    keyBits: keyBits,
+                    valueGroupSize: valueGroupSize,
+                    valueBits: valueBits,
+                    sparseVThreshold: resolvedSparseVThreshold
+                )
+            )
+        }
         return MLXFast.mixedQuantizedScaledDotProductAttention(
             queries: queries,
             keys: quantizedKeys.0,
@@ -3346,7 +4263,7 @@ public func mixedAffineK8V4ScaledDotProductAttention(
     let kvHeadCount = quantizedKeys.0.dim(1)
     guard kvHeadCount > 0, queryHeadCount % kvHeadCount == 0 else {
         throw TurboQuantRuntimeFailure.unsupportedAttentionShape(
-            "affine K8/V4 native attention requires query heads to be a multiple of KV heads"
+            "affine K8/Vx native attention requires query heads to be a multiple of KV heads"
         )
     }
 
@@ -3408,7 +4325,14 @@ public func mixedAffineK8V4ScaledDotProductAttention(
         }
     }
 
-    let weights = softmax(scores, axes: [-1], precise: true)
+    var weights = softmax(scores, axes: [-1], precise: true)
+    if let resolvedSparseVThreshold {
+        weights = MLX.where(
+            weights .>= resolvedSparseVThreshold,
+            weights,
+            MLXArray.zeros(like: weights)
+        )
+    }
     var output = quantizedMM(
         weights,
         v.0,
@@ -3423,6 +4347,150 @@ public func mixedAffineK8V4ScaledDotProductAttention(
         output = flatten(output, startAxis: 1, endAxis: 2)
     }
     return output
+}
+
+public func mixedAffineK8VxResidualScaledDotProductAttention(
+    queries: MLXArray,
+    quantizedKeys: (MLXArray, MLXArray, MLXArray?),
+    quantizedValues: (MLXArray, MLXArray, MLXArray?),
+    residualState: AffineK8VxResidualState,
+    scale: Float,
+    mask: MLXFast.ScaledDotProductAttentionMaskMode = .none,
+    sinks: MLXArray? = nil,
+    keyGroupSize: Int = TurboQuantKVCodec.affineK8V4KeyGroupSize,
+    keyBits: Int = TurboQuantKVCodec.affineK8V4KeyBits,
+    valueGroupSize: Int = TurboQuantKVCodec.affineK8V4ValueGroupSize,
+    valueBits: Int = 2,
+    sparseVThreshold: Float? = nil
+) throws -> MLXArray {
+    guard residualState.residualsPerGroup == 1, valueBits == 2 else {
+        throw TurboQuantRuntimeFailure.unsupportedAttentionShape(
+            "affine K8/Vx residual attention currently supports only V2 residualsPerGroup == 1"
+        )
+    }
+
+    let base = try mixedAffineK8V4ScaledDotProductAttention(
+        queries: queries,
+        quantizedKeys: quantizedKeys,
+        quantizedValues: quantizedValues,
+        scale: scale,
+        mask: mask,
+        sinks: sinks,
+        keyGroupSize: keyGroupSize,
+        keyBits: keyBits,
+        valueGroupSize: valueGroupSize,
+        valueBits: valueBits,
+        sparseVThreshold: sparseVThreshold
+    )
+
+    let headDim = queries.dim(-1)
+    let groupCount = headDim / valueGroupSize
+    guard groupCount > 0,
+        residualState.laneIndices.dim(-1) == groupCount,
+        residualState.values.dim(-1) == groupCount
+    else {
+        throw TurboQuantRuntimeFailure.unsupportedAttentionShape(
+            "affine K8/Vx residual state shape does not match query head dimension"
+        )
+    }
+
+    let lanes = MLXArray(0 ..< Int32(valueGroupSize))
+        .asType(residualState.laneIndices.dtype)
+        .reshaped([1, 1, 1, 1, valueGroupSize])
+    let residualMask = expandedDimensions(residualState.laneIndices, axis: -1) .== lanes
+    var residualValues = MLX.where(
+        residualMask,
+        expandedDimensions(residualState.values, axis: -1),
+        MLXArray.zeros(
+            residualState.values.shape + [valueGroupSize],
+            dtype: residualState.values.dtype
+        )
+    ).reshaped([
+        residualState.values.dim(0),
+        residualState.values.dim(1),
+        residualState.values.dim(2),
+        headDim,
+    ])
+
+    let queryHeadCount = queries.dim(1)
+    let kvHeadCount = quantizedKeys.0.dim(1)
+    guard kvHeadCount > 0, queryHeadCount % kvHeadCount == 0 else {
+        throw TurboQuantRuntimeFailure.unsupportedAttentionShape(
+            "affine K8/Vx residual attention requires query heads to be a multiple of KV heads"
+        )
+    }
+
+    func expandTuple(
+        _ tuple: (MLXArray, MLXArray, MLXArray?),
+        axis: Int
+    ) -> (MLXArray, MLXArray, MLXArray?) {
+        (
+            expandedDimensions(tuple.0, axis: axis),
+            expandedDimensions(tuple.1, axis: axis),
+            tuple.2.map { expandedDimensions($0, axis: axis) }
+        )
+    }
+
+    let repeats = queryHeadCount / kvHeadCount
+    var q = queries * scale
+    var k = quantizedKeys
+    if repeats > 1 {
+        q = unflatten(q, axis: 1, shape: [kvHeadCount, repeats])
+        k = expandTuple(k, axis: 2)
+        residualValues = expandedDimensions(residualValues, axis: 2)
+    }
+
+    var scores = quantizedMM(
+        q,
+        k.0,
+        scales: k.1,
+        biases: k.2,
+        transpose: true,
+        groupSize: keyGroupSize,
+        bits: keyBits,
+        mode: .affine
+    )
+
+    let maskArray: MLXArray? =
+        switch mask {
+        case .none:
+            nil
+        case .causal:
+            createCausalMask(
+                n: queries.dim(2),
+                offset: max(0, quantizedKeys.0.dim(-2) - queries.dim(2))
+            )
+        case .array(let array):
+            array
+        case .arrays(let arrays):
+            arrays.first
+        }
+    if let maskArray {
+        if maskArray.dtype == .bool {
+            scores = MLX.where(
+                maskArray,
+                scores,
+                MLXArray(-Float.greatestFiniteMagnitude, dtype: scores.dtype)
+            )
+        } else {
+            scores = scores + maskArray
+        }
+    }
+
+    var weights = softmax(scores, axes: [-1], precise: true)
+    if let sparseVThreshold, sparseVThreshold > 0 {
+        weights = MLX.where(
+            weights .>= sparseVThreshold,
+            weights,
+            MLXArray.zeros(like: weights)
+        )
+    }
+
+    var correction = matmul(weights.asType(.float32), residualValues.asType(.float32))
+    if repeats > 1 {
+        correction = flatten(correction, startAxis: 1, endAxis: 2)
+    }
+    return base + correction.asType(base.dtype)
 }
 
 public func quantizedScaledDotProductAttention(
@@ -3578,7 +4646,7 @@ public func quantizedScaledDotProductAttention(
 /// Converts regular caches to quantized caches when:
 /// - kvBits is specified
 /// - The cache is not already quantized
-/// - The cache offset is greater than quantizedKVStart
+/// - The cache offset is at or beyond quantizedKVStart
 ///
 /// - Parameters:
 ///   - cache: Array of KV caches to potentially quantize
@@ -3586,12 +4654,16 @@ public func quantizedScaledDotProductAttention(
 ///   - kvGroupSize: Group size for quantization
 ///   - quantizedKVStart: Token count threshold to begin quantizing
 ///   - kvCacheStrategy: Cache strategy used for dynamic quantization
+///   - kvCodec: KV codec used for affine and TurboQuant cache conversion
 ///   - turboQuantPreset: TurboQuant preset used when `kvCacheStrategy` is `.turboQuant`
 ///   - turboQuantBackend: Requested TurboQuant backend
 ///   - turboQuantOptimizationPolicy: TurboQuant optimization policy
+///   - turboQuantFallbackPolicy: Fallback policy for compressed cache conversion and decode
 ///   - turboQuantSeed: Optional deterministic seed for TurboQuant encoding
 ///   - turboQuantValueBits: Optional value-bit override for TurboQuant caches
 ///   - turboQuantResidentBudgetBytes: Optional resident-byte budget for converted TurboQuant caches
+///   - spillMemoryWatermarkBytes: Optional live-memory watermark that triggers cache spill
+///   - kvLayerPolicy: Optional per-layer precision policy for mixed KV conversion
 public func maybeQuantizeKVCache(
     cache: inout [KVCache],
     kvBits: Int?,
@@ -3605,11 +4677,17 @@ public func maybeQuantizeKVCache(
     turboQuantFallbackPolicy: TurboQuantFallbackPolicy = .compressedDecodeAllowed,
     turboQuantSeed: UInt64? = nil,
     turboQuantValueBits: Int? = nil,
+    turboQuantPrecisionPolicy: TurboQuantKVPrecisionPolicy? = nil,
+    turboQuantValueGroupSize: Int? = nil,
+    turboQuantSparseValuePolicy: TurboQuantSparseValuePolicy = .off,
+    turboQuantSparseValueSelection: TurboQuantSparseValueSelection = .off,
     turboQuantResidentBudgetBytes: Int? = nil,
-    spillMemoryWatermarkBytes: Int? = nil
+    spillMemoryWatermarkBytes: Int? = nil,
+    kvLayerPolicy: KVLayerPolicy? = nil
 ) {
     guard !cache.isEmpty else { return }
-    if kvCacheStrategy == .hybridTurboQuant { return }
+    let hasLayerPolicy = kvLayerPolicy != nil
+    if kvCacheStrategy == .hybridTurboQuant && !hasLayerPolicy { return }
     // 2A spill: when live available memory falls below the watermark, re-encode the FP16 cache to
     // compressed mid-generation — even a plain-FP16 (.none) cache that fit at admission but outgrew
     // its projection. This converts an impending OOM into a graceful precision/throughput tradeoff.
@@ -3618,22 +4696,61 @@ public func maybeQuantizeKVCache(
         guard let watermark = spillMemoryWatermarkBytes, watermark > 0 else { return false }
         return turboQuantAvailableProcessMemoryBytes() < watermark
     }()
-    if kvCacheStrategy == .none && !underMemoryPressure { return }
-    let useAffineK8V4 = kvCacheStrategy == .affineK8V4
+    if kvCacheStrategy == .none && !underMemoryPressure && !hasLayerPolicy { return }
+    let useAffineK8Vx = kvCacheStrategy.createsAffineK8VxCacheImmediately
     let useAffineInt4 = kvCacheStrategy == .affineInt4
     let spillToTurboQuant =
         kvCacheStrategy.canUseTurboQuant || (kvCacheStrategy == .none && underMemoryPressure)
     let resolvedBits =
-        useAffineK8V4 ? TurboQuantKVCodec.affineK8V4KeyBits
+        useAffineK8Vx ? TurboQuantKVCodec.affineK8V4KeyBits
         : useAffineInt4 ? TurboQuantKVCodec.affineInt4Bits
         : (spillToTurboQuant ? turboQuantPreset.effectiveBits : kvBits)
-    guard let kvBits = resolvedBits else { return }
     // Under memory pressure, spill immediately — ignore the static token threshold.
     let effectiveQuantizedKVStart = underMemoryPressure ? 0 : quantizedKVStart
+    let affineK8VxValueBits = resolvedAffineK8VxValueBits(
+        kvCodec: kvCodec,
+        requestedValueBits: turboQuantValueBits
+    )
+    let affineK8VxValueGroupSize = resolvedAffineK8VxValueGroupSize(
+        requestedValueGroupSize: turboQuantValueGroupSize
+    )
+    let affineBoundaryMetadata: (protectedLayerCount: Int, reason: String?) = {
+        guard let kvLayerPolicy else { return (0, nil) }
+        let protectedLayerCount = cache.indices.filter { layerIndex in
+            switch kvLayerPolicy.codec(forLayerIndex: layerIndex) {
+            case .affineK8V4:
+                true
+            default:
+                false
+            }
+        }.count
+        guard protectedLayerCount > 0 else { return (0, nil) }
+        return (
+            protectedLayerCount,
+            "K8/V4 boundary protection for low-bit K/V policy"
+        )
+    }()
 
-    func isReadyForQuantization(_ item: KVCache) -> Bool {
+    func policyCodec(for layerIndex: Int) -> KVLayerCodec? {
+        guard let kvLayerPolicy else { return nil }
+        let codec = kvLayerPolicy.codec(forLayerIndex: layerIndex)
+        if case .inherit = codec { return nil }
+        return codec
+    }
+
+    func codecRequiresConversion(_ codec: KVLayerCodec) -> Bool {
+        switch codec {
+        case .inherit, .rawFP16:
+            false
+        case .mlxAffine, .affineK8V4, .affineK8Vx, .affineK8VxResidual, .affineInt4,
+            .turboQuant:
+            true
+        }
+    }
+
+    func isReadyForQuantization(_ item: KVCache, layerIndex: Int) -> Bool {
         if let list = item as? CacheList {
-            return list.children.contains(where: isReadyForQuantization)
+            return list.children.contains { isReadyForQuantization($0, layerIndex: layerIndex) }
         }
         if item is RawOnlyKVCache {
             return false
@@ -3641,18 +4758,23 @@ public func maybeQuantizeKVCache(
         if item is QuantizedKVCacheProtocol {
             return false
         }
+        if let codec = policyCodec(for: layerIndex) {
+            guard codecRequiresConversion(codec) else { return false }
+        } else if resolvedBits == nil {
+            return false
+        }
         if item is KVCacheSimple {
-            return item.offset > effectiveQuantizedKVStart
+            return item.offset > 0 && item.offset >= effectiveQuantizedKVStart
         }
         if item is RotatingKVCache {
-            return item.offset > effectiveQuantizedKVStart
+            return item.offset > 0 && item.offset >= effectiveQuantizedKVStart
         }
         return false
     }
 
-    func convertedCache(_ item: KVCache) -> KVCache {
+    func convertedCache(_ item: KVCache, layerIndex: Int) -> KVCache {
         if let list = item as? CacheList {
-            list.replaceChildren(convertedCache)
+            list.replaceChildren { convertedCache($0, layerIndex: layerIndex) }
             return list
         }
         if item is RawOnlyKVCache {
@@ -3661,9 +4783,143 @@ public func maybeQuantizeKVCache(
         if item is QuantizedKVCacheProtocol {
             return item
         }
+        if let codec = policyCodec(for: layerIndex) {
+            switch codec {
+            case .inherit, .rawFP16:
+                return item
+            case .mlxAffine(let bits, let groupSize):
+                if let simpleCache = item as? KVCacheSimple {
+                    return simpleCache.toQuantized(groupSize: groupSize, bits: bits)
+                }
+                if let rotatingCache = item as? RotatingKVCache {
+                    return rotatingCache.toQuantized(groupSize: groupSize, bits: bits)
+                }
+            case .affineK8V4:
+                if let simpleCache = item as? KVCacheSimple {
+                    return simpleCache.toAffineK8V4(
+                        sparseValuePolicy: turboQuantSparseValuePolicy,
+                        layerIndex: layerIndex,
+                        boundaryProtectedLayerCount: affineBoundaryMetadata.protectedLayerCount,
+                        boundaryProtectionReason: affineBoundaryMetadata.reason
+                    )
+                }
+                if let rotatingCache = item as? RotatingKVCache {
+                    return rotatingCache.toAffineK8V4(
+                        sparseValuePolicy: turboQuantSparseValuePolicy,
+                        layerIndex: layerIndex,
+                        boundaryProtectedLayerCount: affineBoundaryMetadata.protectedLayerCount,
+                        boundaryProtectionReason: affineBoundaryMetadata.reason
+                    )
+                }
+            case .affineK8Vx(let valueBits):
+                let resolvedValueBits = (
+                    TurboQuantKVCodec.affineK8VxSupportedValueBits.contains(valueBits)
+                        ? valueBits : TurboQuantKVCodec.affineK8V4ValueBits
+                )
+                if let simpleCache = item as? KVCacheSimple {
+                    return simpleCache.toAffineK8V4(
+                        valueBits: resolvedValueBits,
+                        valueGroupSize: affineK8VxValueGroupSize,
+                        sparseValuePolicy: turboQuantSparseValuePolicy,
+                        layerIndex: layerIndex,
+                        boundaryProtectedLayerCount: affineBoundaryMetadata.protectedLayerCount,
+                        boundaryProtectionReason: affineBoundaryMetadata.reason
+                    )
+                }
+                if let rotatingCache = item as? RotatingKVCache {
+                    return rotatingCache.toAffineK8V4(
+                        valueBits: resolvedValueBits,
+                        valueGroupSize: affineK8VxValueGroupSize,
+                        sparseValuePolicy: turboQuantSparseValuePolicy,
+                        layerIndex: layerIndex,
+                        boundaryProtectedLayerCount: affineBoundaryMetadata.protectedLayerCount,
+                        boundaryProtectionReason: affineBoundaryMetadata.reason
+                    )
+                }
+            case .affineK8VxResidual(let valueBits, let residualsPerGroup):
+                let resolvedValueBits = valueBits == 2 ? valueBits : 2
+                let resolvedResidualsPerGroup = residualsPerGroup == 1 ? 1 : 0
+                if let simpleCache = item as? KVCacheSimple {
+                    return simpleCache.toAffineK8V4(
+                        valueBits: resolvedValueBits,
+                        residualsPerGroup: resolvedResidualsPerGroup,
+                        sparseValuePolicy: turboQuantSparseValuePolicy,
+                        layerIndex: layerIndex,
+                        boundaryProtectedLayerCount: affineBoundaryMetadata.protectedLayerCount,
+                        boundaryProtectionReason: affineBoundaryMetadata.reason
+                    )
+                }
+                if let rotatingCache = item as? RotatingKVCache {
+                    return rotatingCache.toAffineK8V4(
+                        valueBits: resolvedValueBits,
+                        residualsPerGroup: resolvedResidualsPerGroup,
+                        sparseValuePolicy: turboQuantSparseValuePolicy,
+                        layerIndex: layerIndex,
+                        boundaryProtectedLayerCount: affineBoundaryMetadata.protectedLayerCount,
+                        boundaryProtectionReason: affineBoundaryMetadata.reason
+                    )
+                }
+            case .affineInt4:
+                let groupSize = resolvedAffineInt4GroupSize(
+                    kvGroupSize: kvGroupSize,
+                    kvBits: TurboQuantKVCodec.affineInt4Bits,
+                    kvCodec: .affineInt4
+                )
+                if let simpleCache = item as? KVCacheSimple {
+                    return simpleCache.toAffineInt4(groupSize: groupSize)
+                }
+                if let rotatingCache = item as? RotatingKVCache {
+                    return rotatingCache.toAffineInt4(groupSize: groupSize)
+                }
+            case .turboQuant(let preset, let valueBits, let groupSize, let backend):
+                if let simpleCache = item as? KVCacheSimple {
+                    return simpleCache.toTurboQuant(
+                        preset: preset,
+                        groupSize: groupSize,
+                        backend: backend,
+                        kvCodec: turboQuantCompressedKVCodec(backend: backend),
+                        optimizationPolicy: turboQuantOptimizationPolicy,
+                        fallbackPolicy: turboQuantFallbackPolicy,
+                        seed: turboQuantSeed ?? defaultTurboQuantSeed,
+                        valueBits: valueBits,
+                        precisionPolicy: turboQuantPrecisionPolicy,
+                        sparseValuePolicy: turboQuantSparseValuePolicy,
+                        sparseValueSelection: turboQuantSparseValueSelection,
+                        layerIndex: layerIndex,
+                        residentBudgetBytes: turboQuantResidentBudgetBytes
+                    )
+                }
+                if let rotatingCache = item as? RotatingKVCache {
+                    return rotatingCache.toTurboQuant(
+                        preset: preset,
+                        groupSize: groupSize,
+                        backend: backend,
+                        kvCodec: turboQuantCompressedKVCodec(backend: backend),
+                        optimizationPolicy: turboQuantOptimizationPolicy,
+                        fallbackPolicy: turboQuantFallbackPolicy,
+                        seed: turboQuantSeed ?? defaultTurboQuantSeed,
+                        valueBits: valueBits,
+                        precisionPolicy: turboQuantPrecisionPolicy,
+                        sparseValuePolicy: turboQuantSparseValuePolicy,
+                        sparseValueSelection: turboQuantSparseValueSelection,
+                        layerIndex: layerIndex,
+                        residentBudgetBytes: turboQuantResidentBudgetBytes
+                    )
+                }
+            }
+            return item
+        }
+        guard let kvBits = resolvedBits else { return item }
         if let simpleCache = item as? KVCacheSimple {
-            if useAffineK8V4 {
-                return simpleCache.toAffineK8V4()
+            if useAffineK8Vx {
+                return simpleCache.toAffineK8V4(
+                    valueBits: affineK8VxValueBits,
+                    valueGroupSize: affineK8VxValueGroupSize,
+                    sparseValuePolicy: turboQuantSparseValuePolicy,
+                    layerIndex: layerIndex,
+                    boundaryProtectedLayerCount: affineBoundaryMetadata.protectedLayerCount,
+                    boundaryProtectionReason: affineBoundaryMetadata.reason
+                )
             }
             if useAffineInt4 {
                 return simpleCache.toAffineInt4(
@@ -3679,10 +4935,15 @@ public func maybeQuantizeKVCache(
                     preset: turboQuantPreset,
                     groupSize: kvGroupSize,
                     backend: turboQuantBackend,
+                    kvCodec: kvCodec,
                     optimizationPolicy: turboQuantOptimizationPolicy,
                     fallbackPolicy: turboQuantFallbackPolicy,
                     seed: turboQuantSeed ?? defaultTurboQuantSeed,
                     valueBits: turboQuantValueBits,
+                    precisionPolicy: turboQuantPrecisionPolicy,
+                    sparseValuePolicy: turboQuantSparseValuePolicy,
+                    sparseValueSelection: turboQuantSparseValueSelection,
+                    layerIndex: layerIndex,
                     residentBudgetBytes: turboQuantResidentBudgetBytes
                 )
             }
@@ -3693,16 +4954,28 @@ public func maybeQuantizeKVCache(
                 preset: turboQuantPreset,
                 groupSize: kvGroupSize,
                 backend: turboQuantBackend,
+                kvCodec: kvCodec,
                 optimizationPolicy: turboQuantOptimizationPolicy,
                 fallbackPolicy: turboQuantFallbackPolicy,
                 seed: turboQuantSeed ?? defaultTurboQuantSeed,
                 valueBits: turboQuantValueBits,
+                precisionPolicy: turboQuantPrecisionPolicy,
+                sparseValuePolicy: turboQuantSparseValuePolicy,
+                sparseValueSelection: turboQuantSparseValueSelection,
+                layerIndex: layerIndex,
                 residentBudgetBytes: turboQuantResidentBudgetBytes
             )
         }
         if let rotatingCache = item as? RotatingKVCache {
-            if useAffineK8V4 {
-                return rotatingCache.toAffineK8V4()
+            if useAffineK8Vx {
+                return rotatingCache.toAffineK8V4(
+                    valueBits: affineK8VxValueBits,
+                    valueGroupSize: affineK8VxValueGroupSize,
+                    sparseValuePolicy: turboQuantSparseValuePolicy,
+                    layerIndex: layerIndex,
+                    boundaryProtectedLayerCount: affineBoundaryMetadata.protectedLayerCount,
+                    boundaryProtectionReason: affineBoundaryMetadata.reason
+                )
             }
             if useAffineInt4 {
                 return rotatingCache.toAffineInt4(
@@ -3718,9 +4991,19 @@ public func maybeQuantizeKVCache(
         return item
     }
 
-    guard cache.contains(where: isReadyForQuantization) else { return }
-
-    for i in 0 ..< cache.count {
-        cache[i] = convertedCache(cache[i])
+    guard cache.indices.contains(where: { isReadyForQuantization(cache[$0], layerIndex: $0) }) else {
+        return
     }
+
+    let timingStart = TurboQuantTiming.start()
+    for i in 0 ..< cache.count {
+        cache[i] = convertedCache(cache[i], layerIndex: i)
+    }
+    let convertedState = cache.flatMap { $0.state }
+    if !convertedState.isEmpty {
+        eval(convertedState)
+        Stream.gpu.synchronize()
+        Memory.clearCache()
+    }
+    TurboQuantTiming.record(.dynamicCacheQuantization, startedAt: timingStart)
 }

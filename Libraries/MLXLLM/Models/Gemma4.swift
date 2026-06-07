@@ -61,7 +61,7 @@ public class Gemma4Model: Module, LLMModel, KVCacheDimensionProvider,
         do {
             return try callAsFunctionThrowing(inputs, cache: cache)
         } catch {
-            fatalError(String(describing: error))
+            nonThrowingLanguageModelRuntimeFailure(error, owner: type(of: self))
         }
     }
 

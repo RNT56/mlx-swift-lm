@@ -35,7 +35,11 @@ struct QwenProofCase: Codable {
     var valuePrecision: String = "turbo4v2"
     var backend: String = TurboQuantBackend.metalPolarQJL.rawValue
     var sparseVEnabled: Bool = false
+    var sparseVSelectionMode: String = "off"
     var sparseVThreshold: Float? = nil
+    var sparseVTopK: Int? = nil
+    var sparseVCumulativeMassPercent: Double? = nil
+    var sparseVMaxTopK: Int? = nil
     var sparseVSkipRatio: Double = 0
     var boundaryProtectedLayerCount: Int = 0
     var boundaryProtectionReason: String? = nil
@@ -115,8 +119,20 @@ struct QwenProofResult: Codable {
     var codec: String? = nil
     var backend: String? = nil
     var sparseVEnabled: Bool = false
+    var sparseVSelectionMode: String = "off"
     var sparseVThreshold: Float? = nil
+    var sparseVTopK: Int? = nil
+    var sparseVCumulativeMassPercent: Double? = nil
+    var sparseVMaxTopK: Int? = nil
     var sparseVSkipRatio: Double = 0
+    var sparseVSkippedValueTokens: Int? = nil
+    var sparseVTotalValueTokens: Int? = nil
+    var sparseVRetainedMass: Double? = nil
+    var sparseVDenseCosineSimilarity: Double? = nil
+    var sparseVDenseMaxAbsErrorP95: Double? = nil
+    var sparseVHeadDiagnostics: [QwenProofSparseHeadDiagnostics]? = nil
+    var lowerVAndSparseV: QwenProofLowerVAndSparseVReport? = nil
+    var nativeAttentionDiagnostics: [Int]? = nil
     var boundaryProtectedLayerCount: Int = 0
     var boundaryProtectionReason: String? = nil
     var decodedActiveKVBytes: Int? = nil
@@ -126,6 +142,43 @@ struct QwenProofResult: Codable {
     var memory: QwenProofMemory?
     var fallbackReason: String?
     var error: String?
+}
+
+struct QwenProofLowerVAndSparseVReport: Codable {
+    var referenceConfig: String
+    var candidateConfig: String
+    var valueBits: Int?
+    var valueBitPolicy: String?
+    var sparseVMode: String?
+    var sparseVTopK: Int?
+    var sparseVCumulativeMass: Double?
+    var sparseVMaxTopK: Int?
+    var selectionLatencyMS: Double?
+    var qkMS: Double?
+    var softmaxMS: Double?
+    var maskOrCompactionMS: Double?
+    var avLatencyMS: Double?
+    var totalMS: Double?
+    var denseK8V4ReferenceMS: Double?
+    var skippedValueTokens: Int?
+    var consideredValueTokens: Int?
+    var retainedMass: Double?
+    var skipRatio: Double?
+    var fallbackCount: Int
+    var fallbackReason: String?
+    var actualMixedBitsPerValue: Double?
+    var layerIndex: Int?
+    var headIndex: Int?
+}
+
+struct QwenProofSparseHeadDiagnostics: Codable {
+    var layerIndex: Int
+    var headIndex: Int
+    var skippedValueTokens: Int
+    var totalValueTokens: Int
+    var retainedMass: Double?
+    var maxOutputError: Double?
+    var cosineSimilarity: Double?
 }
 
 struct QwenProofSummary: Codable {
@@ -156,6 +209,10 @@ struct QwenProofReport: Codable {
     var requestedRuntimeMode: String
     var sparseValuePolicy: String
     var sparseValueThreshold: Float
+    var sparseValueSelectionMode: String
+    var sparseValueTopK: Int?
+    var sparseValueCumulativeMassPercent: Double?
+    var sparseValueMaxTopK: Int?
     var codec: String
     var productionContexts: [Int]
     var largeContextExperimentContexts: [Int]
@@ -209,6 +266,157 @@ enum QwenProofAttentionPath: String, CaseIterable {
     }
 }
 
+enum QwenProofSparseSelectionMode: String, Codable, Equatable {
+    case off
+    case threshold
+    case topK = "top_k"
+    case cumulativeMass = "cumulative_mass"
+    case hybridCumulativeMassTopK = "hybrid_cumulative_mass_top_k"
+
+    init?(normalizing value: String) {
+        switch value.lowercased().replacingOccurrences(of: "_", with: "-") {
+        case "off", "false", "none", "0":
+            self = .off
+        case "threshold", "weight-threshold", "softmax-threshold":
+            self = .threshold
+        case "top-k", "topk":
+            self = .topK
+        case "cumulative", "cumulative-mass", "mass":
+            self = .cumulativeMass
+        case "hybrid", "hybrid-cumulative", "hybrid-cumulative-mass-top-k":
+            self = .hybridCumulativeMassTopK
+        default:
+            return nil
+        }
+    }
+
+    var nativeMode: TurboQuantSparseValueNativeSelectionMode {
+        switch self {
+        case .off:
+            return .off
+        case .threshold:
+            return .threshold
+        case .topK:
+            return .topK
+        case .cumulativeMass:
+            return .cumulativeMass
+        case .hybridCumulativeMassTopK:
+            return .hybridCumulativeMassTopK
+        }
+    }
+
+    var reportName: String {
+        switch self {
+        case .off:
+            return "off"
+        case .threshold:
+            return "threshold"
+        case .topK:
+            return "topK"
+        case .cumulativeMass:
+            return "cumulativeMass"
+        case .hybridCumulativeMassTopK:
+            return "hybridCumulativeMassTopK"
+        }
+    }
+}
+
+struct QwenProofSparseSelectionConfig: Codable, Equatable {
+    var mode: QwenProofSparseSelectionMode
+    var threshold: Float?
+    var topK: Int?
+    /// Percent mass to retain. For example, 99.5 means retain 99.5% of softmax mass.
+    var cumulativeMassPercent: Double?
+    var maxTopK: Int?
+
+    static let off = QwenProofSparseSelectionConfig(mode: .off)
+
+    var isEnabled: Bool {
+        mode != .off
+    }
+
+    var idSuffix: String {
+        switch mode {
+        case .off:
+            return ""
+        case .threshold:
+            return "_sparseThreshold"
+        case .topK:
+            return "_sparseTopK\(topK ?? 0)"
+        case .cumulativeMass:
+            let mass = cumulativeMassPercent.map { String(format: "%.3g", $0) } ?? "0"
+            return "_sparseMass\(mass)"
+        case .hybridCumulativeMassTopK:
+            let mass = cumulativeMassPercent.map { String(format: "%.3g", $0) } ?? "0"
+            return "_sparseHybrid\(mass)_topK\(maxTopK ?? 0)"
+        }
+    }
+
+    var nativeTopK: Int {
+        switch mode {
+        case .topK:
+            return max(0, topK ?? 0)
+        case .hybridCumulativeMassTopK:
+            return max(0, maxTopK ?? topK ?? 0)
+        case .off, .threshold, .cumulativeMass:
+            return 0
+        }
+    }
+
+    var nativeCumulativeMass: Float {
+        switch mode {
+        case .cumulativeMass, .hybridCumulativeMassTopK:
+            return Float(min(1, max(0, (cumulativeMassPercent ?? 0) / 100)))
+        case .off, .threshold, .topK:
+            return 0
+        }
+    }
+
+    var nativeMaxTopK: Int {
+        switch mode {
+        case .hybridCumulativeMassTopK:
+            return max(0, maxTopK ?? topK ?? 0)
+        case .off, .threshold, .topK, .cumulativeMass:
+            return 0
+        }
+    }
+
+    func enabledFor(runtimeMode: TurboQuantRuntimeMode, queryLength: Int) -> Bool {
+        guard isEnabled, queryLength == 1 else { return false }
+        return runtimeMode == .capacityTurboQuant
+    }
+
+    func resolvedThreshold(
+        policy: TurboQuantSparseValuePolicy,
+        runtimeMode: TurboQuantRuntimeMode,
+        contextLength: Int
+    ) -> Float? {
+        guard mode == .threshold else { return nil }
+        return threshold
+            ?? policy.resolvedThreshold(runtimeMode: runtimeMode, contextLength: contextLength)
+    }
+
+    func nativeOptions(
+        scale: Float,
+        causal: Bool,
+        threshold: Float?,
+        diagnostics: Bool,
+        backendVersion: Int?
+    ) -> TurboQuantNativeAttentionOptions {
+        TurboQuantNativeAttentionOptions(
+            scale: scale,
+            causal: causal,
+            sparseVThreshold: threshold ?? 0,
+            sparseVSelectionMode: mode.nativeMode,
+            sparseVTopK: nativeTopK,
+            sparseVCumulativeMass: nativeCumulativeMass,
+            sparseVMaxTopK: nativeMaxTopK,
+            diagnostics: diagnostics,
+            backendVersion: backendVersion ?? TurboQuantNativeAttentionOptions.backendVersion
+        )
+    }
+}
+
 func argumentValue(_ name: String, default defaultValue: Int) -> Int {
     let arguments = CommandLine.arguments
     guard let index = arguments.firstIndex(of: name), arguments.indices.contains(index + 1),
@@ -229,6 +437,19 @@ func argumentValue(_ name: String, default defaultValue: Double) -> Double {
     return value
 }
 
+func optionalArgumentString(_ name: String) -> String? {
+    let arguments = CommandLine.arguments
+    guard let index = arguments.firstIndex(of: name), arguments.indices.contains(index + 1) else {
+        return nil
+    }
+    return arguments[index + 1]
+}
+
+func optionalArgumentValue(_ name: String) -> Double? {
+    guard let raw = optionalArgumentString(name) else { return nil }
+    return Double(raw)
+}
+
 func argumentValues(_ name: String, default defaultValue: [Int]) -> [Int] {
     let arguments = CommandLine.arguments
     guard let index = arguments.firstIndex(of: name), arguments.indices.contains(index + 1) else {
@@ -247,6 +468,13 @@ func optionalPositiveArgumentValue(_ name: String) -> Int? {
         return nil
     }
     return value
+}
+
+func normalizedPercentArgument(_ name: String) -> Double? {
+    guard let value = optionalArgumentValue(name), value.isFinite, value > 0 else {
+        return nil
+    }
+    return min(100, value <= 1 ? value * 100 : value)
 }
 
 func uniqueSorted(_ values: [Int]) -> [Int] {
@@ -407,6 +635,78 @@ func sparseValuePolicyName(_ policy: TurboQuantSparseValuePolicy) -> String {
         return "auto"
     case .force:
         return "force"
+    }
+}
+
+func valueBitPolicyName(valueBits: Int?) -> String? {
+    guard let valueBits else { return nil }
+    switch valueBits {
+    case 4...:
+        return "denseV4"
+    case 3:
+        return "calibratedV3"
+    default:
+        return "calibratedV2"
+    }
+}
+
+func argumentSparseSelectionConfig(
+    policy: TurboQuantSparseValuePolicy,
+    threshold: Float
+) -> QwenProofSparseSelectionConfig {
+    let explicitMode = optionalArgumentString("--sparse-v-mode")
+        .flatMap(QwenProofSparseSelectionMode.init(normalizing:))
+    let topK = optionalPositiveArgumentValue("--sparse-v-top-k")
+    let maxTopK =
+        optionalPositiveArgumentValue("--sparse-v-max-top-k")
+        ?? optionalPositiveArgumentValue("--sparse-v-hybrid-top-k")
+    let cumulativeMass =
+        normalizedPercentArgument("--sparse-v-cumulative-mass")
+        ?? normalizedPercentArgument("--sparse-v-mass")
+    let hybridMass =
+        normalizedPercentArgument("--sparse-v-hybrid-mass")
+        ?? normalizedPercentArgument("--sparse-v-cumulative-floor")
+
+    let mode: QwenProofSparseSelectionMode
+    if let explicitMode {
+        mode = explicitMode
+    } else if hybridMass != nil || maxTopK != nil && cumulativeMass != nil {
+        mode = .hybridCumulativeMassTopK
+    } else if topK != nil {
+        mode = .topK
+    } else if cumulativeMass != nil {
+        mode = .cumulativeMass
+    } else if policy != .off {
+        mode = .threshold
+    } else {
+        mode = .off
+    }
+
+    switch mode {
+    case .off:
+        return .off
+    case .threshold:
+        return QwenProofSparseSelectionConfig(
+            mode: .threshold,
+            threshold: policy.threshold ?? threshold
+        )
+    case .topK:
+        return QwenProofSparseSelectionConfig(
+            mode: .topK,
+            topK: topK ?? maxTopK ?? 256
+        )
+    case .cumulativeMass:
+        return QwenProofSparseSelectionConfig(
+            mode: .cumulativeMass,
+            cumulativeMassPercent: cumulativeMass ?? hybridMass ?? 99.5
+        )
+    case .hybridCumulativeMassTopK:
+        return QwenProofSparseSelectionConfig(
+            mode: .hybridCumulativeMassTopK,
+            topK: topK,
+            cumulativeMassPercent: hybridMass ?? cumulativeMass ?? 99.5,
+            maxTopK: maxTopK ?? topK ?? 256
+        )
     }
 }
 
@@ -662,14 +962,18 @@ func qualityGate(
             maxError = max(maxError, abs(c - r))
         }
         let denominator = sqrt(candidateNorm) * sqrt(referenceNorm)
-        cosineTotal += denominator > 0 ? dot / denominator : 0
+        let rowCosine = denominator.isFinite && denominator > 0 ? dot / denominator : 0
+        cosineTotal += rowCosine.isFinite ? rowCosine : 0
         maxErrors.append(maxError)
     }
 
     let top1 = Double(top1Matches) / Double(max(1, rowCount))
-    let kl = klTotal / Double(max(1, rowCount))
-    let cosine = cosineTotal / Double(max(1, rowCount))
-    let p95 = percentile(maxErrors, percentile: 0.95)
+    let rawKL = klTotal / Double(max(1, rowCount))
+    let kl = rawKL.isFinite ? rawKL : Double.greatestFiniteMagnitude
+    let rawCosine = cosineTotal / Double(max(1, rowCount))
+    let cosine = rawCosine.isFinite ? rawCosine : 0
+    let rawP95 = percentile(maxErrors, percentile: 0.95)
+    let p95 = rawP95.isFinite ? rawP95 : Double.greatestFiniteMagnitude
     let finite =
         candidateValues.allSatisfy(\.isFinite) && referenceValues.allSatisfy(\.isFinite)
     let passed: Bool
@@ -691,14 +995,231 @@ func qualityGate(
     )
 }
 
+func sortedWeightIndexes(_ weights: [Double], limit: Int) -> [Int] {
+    guard limit > 0 else { return [] }
+    return weights.indices.sorted {
+        let lhs = weights[$0]
+        let rhs = weights[$1]
+        return lhs == rhs ? $0 < $1 : lhs > rhs
+    }.prefix(limit).map { $0 }
+}
+
+func cumulativeWeightIndexes(
+    _ weights: [Double],
+    target: Double,
+    limit: Int?
+) -> [Int] {
+    let capped = limit.map { max(0, $0) } ?? weights.count
+    guard capped > 0, target > 0 else { return [] }
+    let sorted = weights.indices.sorted {
+        let lhs = weights[$0]
+        let rhs = weights[$1]
+        return lhs == rhs ? $0 < $1 : lhs > rhs
+    }
+    var retained: [Int] = []
+    retained.reserveCapacity(min(capped, sorted.count))
+    var mass = 0.0
+    for index in sorted.prefix(capped) {
+        retained.append(index)
+        mass += weights[index]
+        if mass >= target {
+            break
+        }
+    }
+    return retained
+}
+
+func sparseSelectedIndexes(
+    weights: [Double],
+    config: QwenProofSparseSelectionConfig,
+    threshold: Float?
+) -> [Int] {
+    func indexes(atOrAbove cutoff: Double) -> [Int] {
+        guard cutoff.isFinite else { return [] }
+        return weights.indices.filter { weights[$0] >= cutoff }
+    }
+
+    func rankedCutoff(limit: Int, cumulativeTarget: Double?) -> Double {
+        let uniqueWeights = Array(Set(weights.filter { $0 > 0 })).sorted(by: >)
+        let capped = min(max(0, limit), uniqueWeights.count)
+        guard capped > 0 else { return Double.infinity }
+        var cutoff = Double.infinity
+        var retainedMass = 0.0
+        for weight in uniqueWeights.prefix(capped) {
+            cutoff = weight
+            retainedMass += weight
+            if let cumulativeTarget, retainedMass >= cumulativeTarget {
+                break
+            }
+        }
+        return cutoff
+    }
+
+    func cumulativeCutoff(target: Double) -> Double {
+        if target <= 0 {
+            return Double.infinity
+        }
+        if target >= 1 {
+            return 0
+        }
+        var low = 0.0
+        var high = weights.max() ?? 0
+        for _ in 0 ..< 24 {
+            let mid = 0.5 * (low + high)
+            let mass = weights.reduce(0.0) { $0 + ($1 >= mid ? $1 : 0) }
+            if mass >= target {
+                low = mid
+            } else {
+                high = mid
+            }
+        }
+        return low
+    }
+
+    switch config.mode {
+    case .off:
+        return Array(weights.indices)
+    case .threshold:
+        let cutoff = Double(max(0, threshold ?? config.threshold ?? 0))
+        return indexes(atOrAbove: cutoff)
+    case .topK:
+        return indexes(atOrAbove: rankedCutoff(limit: config.topK ?? 0, cumulativeTarget: nil))
+    case .cumulativeMass:
+        let target = min(1, max(0, (config.cumulativeMassPercent ?? 0) / 100))
+        return indexes(atOrAbove: cumulativeCutoff(target: target))
+    case .hybridCumulativeMassTopK:
+        let target = min(1, max(0, (config.cumulativeMassPercent ?? 0) / 100))
+        let limit = min(max(0, config.maxTopK ?? config.topK ?? 0), weights.count)
+        return indexes(atOrAbove: rankedCutoff(limit: limit, cumulativeTarget: target))
+    }
+}
+
+func sparseSelectionDiagnostics(
+    weights: MLXArray,
+    config: QwenProofSparseSelectionConfig,
+    threshold: Float?,
+    selectedOutput: MLXArray?,
+    denseOutput: MLXArray?,
+    queryHeadCount: Int,
+    queryLength: Int,
+    headDimension: Int
+) -> (TurboQuantSparseValueDiagnostics, [QwenProofSparseHeadDiagnostics]) {
+    eval(weights)
+    if let selectedOutput {
+        eval(selectedOutput)
+    }
+    if let denseOutput {
+        eval(denseOutput)
+    }
+
+    let columns = max(1, weights.dim(-1))
+    let weightValues = weights.asArray(Float.self).map(Double.init)
+    let rows = max(1, weightValues.count / columns)
+    let selectedValues = selectedOutput?.asArray(Float.self).map(Double.init)
+    let denseValues = denseOutput?.asArray(Float.self).map(Double.init)
+
+    struct HeadAccumulator {
+        var skipped = 0
+        var considered = 0
+        var retainedMass = 0.0
+        var rows = 0
+        var maxOutputError = 0.0
+        var cosineTotal = 0.0
+        var qualityRows = 0
+    }
+
+    var skipped = 0
+    var considered = 0
+    var retainedMassTotal = 0.0
+    var heads = Array(repeating: HeadAccumulator(), count: max(1, queryHeadCount))
+
+    for row in 0 ..< rows {
+        let start = row * columns
+        let end = min(weightValues.count, start + columns)
+        guard start < end else { continue }
+        let rowWeights = Array(weightValues[start ..< end])
+        let retainedIndexes = sparseSelectedIndexes(
+            weights: rowWeights,
+            config: config,
+            threshold: threshold
+        )
+        let retainedMass = retainedIndexes.reduce(0.0) { $0 + rowWeights[$1] }
+        let rowSkipped = rowWeights.count - retainedIndexes.count
+        let headIndex = min(heads.count - 1, (row / max(1, queryLength)) % max(1, queryHeadCount))
+
+        skipped += rowSkipped
+        considered += rowWeights.count
+        retainedMassTotal += retainedMass
+        heads[headIndex].skipped += rowSkipped
+        heads[headIndex].considered += rowWeights.count
+        heads[headIndex].retainedMass += retainedMass
+        heads[headIndex].rows += 1
+
+        guard let selectedValues, let denseValues else { continue }
+        let outputStart = row * headDimension
+        let outputEnd = min(selectedValues.count, outputStart + headDimension)
+        guard outputStart < outputEnd, outputEnd <= denseValues.count else { continue }
+        var dot = 0.0
+        var selectedNorm = 0.0
+        var denseNorm = 0.0
+        var maxError = 0.0
+        for index in outputStart ..< outputEnd {
+            let candidate = selectedValues[index]
+            let reference = denseValues[index]
+            dot += candidate * reference
+            selectedNorm += candidate * candidate
+            denseNorm += reference * reference
+            maxError = max(maxError, abs(candidate - reference))
+        }
+        let denominator = sqrt(selectedNorm) * sqrt(denseNorm)
+        let cosine = denominator.isFinite && denominator > 0 ? dot / denominator : 0
+        heads[headIndex].maxOutputError = max(heads[headIndex].maxOutputError, maxError)
+        heads[headIndex].cosineTotal += cosine.isFinite ? cosine : 0
+        heads[headIndex].qualityRows += 1
+    }
+
+    let diagnostics = TurboQuantSparseValueDiagnostics(
+        enabled: config.isEnabled,
+        threshold: threshold ?? config.threshold,
+        skipped: skipped,
+        considered: considered,
+        retainedMass: retainedMassTotal / Double(max(1, rows))
+    )
+    let headDiagnostics = heads.enumerated().map { index, head in
+        QwenProofSparseHeadDiagnostics(
+            layerIndex: 0,
+            headIndex: index,
+            skippedValueTokens: head.skipped,
+            totalValueTokens: head.considered,
+            retainedMass: head.rows > 0 ? head.retainedMass / Double(head.rows) : nil,
+            maxOutputError: head.qualityRows > 0 ? head.maxOutputError : nil,
+            cosineSimilarity: head.qualityRows > 0
+                ? head.cosineTotal / Double(head.qualityRows)
+                : nil
+        )
+    }
+    return (diagnostics, headDiagnostics)
+}
+
 func compressedAttentionPathName(
     queries: MLXArray,
     keyCode: TurboQuantAttentionCode,
     valueCode: TurboQuantAttentionCode,
     preferOnlineFused: Bool,
+    sparseVThreshold: Float?,
     availability: TurboQuantKernelAvailability
 ) -> String {
     do {
+        let resolvedSparseVThreshold: Float?
+        if let sparseVThreshold, sparseVThreshold > 0,
+            queries.dim(2) == 1,
+            keyCode.layout.headDimension == valueCode.layout.headDimension,
+            keyCode.layout.logicalLength == valueCode.layout.logicalLength
+        {
+            resolvedSparseVThreshold = sparseVThreshold
+        } else {
+            resolvedSparseVThreshold = nil
+        }
         let decision = try turboQuantAttentionDecision(
             request: TurboQuantAttentionRequest(
                 queryShape: queries.shape,
@@ -708,9 +1229,10 @@ func compressedAttentionPathName(
                 outputDType: queries.dtype,
                 maskKind: .causal,
                 hasSinks: false,
-                preferOnlineFused: preferOnlineFused,
+                preferOnlineFused: preferOnlineFused && resolvedSparseVThreshold == nil,
                 memoryBudgetBytes: nil,
-                fallbackState: .none
+                fallbackState: .none,
+                sparseVThreshold: resolvedSparseVThreshold
             ),
             capabilities: availability.attentionCapabilities
         )
@@ -739,10 +1261,11 @@ func runCase(
     attentionPath: QwenProofAttentionPath = .auto,
     requestedRuntimeMode: TurboQuantRuntimeMode = .auto,
     sparseValuePolicy: TurboQuantSparseValuePolicy = .off,
+    sparseSelectionConfig: QwenProofSparseSelectionConfig = .off,
     codec: QwenProofCodec = .polarQJL
 ) -> QwenProofResult {
     let caseID =
-        "\(profile.id)_\(scheme.rawValue)_\(codec.rawValue)_ctx\(contextLength)_cap\(reservedCapacityLength)_q\(queryLength)\(attentionPath.idSuffix)"
+        "\(profile.id)_\(scheme.rawValue)_\(codec.rawValue)_ctx\(contextLength)_cap\(reservedCapacityLength)_q\(queryLength)\(attentionPath.idSuffix)\(sparseSelectionConfig.idSuffix)"
     guard let precisionProfile = profile.applyingPrecisionCandidate(scheme) else {
         let blockPlan = blockParallelTokenPlan(
             contextLength: contextLength,
@@ -806,18 +1329,23 @@ func runCase(
     let kvHeads = 4
     let queryHeads = 16
     let headDimension = 256
-    let sparseVThreshold = sparseValuePolicy.resolvedThreshold(
+    let sparseVThreshold = sparseSelectionConfig.resolvedThreshold(
+        policy: sparseValuePolicy,
         runtimeMode: resolvedRuntimeMode,
         contextLength: contextLength
     )
+    let sparseSelectionEnabled = sparseSelectionConfig.enabledFor(
+        runtimeMode: resolvedRuntimeMode,
+        queryLength: queryLength
+    ) && (sparseSelectionConfig.mode != .threshold || sparseVThreshold != nil)
     let layerCount = precisionProfile.modelFingerprint?.layerCount
     let boundaryProtectedLayerCount =
         layerCount.map { precisionPolicy.protectedBoundaryLayerIndexes(layerCount: $0).count } ?? 0
     let boundaryProtectionReason: String? =
         boundaryProtectedLayerCount > 0
-        ? "rawKV boundary protection for compressed K or low-bit V"
-        : (precisionPolicy.requiresRawBoundaryProtection
-            ? "rawKV boundary protection requested but profile layer count unavailable"
+        ? "K8/V4 boundary protection for low-bit K/V policy"
+        : (precisionPolicy.requiresBoundaryProtection
+            ? "K8/V4 boundary protection requested but profile layer count unavailable"
             : nil)
     let blockPlan = blockParallelTokenPlan(
         contextLength: contextLength,
@@ -836,8 +1364,16 @@ func runCase(
         keyPrecision: precisionPolicy.key.rawValue,
         valuePrecision: precisionPolicy.value.rawValue,
         backend: precisionProfile.backend.rawValue,
-        sparseVEnabled: sparseVThreshold != nil && queryLength == 1,
+        sparseVEnabled: sparseSelectionEnabled,
+        sparseVSelectionMode: sparseSelectionEnabled
+            ? sparseSelectionConfig.mode.reportName
+            : QwenProofSparseSelectionMode.off.reportName,
         sparseVThreshold: sparseVThreshold,
+        sparseVTopK: sparseSelectionEnabled ? sparseSelectionConfig.topK : nil,
+        sparseVCumulativeMassPercent: sparseSelectionEnabled
+            ? sparseSelectionConfig.cumulativeMassPercent
+            : nil,
+        sparseVMaxTopK: sparseSelectionEnabled ? sparseSelectionConfig.maxTopK : nil,
         boundaryProtectedLayerCount: boundaryProtectedLayerCount,
         boundaryProtectionReason: boundaryProtectionReason,
         dtype: dtypeName(dtype),
@@ -1132,13 +1668,25 @@ func runCase(
         let preferOnline = attentionPath.preferOnlineFused(
             default: cache.prefersOnlineFusedAttention
         )
-        let selectedAttentionPath = compressedAttentionPathName(
+        let nativeSparseSelectionAvailable =
+            availability.attentionCapabilities.nativeCompressedAttention == true
+            && availability.attentionCapabilities.nativeSparseVSupport == true
+            && queries.dim(2) == 1
+            && compressedKeys.layout.headDimension == compressedValues.layout.headDimension
+            && compressedKeys.layout.logicalLength == compressedValues.layout.logicalLength
+        let useNativeSparseSelection = sparseSelectionEnabled && nativeSparseSelectionAvailable
+        let denseSelectedAttentionPath = compressedAttentionPathName(
             queries: queries,
             keyCode: compressedKeys,
             valueCode: compressedValues,
-            preferOnlineFused: preferOnline && sparseVThreshold == nil,
+            preferOnlineFused: preferOnline,
+            sparseVThreshold: nil,
             availability: availability
         )
+        let selectedAttentionPath =
+            useNativeSparseSelection
+            ? TurboQuantAttentionPath.nativeMLXCompressed.rawValue
+            : denseSelectedAttentionPath
         let plainTiming = try timed(iterations: iterations, warmupIterations: warmupIterations) {
             MLXFast.scaledDotProductAttention(
                 queries: queries,
@@ -1152,7 +1700,21 @@ func runCase(
             iterations: iterations,
             warmupIterations: warmupIterations
         ) {
-            try turboQuantMetalScaledDotProductAttention(
+            if useNativeSparseSelection {
+                return try turboQuantNativeScaledDotProductAttention(
+                    queries: queries,
+                    keyCode: compressedKeys,
+                    valueCode: compressedValues,
+                    options: sparseSelectionConfig.nativeOptions(
+                        scale: scale,
+                        causal: true,
+                        threshold: sparseVThreshold,
+                        diagnostics: false,
+                        backendVersion: availability.attentionCapabilities.nativeBackendVersion
+                    )
+                )
+            }
+            return try turboQuantMetalScaledDotProductAttention(
                 queries: queries,
                 keyCode: compressedKeys,
                 valueCode: compressedValues,
@@ -1161,25 +1723,87 @@ func runCase(
                 preferOnlineFused: preferOnline,
                 kernelProfile: cache.attentionDiagnostics.selectedKernelProfile,
                 blockParallelTokenBlockSize: blockParallelTokenBlockSize,
-                sparseVThreshold: sparseVThreshold
+                sparseVThreshold: nil
             )
         }
-        let sparseDiagnostics: TurboQuantSparseValueDiagnostics
-        if sparseVThreshold != nil {
-            sparseDiagnostics =
-                try turboQuantMetalScaledDotProductAttentionWithDiagnostics(
+        let denseCompressedReference: MLXArray?
+        if useNativeSparseSelection {
+            denseCompressedReference = try turboQuantNativeScaledDotProductAttention(
                 queries: queries,
                 keyCode: compressedKeys,
                 valueCode: compressedValues,
+                options: TurboQuantNativeAttentionOptions(
+                    scale: scale,
+                    causal: true,
+                    backendVersion: availability.attentionCapabilities.nativeBackendVersion
+                        ?? TurboQuantNativeAttentionOptions.backendVersion
+                )
+            )
+        } else {
+            denseCompressedReference = nil
+        }
+        let sparseDiagnostics: TurboQuantSparseValueDiagnostics
+        let sparseHeadDiagnostics: [QwenProofSparseHeadDiagnostics]?
+        if useNativeSparseSelection {
+            let scores = try turboQuantMetalQK(
+                queries: queries,
+                keyCode: compressedKeys,
                 scale: scale,
                 mask: .causal,
-                preferOnlineFused: preferOnline,
-                kernelProfile: cache.attentionDiagnostics.selectedKernelProfile,
-                blockParallelTokenBlockSize: blockParallelTokenBlockSize,
-                sparseVThreshold: sparseVThreshold
-                ).sparseValueDiagnostics ?? TurboQuantSparseValueDiagnostics(enabled: false)
+            )
+            let diagnosticResult = sparseSelectionDiagnostics(
+                weights: softmax(scores.asType(.float32), axis: -1),
+                config: sparseSelectionConfig,
+                threshold: sparseVThreshold,
+                selectedOutput: compressedTiming.output,
+                denseOutput: denseCompressedReference,
+                queryHeadCount: queryHeads,
+                queryLength: queryLength,
+                headDimension: headDimension
+            )
+            sparseDiagnostics = diagnosticResult.0
+            sparseHeadDiagnostics = diagnosticResult.1
         } else {
             sparseDiagnostics = TurboQuantSparseValueDiagnostics(enabled: false)
+            sparseHeadDiagnostics = nil
+        }
+        let sparseDenseQuality: QwenProofQuality?
+        if let denseCompressedReference {
+            sparseDenseQuality = qualityGate(
+                candidate: compressedTiming.output,
+                reference: denseCompressedReference,
+                scheme: scheme
+            )
+        } else {
+            sparseDenseQuality = nil
+        }
+        let nativeAttentionDiagnostics: [Int]?
+        if useNativeSparseSelection,
+            let diagnostics = try? turboQuantNativeScaledDotProductAttentionWithDiagnostics(
+                queries: queries,
+                keyCode: compressedKeys,
+                valueCode: compressedValues,
+                options: sparseSelectionConfig.nativeOptions(
+                    scale: scale,
+                    causal: true,
+                    threshold: sparseVThreshold,
+                    diagnostics: true,
+                    backendVersion: availability.attentionCapabilities.nativeBackendVersion
+                )
+            ).diagnostics
+        {
+            nativeAttentionDiagnostics = [
+                diagnostics.backendVersion,
+                diagnostics.kernelKind,
+                diagnostics.activeBlocks,
+                diagnostics.blockTokens,
+                diagnostics.sparseSkippedTokens,
+                diagnostics.sparseTotalTokens,
+                diagnostics.fallbackCode,
+                diagnostics.flags,
+            ]
+        } else {
+            nativeAttentionDiagnostics = nil
         }
         let quality = qualityGate(
             candidate: compressedTiming.output,
@@ -1270,15 +1894,16 @@ func runCase(
         } else if attentionPath != .auto {
             fallbackReason =
                 "attention path forced to \(attentionPath.rawValue) for path comparison; selected \(selectedAttentionPath)"
+        } else if sparseSelectionEnabled
+            && selectedAttentionPath != TurboQuantAttentionPath.nativeMLXCompressed.rawValue
+        {
+            fallbackReason =
+                "Sparse-V \(sparseSelectionConfig.mode.reportName) requested but selected dense \(selectedAttentionPath); nativeSparseVSupport=\(availability.attentionCapabilities.nativeSparseVSupport == true)"
         } else {
             fallbackReason =
                 cache.attentionDiagnostics.fallbackReason
                 ?? cache.attentionDiagnostics.lastUnsupportedShape
         }
-        let reportedSelectedAttentionPath =
-            sparseDiagnostics.enabled
-            ? TurboQuantAttentionPath.sparseValueTwoStageCompressed.rawValue
-            : selectedAttentionPath
         let status = quality.passed && throughput.passedProductionGate ? "ok" : "failed"
         return QwenProofResult(
             id: benchmarkCase.id,
@@ -1287,7 +1912,7 @@ func runCase(
             gateScope: gateScope,
             strictGateRequired: strictGateRequired,
             certificationStatus: certificationStatus(for: gateScope),
-            selectedAttentionPath: reportedSelectedAttentionPath,
+            selectedAttentionPath: selectedAttentionPath,
             productionKVRoute: productionKVRoute,
             requestedRuntimeMode: requestedRuntimeMode.rawValue,
             resolvedRuntimeMode: resolvedRuntimeMode.rawValue,
@@ -1296,8 +1921,52 @@ func runCase(
             codec: codec.rawValue,
             backend: precisionProfile.backend.rawValue,
             sparseVEnabled: sparseDiagnostics.enabled,
+            sparseVSelectionMode: sparseDiagnostics.enabled
+                ? sparseSelectionConfig.mode.reportName
+                : QwenProofSparseSelectionMode.off.reportName,
             sparseVThreshold: sparseDiagnostics.threshold,
+            sparseVTopK: sparseDiagnostics.enabled ? sparseSelectionConfig.topK : nil,
+            sparseVCumulativeMassPercent: sparseDiagnostics.enabled
+                ? sparseSelectionConfig.cumulativeMassPercent
+                : nil,
+            sparseVMaxTopK: sparseDiagnostics.enabled ? sparseSelectionConfig.maxTopK : nil,
             sparseVSkipRatio: sparseDiagnostics.skipRatio,
+            sparseVSkippedValueTokens: sparseDiagnostics.enabled ? sparseDiagnostics.skipped : nil,
+            sparseVTotalValueTokens: sparseDiagnostics.enabled ? sparseDiagnostics.considered : nil,
+            sparseVRetainedMass: sparseDiagnostics.retainedMass,
+            sparseVDenseCosineSimilarity: sparseDenseQuality?.cosineSimilarityMean,
+            sparseVDenseMaxAbsErrorP95: sparseDenseQuality?.maxAbsErrorP95,
+            sparseVHeadDiagnostics: sparseHeadDiagnostics,
+            lowerVAndSparseV: QwenProofLowerVAndSparseVReport(
+                referenceConfig: "dense K8/V4",
+                candidateConfig: "\(codec.rawValue)-\(precisionPolicy.value.rawValue)"
+                    + (sparseDiagnostics.enabled ? "-sparse-\(sparseSelectionConfig.mode.reportName)" : ""),
+                valueBits: precisionPolicy.resolvedValueBits,
+                valueBitPolicy: valueBitPolicyName(valueBits: precisionPolicy.resolvedValueBits),
+                sparseVMode: sparseDiagnostics.enabled ? sparseSelectionConfig.mode.reportName : nil,
+                sparseVTopK: sparseDiagnostics.enabled ? sparseSelectionConfig.topK : nil,
+                sparseVCumulativeMass: sparseDiagnostics.enabled
+                    ? sparseSelectionConfig.cumulativeMassPercent.map { $0 / 100 }
+                    : nil,
+                sparseVMaxTopK: sparseDiagnostics.enabled ? sparseSelectionConfig.maxTopK : nil,
+                selectionLatencyMS: nil,
+                qkMS: nil,
+                softmaxMS: nil,
+                maskOrCompactionMS: nil,
+                avLatencyMS: nil,
+                totalMS: nil,
+                denseK8V4ReferenceMS: nil,
+                skippedValueTokens: sparseDiagnostics.enabled ? sparseDiagnostics.skipped : nil,
+                consideredValueTokens: sparseDiagnostics.enabled ? sparseDiagnostics.considered : nil,
+                retainedMass: sparseDiagnostics.retainedMass,
+                skipRatio: sparseDiagnostics.enabled ? sparseDiagnostics.skipRatio : nil,
+                fallbackCount: sparseDiagnostics.enabled && fallbackReason != nil ? 1 : 0,
+                fallbackReason: sparseDiagnostics.enabled ? fallbackReason : nil,
+                actualMixedBitsPerValue: precisionPolicy.resolvedValueBits.map(Double.init),
+                layerIndex: nil,
+                headIndex: nil
+            ),
+            nativeAttentionDiagnostics: nativeAttentionDiagnostics,
             boundaryProtectedLayerCount: boundaryProtectedLayerCount,
             boundaryProtectionReason: boundaryProtectionReason,
             decodedActiveKVBytes: usesPlainProductionRoute ? nil : plainBytes,
@@ -1344,6 +2013,10 @@ let sparseValueThreshold = Float(
 )
 let sparseValuePolicy = argumentSparseValuePolicy(
     "--sparse-v",
+    threshold: sparseValueThreshold
+)
+let sparseSelectionConfig = argumentSparseSelectionConfig(
+    policy: sparseValuePolicy,
     threshold: sparseValueThreshold
 )
 let speedParityRatio = argumentValue("--speed-parity-ratio", default: 1.0)
@@ -1441,6 +2114,7 @@ for profile in representativeProfiles {
                             attentionPath: attentionPath,
                             requestedRuntimeMode: requestedRuntimeMode,
                             sparseValuePolicy: sparseValuePolicy,
+                            sparseSelectionConfig: sparseSelectionConfig,
                             codec: codec
                         )
                     )
@@ -1474,7 +2148,7 @@ let strictPassed =
     !strictGateResults.isEmpty
     && strictGateResults.allSatisfy { $0.status == "ok" }
 let report = QwenProofReport(
-    schemaVersion: 8,
+    schemaVersion: 10,
     generatedAt: ISO8601DateFormatter().string(from: Date()),
     iterations: iterations,
     warmupIterations: warmupIterations,
@@ -1489,6 +2163,10 @@ let report = QwenProofReport(
     requestedRuntimeMode: requestedRuntimeMode.rawValue,
     sparseValuePolicy: sparseValuePolicyName(sparseValuePolicy),
     sparseValueThreshold: sparseValueThreshold,
+    sparseValueSelectionMode: sparseSelectionConfig.mode.reportName,
+    sparseValueTopK: sparseSelectionConfig.topK,
+    sparseValueCumulativeMassPercent: sparseSelectionConfig.cumulativeMassPercent,
+    sparseValueMaxTopK: sparseSelectionConfig.maxTopK,
     codec: codec.rawValue,
     productionContexts: uniqueSorted(contexts),
     largeContextExperimentContexts: uniqueSorted(largeContextExperimentContexts),

@@ -4,10 +4,137 @@ import MLXLMCommon
 
 enum BenchmarkCodec: String {
     case polarQJL = "polar_qjl"
+    case polarWHT = "polar_wht"
     case affineK8V4 = "affine_k8_v4"
+    case affineK8Vx = "affine_k8_vx"
     case affineInt4 = "affine_int4"
     case raw
 }
+
+struct BenchmarkOptimizationConfig {
+    var label: String
+    var codec: BenchmarkCodec
+    var preset: TurboQuantPreset?
+    var valueBits: Int?
+    var valueGroupSize: Int?
+    var backend: TurboQuantBackend = .metalPolarQJL
+    var precisionPolicy: TurboQuantKVPrecisionPolicy?
+    var optimizationPolicy: TurboQuantOptimizationPolicy
+
+    static let fp16 = BenchmarkOptimizationConfig(
+        label: "fp16",
+        codec: .raw,
+        preset: nil,
+        valueBits: 16,
+        valueGroupSize: nil,
+        optimizationPolicy: .auto
+    )
+
+    static let affineK8V4 = BenchmarkOptimizationConfig(
+        label: "affineK8V4",
+        codec: .affineK8V4,
+        preset: nil,
+        valueBits: TurboQuantKVCodec.affineK8V4ValueBits,
+        valueGroupSize: TurboQuantKVCodec.affineK8V4ValueGroupSize,
+        optimizationPolicy: .preferThroughput
+    )
+
+    static let affineK8V3 = BenchmarkOptimizationConfig(
+        label: "affineK8V3",
+        codec: .affineK8Vx,
+        preset: nil,
+        valueBits: 3,
+        valueGroupSize: TurboQuantKVCodec.affineK8V4ValueGroupSize,
+        optimizationPolicy: .preferThroughput
+    )
+
+    static let affineK8V2 = BenchmarkOptimizationConfig(
+        label: "affineK8V2",
+        codec: .affineK8Vx,
+        preset: nil,
+        valueBits: 2,
+        valueGroupSize: TurboQuantKVCodec.affineK8V4ValueGroupSize,
+        optimizationPolicy: .preferThroughput
+    )
+
+    static let affineInt4 = BenchmarkOptimizationConfig(
+        label: "affineInt4",
+        codec: .affineInt4,
+        preset: nil,
+        valueBits: TurboQuantKVCodec.affineInt4Bits,
+        valueGroupSize: nil,
+        optimizationPolicy: .preferThroughput
+    )
+
+    static func turboQuant(
+        label: String,
+        preset: TurboQuantPreset,
+        optimizationPolicy: TurboQuantOptimizationPolicy
+    ) -> BenchmarkOptimizationConfig {
+        BenchmarkOptimizationConfig(
+            label: label,
+            codec: .polarQJL,
+            preset: preset,
+            valueBits: preset.defaultValueBits,
+            valueGroupSize: nil,
+            optimizationPolicy: optimizationPolicy
+        )
+    }
+
+    static let polarWHTV3 = BenchmarkOptimizationConfig(
+        label: "polarWHTV3",
+        codec: .polarWHT,
+        preset: .turbo4v2,
+        valueBits: TurboQuantKVCodec.polarWHTDefaultValueBits,
+        valueGroupSize: nil,
+        backend: .metalPolarWHT,
+        optimizationPolicy: .preferThroughput
+    )
+
+    static let hybridK8PolarWHTV3 = BenchmarkOptimizationConfig(
+        label: "hybridK8PolarWHTV3",
+        codec: .polarWHT,
+        preset: .turbo8,
+        valueBits: TurboQuantKVCodec.polarWHTDefaultValueBits,
+        valueGroupSize: nil,
+        backend: .metalPolarWHT,
+        precisionPolicy: TurboQuantKVPrecisionPolicy(
+            key: .affineQ8,
+            value: .compressed(bits: TurboQuantKVCodec.polarWHTDefaultValueBits),
+            boundary: .disabled
+        ),
+        optimizationPolicy: .preferThroughput
+    )
+
+    static let hybridK8PolarWHTV4 = BenchmarkOptimizationConfig(
+        label: "hybridK8PolarWHTV4",
+        codec: .polarWHT,
+        preset: .turbo8,
+        valueBits: 4,
+        valueGroupSize: nil,
+        backend: .metalPolarWHT,
+        precisionPolicy: TurboQuantKVPrecisionPolicy(
+            key: .affineQ8,
+            value: .compressed(bits: 4),
+            boundary: .disabled
+        ),
+        optimizationPolicy: .preferThroughput
+    )
+}
+
+let validBenchmarkOptimizationConfigs: [BenchmarkOptimizationConfig] = [
+    .fp16,
+    .affineK8V4,
+    .affineK8V3,
+    .affineK8V2,
+    .affineInt4,
+    .turboQuant(label: "turbo8", preset: .turbo8, optimizationPolicy: .preferThroughput),
+    .turboQuant(label: "turbo4v2", preset: .turbo4v2, optimizationPolicy: .preferThroughput),
+    .turboQuant(label: "turbo3_5", preset: .turbo3_5, optimizationPolicy: .preferThroughput),
+    .polarWHTV3,
+    .hybridK8PolarWHTV3,
+    .hybridK8PolarWHTV4,
+]
 
 struct BenchmarkModelConfig: Codable {
     var family: String
@@ -22,6 +149,7 @@ struct BenchmarkModelConfig: Codable {
 }
 
 struct BenchmarkTurboQuantConfig: Codable {
+    var label: String? = nil
     var codec: String
     var layoutVersion: Int
     var path: String?
@@ -33,6 +161,8 @@ struct BenchmarkTurboQuantConfig: Codable {
     var scaleBiasBytes: Int?
     var fallbackPolicy: String
     var kernelProfile: String
+    var optimizationPolicy: String? = nil
+    var isFP16Baseline: Bool? = nil
     var actualBytesPerToken: Double?
 }
 
@@ -49,8 +179,17 @@ struct BenchmarkThroughputMetrics: Codable {
     var firstTokenLatencySeconds: Double? = nil
 }
 
+struct BenchmarkFP16BaselineMetrics: Codable {
+    var id: String
+    var latencySeconds: Double?
+    var memory: BenchmarkMemoryMetrics
+    var throughput: BenchmarkThroughputMetrics
+}
+
 struct BenchmarkCase: Codable {
     var id: String
+    var config: String
+    var codec: String
     var headDim: Int
     var queryHeads: Int
     var kvHeads: Int
@@ -71,6 +210,9 @@ struct BenchmarkResult: Codable {
     var throughput: BenchmarkThroughputMetrics
     var quality: TurboQuantQualityGateReport
     var selectedPath: TurboQuantAttentionPath?
+    var fp16Baseline: BenchmarkFP16BaselineMetrics?
+    var speedRatioToFP16: Double?
+    var memoryRatioToFP16: Double?
     var fallbackReason: String?
     var error: String?
 }
@@ -91,6 +233,8 @@ struct BenchmarkReport: Codable {
     var supportsMetalAttention: Bool
     var modelConfig: BenchmarkModelConfig
     var turboQuant: BenchmarkTurboQuantConfig
+    var optimizationConfigs: [BenchmarkTurboQuantConfig]
+    var cooldownSeconds: Double
     var qualityGate: TurboQuantQualityGateReport
     var coverageMatrix: [BenchmarkCase]
     var results: [BenchmarkResult]
@@ -127,6 +271,16 @@ func argumentStrings(_ name: String, default defaultValue: [String]) -> [String]
     return values.isEmpty ? defaultValue : values
 }
 
+func argumentDouble(_ name: String, default defaultValue: Double) -> Double {
+    let arguments = CommandLine.arguments
+    guard let index = arguments.firstIndex(of: name), arguments.indices.contains(index + 1),
+        let value = Double(arguments[index + 1])
+    else {
+        return defaultValue
+    }
+    return value
+}
+
 func argumentString(_ name: String, default defaultValue: String) -> String {
     let arguments = CommandLine.arguments
     guard let index = arguments.firstIndex(of: name), arguments.indices.contains(index + 1) else {
@@ -142,11 +296,122 @@ func argumentCodec(_ name: String, default defaultValue: BenchmarkCodec) -> Benc
         return .raw
     case "affine_k8_v4", "affineK8V4", "affine-k8-v4", "k8v4", "k8_v4":
         return .affineK8V4
+    case "affine_k8_vx", "affineK8Vx", "affine-k8-vx", "k8vx", "k8_vx":
+        return .affineK8Vx
     case "affine_int4", "affineInt4", "affine-int4":
         return .affineInt4
+    case "polar_wht", "polarWHT", "polar-wht", "wht", "whtv3":
+        return .polarWHT
     default:
         return .polarQJL
     }
+}
+
+func normalizedConfigLabel(_ label: String) -> String {
+    label
+        .trimmingCharacters(in: .whitespacesAndNewlines)
+        .lowercased()
+        .replacingOccurrences(of: "-", with: "_")
+        .replacingOccurrences(of: ".", with: "_")
+}
+
+func configs(for codec: BenchmarkCodec) -> [BenchmarkOptimizationConfig] {
+    switch codec {
+    case .raw:
+        return [.fp16]
+    case .affineK8V4:
+        return [.affineK8V4]
+    case .affineK8Vx:
+        return [.affineK8V3, .affineK8V2]
+    case .affineInt4:
+        return [.affineInt4]
+    case .polarQJL:
+        return [.turboQuant(label: "turbo4v2", preset: .turbo4v2, optimizationPolicy: .preferThroughput)]
+    case .polarWHT:
+        return [.hybridK8PolarWHTV3, .hybridK8PolarWHTV4, .polarWHTV3]
+    }
+}
+
+func argumentOptimizationConfigs(
+    _ name: String,
+    default defaultValue: [BenchmarkOptimizationConfig]
+) throws -> [BenchmarkOptimizationConfig] {
+    let arguments = CommandLine.arguments
+    guard let index = arguments.firstIndex(of: name), arguments.indices.contains(index + 1) else {
+        return defaultValue
+    }
+
+    let requested = arguments[index + 1].split(separator: ",")
+        .map { String($0).trimmingCharacters(in: .whitespacesAndNewlines) }
+        .filter { !$0.isEmpty }
+    guard !requested.isEmpty else { return defaultValue }
+    if requested.contains(where: { normalizedConfigLabel($0) == "all" }) {
+        return validBenchmarkOptimizationConfigs
+    }
+
+    let configsByLabel = Dictionary(
+        uniqueKeysWithValues: validBenchmarkOptimizationConfigs.map {
+            (normalizedConfigLabel($0.label), $0)
+        }
+    )
+    var selected = [BenchmarkOptimizationConfig]()
+    var unknown = [String]()
+    for label in requested {
+        switch normalizedConfigLabel(label) {
+        case "fp16", "raw", "baseline":
+            selected.append(.fp16)
+        case "affinek8v4", "affine_k8_v4", "k8v4", "k8_v4":
+            selected.append(.affineK8V4)
+        case "affinek8v3", "affine_k8_v3", "k8v3", "k8_v3":
+            selected.append(.affineK8V3)
+        case "affinek8v2", "affine_k8_v2", "k8v2", "k8_v2":
+            selected.append(.affineK8V2)
+        case "affinek8vx", "affine_k8_vx", "k8vx", "k8_vx":
+            selected.append(.affineK8V3)
+            selected.append(.affineK8V2)
+        case "int4", "affineint4", "affine_int4":
+            selected.append(.affineInt4)
+        case "turbo4", "turbo4v2", "turbo_4_v2":
+            selected.append(
+                .turboQuant(label: "turbo4v2", preset: .turbo4v2, optimizationPolicy: .preferThroughput))
+        case "turbo35", "turbo3_5", "turbo_3_5":
+            selected.append(
+                .turboQuant(label: "turbo3_5", preset: .turbo3_5, optimizationPolicy: .preferThroughput))
+        case "turbo8", "turbo_8":
+            selected.append(
+                .turboQuant(label: "turbo8", preset: .turbo8, optimizationPolicy: .preferThroughput))
+        case "polarwht", "polar_wht", "polarwhtv3", "polar_wht_v3", "whtv3":
+            selected.append(.polarWHTV3)
+        case "hybridk8polarwhtv3", "hybrid_k8_polar_wht_v3",
+            "hybridk8polarwht", "hybrid_k8_polar_wht", "k8whtv3", "k8_wht_v3":
+            selected.append(.hybridK8PolarWHTV3)
+        case "hybridk8polarwhtv4", "hybrid_k8_polar_wht_v4",
+            "k8whtv4", "k8_wht_v4":
+            selected.append(.hybridK8PolarWHTV4)
+        case let normalized where configsByLabel[normalized] != nil:
+            selected.append(configsByLabel[normalized]!)
+        default:
+            unknown.append(label)
+        }
+    }
+    if !unknown.isEmpty {
+        let known = validBenchmarkOptimizationConfigs.map(\.label).joined(separator: ", ")
+        throw NSError(
+            domain: "TurboQuantModelBenchmark",
+            code: 2,
+            userInfo: [
+                NSLocalizedDescriptionKey:
+                    "unknown --configs entries: \(unknown.joined(separator: ", ")); known configs: \(known)"
+            ]
+        )
+    }
+
+    var unique = [BenchmarkOptimizationConfig]()
+    var seen = Set<String>()
+    for config in selected where seen.insert(config.label).inserted {
+        unique.append(config)
+    }
+    return unique.isEmpty ? defaultValue : unique
 }
 
 func hasFlag(_ name: String) -> Bool {
@@ -155,6 +420,23 @@ func hasFlag(_ name: String) -> Bool {
 
 func environmentValue(_ key: String, default defaultValue: String = "unknown") -> String {
     ProcessInfo.processInfo.environment[key].flatMap { $0.isEmpty ? nil : $0 } ?? defaultValue
+}
+
+func environmentDouble(_ key: String, default defaultValue: Double) -> Double {
+    ProcessInfo.processInfo.environment[key].flatMap(Double.init) ?? defaultValue
+}
+
+func mlxDType(_ name: String) -> DType {
+    switch name.lowercased() {
+    case "fp16", "float16":
+        return .float16
+    case "bf16", "bfloat16":
+        return .bfloat16
+    case "fp32", "float32":
+        return .float32
+    default:
+        return .float16
+    }
 }
 
 func gitCommit(_ relativePath: String) -> String {
@@ -204,6 +486,7 @@ func timed(iterations: Int, _ body: () throws -> MLXArray) throws -> (Double, ML
 
 func makeCases(
     releaseMatrix: Bool,
+    configs: [BenchmarkOptimizationConfig],
     headDims: [Int],
     queryHeads: Int,
     kvHeads: Int,
@@ -214,26 +497,30 @@ func makeCases(
     let fallbackDTypes = releaseMatrix ? ["fp16", "bf16", "fp32"] : ["fp16"]
     let masks = releaseMatrix ? ["causal", "additive", "bool"] : ["causal"]
     var cases = [BenchmarkCase]()
-    for headDim in headDims {
-        for context in contexts {
-            for queryLength in queryLengths {
-                for dtype in fallbackDTypes {
-                    for mask in masks {
-                        for cacheLayout in cacheLayouts {
-                            cases.append(
-                                BenchmarkCase(
-                                    id:
-                                        "qh\(queryHeads)_kvh\(kvHeads)_hd\(headDim)_ctx\(context)_q\(queryLength)_\(dtype)_\(mask)_\(cacheLayout)",
-                                    headDim: headDim,
-                                    queryHeads: queryHeads,
-                                    kvHeads: kvHeads,
-                                    contextLength: context,
-                                    queryLength: queryLength,
-                                    fallbackDType: dtype,
-                                    mask: mask,
-                                    cacheLayout: cacheLayout
+    for config in configs {
+        for headDim in headDims {
+            for context in contexts {
+                for queryLength in queryLengths {
+                    for dtype in fallbackDTypes {
+                        for mask in masks {
+                            for cacheLayout in cacheLayouts {
+                                cases.append(
+                                    BenchmarkCase(
+                                        id:
+                                            "\(config.label)_qh\(queryHeads)_kvh\(kvHeads)_hd\(headDim)_ctx\(context)_q\(queryLength)_\(dtype)_\(mask)_\(cacheLayout)",
+                                        config: config.label,
+                                        codec: config.codec.rawValue,
+                                        headDim: headDim,
+                                        queryHeads: queryHeads,
+                                        kvHeads: kvHeads,
+                                        contextLength: context,
+                                        queryLength: queryLength,
+                                        fallbackDType: dtype,
+                                        mask: mask,
+                                        cacheLayout: cacheLayout
+                                    )
                                 )
-                            )
+                            }
                         }
                     }
                 }
@@ -254,6 +541,9 @@ func skipped(_ benchmarkCase: BenchmarkCase, reason: String) -> BenchmarkResult 
         throughput: BenchmarkThroughputMetrics(),
         quality: .failed(reason: reason),
         selectedPath: nil,
+        fp16Baseline: nil,
+        speedRatioToFP16: nil,
+        memoryRatioToFP16: nil,
         fallbackReason: reason,
         error: nil
     )
@@ -270,6 +560,9 @@ func failed(_ benchmarkCase: BenchmarkCase, error: String) -> BenchmarkResult {
         throughput: BenchmarkThroughputMetrics(),
         quality: .failed(reason: error),
         selectedPath: nil,
+        fp16Baseline: nil,
+        speedRatioToFP16: nil,
+        memoryRatioToFP16: nil,
         fallbackReason: nil,
         error: error
     )
@@ -502,14 +795,209 @@ func aggregateQualityGate(_ results: [BenchmarkResult]) -> TurboQuantQualityGate
     )
 }
 
+func fp16BaselineKey(_ benchmarkCase: BenchmarkCase) -> String {
+    [
+        "qh\(benchmarkCase.queryHeads)",
+        "kvh\(benchmarkCase.kvHeads)",
+        "hd\(benchmarkCase.headDim)",
+        "ctx\(benchmarkCase.contextLength)",
+        "q\(benchmarkCase.queryLength)",
+        benchmarkCase.mask,
+        benchmarkCase.cacheLayout,
+    ].joined(separator: "_")
+}
+
+func keyValueBytes(_ memory: BenchmarkMemoryMetrics) -> Int? {
+    guard let keyBytes = memory.compressedKeyBytes,
+        let valueBytes = memory.compressedValueBytes
+    else {
+        return nil
+    }
+    return keyBytes + valueBytes
+}
+
+func attachFP16Baselines(_ results: [BenchmarkResult]) -> [BenchmarkResult] {
+    let baselines = Dictionary(
+        uniqueKeysWithValues: results.compactMap { result -> (String, BenchmarkResult)? in
+            guard result.status == "ok",
+                result.benchmarkCase.config == "fp16",
+                result.benchmarkCase.fallbackDType == "fp16"
+            else {
+                return nil
+            }
+            return (fp16BaselineKey(result.benchmarkCase), result)
+        }
+    )
+
+    return results.map { result in
+        guard let baseline = baselines[fp16BaselineKey(result.benchmarkCase)] else {
+            return result
+        }
+        var annotated = result
+        annotated.fp16Baseline = BenchmarkFP16BaselineMetrics(
+            id: baseline.id,
+            latencySeconds: baseline.latencySeconds,
+            memory: baseline.memory,
+            throughput: baseline.throughput
+        )
+        if result.status == "ok",
+            let resultDecode = result.throughput.decodeTokensPerSecond,
+            let baselineDecode = baseline.throughput.decodeTokensPerSecond,
+            baselineDecode > 0
+        {
+            annotated.speedRatioToFP16 = resultDecode / baselineDecode
+        }
+        if result.status == "ok",
+            let resultBytes = keyValueBytes(result.memory),
+            let baselineBytes = keyValueBytes(baseline.memory),
+            baselineBytes > 0
+        {
+            annotated.memoryRatioToFP16 = Double(resultBytes) / Double(baselineBytes)
+        }
+        return annotated
+    }
+}
+
+func cooldown(seconds: Double) {
+    guard seconds > 0 else { return }
+    Stream.gpu.synchronize()
+    Memory.clearCache()
+    Thread.sleep(forTimeInterval: seconds)
+}
+
+func actualBytesPerToken(for label: String, results: [BenchmarkResult]) -> Double? {
+    results.first(where: { $0.status == "ok" && $0.benchmarkCase.config == label }).flatMap {
+        result -> Double? in
+        guard let bytes = keyValueBytes(result.memory) else { return nil }
+        return Double(bytes) / Double(max(1, result.benchmarkCase.contextLength))
+    }
+}
+
+func scaleBiasBytes(
+    for config: BenchmarkOptimizationConfig,
+    sampleCase: BenchmarkCase?
+) -> Int? {
+    guard let sampleCase else { return nil }
+    switch config.codec {
+    case .affineInt4:
+        let groups = max(1, sampleCase.headDim / TurboQuantKVCodec.affineInt4DefaultGroupSize)
+        return 4 * 2 * 2 * sampleCase.kvHeads * sampleCase.contextLength * groups
+    case .affineK8V4, .affineK8Vx:
+        let keyGroups = max(1, sampleCase.headDim / TurboQuantKVCodec.affineK8V4KeyGroupSize)
+        let valueGroups = max(
+            1,
+            sampleCase.headDim / (config.valueGroupSize ?? TurboQuantKVCodec.affineK8V4ValueGroupSize)
+        )
+        return 4 * 2 * sampleCase.kvHeads * sampleCase.contextLength * (keyGroups + valueGroups)
+    case .polarQJL, .polarWHT, .raw:
+        return nil
+    }
+}
+
+func reportConfig(
+    for config: BenchmarkOptimizationConfig,
+    cases: [BenchmarkCase],
+    results: [BenchmarkResult],
+    availability: TurboQuantKernelAvailability
+) -> BenchmarkTurboQuantConfig {
+    let selectedPath = results
+        .first { $0.status == "ok" && $0.benchmarkCase.config == config.label }?
+        .selectedPath
+    let sampleCase = cases.first { $0.config == config.label }
+    let preset = config.preset ?? .turbo4v2
+    let keyBits =
+        config.precisionPolicy?.key == .affineQ8
+            ? Double(TurboQuantKVCodec.affineK8V4KeyBits)
+            : Double(preset.targetMagnitudeBits)
+
+    switch config.codec {
+    case .raw:
+        return BenchmarkTurboQuantConfig(
+            label: config.label,
+            codec: config.codec.rawValue,
+            layoutVersion: TurboQuantAttentionLayout.currentVersion,
+            path: selectedPath?.rawValue ?? TurboQuantAttentionPath.baseline.rawValue,
+            backend: "rawSDPA",
+            preset: "fp16",
+            keyBits: 16,
+            valueBits: 16,
+            groupSize: sampleCase?.headDim ?? 0,
+            scaleBiasBytes: nil,
+            fallbackPolicy: "none",
+            kernelProfile: "baseline",
+            optimizationPolicy: config.optimizationPolicy.rawValue,
+            isFP16Baseline: true,
+            actualBytesPerToken: actualBytesPerToken(for: config.label, results: results)
+        )
+    case .affineK8V4, .affineK8Vx:
+        return BenchmarkTurboQuantConfig(
+            label: config.label,
+            codec: config.codec.rawValue,
+            layoutVersion: TurboQuantAttentionLayout.currentVersion,
+            path: selectedPath?.rawValue,
+            backend: TurboQuantBackend.mlxPacked.rawValue,
+            preset: config.label,
+            keyBits: Double(TurboQuantKVCodec.affineK8V4KeyBits),
+            valueBits: config.valueBits ?? TurboQuantKVCodec.affineK8V4ValueBits,
+            groupSize: TurboQuantKVCodec.affineK8V4KeyGroupSize,
+            scaleBiasBytes: scaleBiasBytes(for: config, sampleCase: sampleCase),
+            fallbackPolicy: "compressedDecodeAllowed",
+            kernelProfile: availability.selectedKernelProfile.rawValue,
+            optimizationPolicy: config.optimizationPolicy.rawValue,
+            isFP16Baseline: false,
+            actualBytesPerToken: actualBytesPerToken(for: config.label, results: results)
+        )
+    case .affineInt4:
+        return BenchmarkTurboQuantConfig(
+            label: config.label,
+            codec: config.codec.rawValue,
+            layoutVersion: TurboQuantAttentionLayout.currentVersion,
+            path: selectedPath?.rawValue,
+            backend: TurboQuantBackend.mlxPacked.rawValue,
+            preset: config.label,
+            keyBits: Double(TurboQuantKVCodec.affineInt4Bits),
+            valueBits: TurboQuantKVCodec.affineInt4Bits,
+            groupSize: TurboQuantKVCodec.affineInt4DefaultGroupSize,
+            scaleBiasBytes: scaleBiasBytes(for: config, sampleCase: sampleCase),
+            fallbackPolicy: "compressedDecodeAllowed",
+            kernelProfile: availability.selectedKernelProfile.rawValue,
+            optimizationPolicy: config.optimizationPolicy.rawValue,
+            isFP16Baseline: false,
+            actualBytesPerToken: actualBytesPerToken(for: config.label, results: results)
+        )
+    case .polarQJL, .polarWHT:
+        return BenchmarkTurboQuantConfig(
+            label: config.label,
+            codec: config.codec.rawValue,
+            layoutVersion: TurboQuantAttentionLayout.currentVersion,
+            path: selectedPath?.rawValue,
+            backend: config.backend.rawValue,
+            preset: preset.rawValue,
+            keyBits: keyBits,
+            valueBits: config.valueBits ?? preset.defaultValueBits,
+            groupSize: 64,
+            scaleBiasBytes: nil,
+            fallbackPolicy: "compressedDecodeAllowed",
+            kernelProfile: availability.selectedKernelProfile.rawValue,
+            optimizationPolicy: config.optimizationPolicy.rawValue,
+            isFP16Baseline: false,
+            actualBytesPerToken: actualBytesPerToken(for: config.label, results: results)
+        )
+    }
+}
+
 func runCase(
     _ benchmarkCase: BenchmarkCase,
     iterations: Int,
-    codec: BenchmarkCodec,
+    config: BenchmarkOptimizationConfig,
     availability: TurboQuantKernelAvailability
 ) throws -> BenchmarkResult {
+    let codec = config.codec
     guard codec != .polarQJL || availability.supportsMetalPolarQJLAttention else {
         return skipped(benchmarkCase, reason: "Metal attention unavailable or probe failed")
+    }
+    guard codec != .polarWHT || availability.supportsMetalPolarWHTAttention else {
+        return skipped(benchmarkCase, reason: "PolarWHT Metal attention unavailable or probe failed")
     }
     guard benchmarkCase.mask == "causal" || benchmarkCase.mask == "none" else {
         return skipped(
@@ -524,17 +1012,19 @@ func runCase(
     let headDim = benchmarkCase.headDim
     let context = benchmarkCase.contextLength
     let queryLength = benchmarkCase.queryLength
+    let dtype = mlxDType(benchmarkCase.fallbackDType)
     let elementCount = batch * kvHeads * context * headDim
     let keys = MLXArray(
-        values(count: elementCount, scale: 0.007), [batch, kvHeads, context, headDim])
+        values(count: elementCount, scale: 0.007), [batch, kvHeads, context, headDim]
+    ).asType(dtype)
     let valuesArray = MLXArray(
         values(count: elementCount, scale: 0.011, phase: 0.2),
         [batch, kvHeads, context, headDim]
-    )
+    ).asType(dtype)
     let queries = MLXArray(
         values(count: batch * queryHeads * queryLength * headDim, scale: 0.019),
         [batch, queryHeads, queryLength, headDim]
-    )
+    ).asType(dtype)
     let scale = 1 / sqrt(Float(headDim))
 
     if codec == .raw {
@@ -564,6 +1054,9 @@ func runCase(
             ),
             quality: qualityGate(candidate: output, reference: output, prefillExact: true),
             selectedPath: .baseline,
+            fp16Baseline: nil,
+            speedRatioToFP16: nil,
+            memoryRatioToFP16: nil,
             fallbackReason: nil,
             error: nil
         )
@@ -638,12 +1131,17 @@ func runCase(
             ),
             quality: quality,
             selectedPath: .affineInt4Native,
+            fp16Baseline: nil,
+            speedRatioToFP16: nil,
+            memoryRatioToFP16: nil,
             fallbackReason: nil,
             error: nil
         )
     }
 
-    if codec == .affineK8V4 {
+    if codec == .affineK8V4 || codec == .affineK8Vx {
+        let valueBits = config.valueBits ?? TurboQuantKVCodec.affineK8V4ValueBits
+        let valueGroupSize = config.valueGroupSize ?? TurboQuantKVCodec.affineK8V4ValueGroupSize
         let qKeys = quantized(
             keys,
             groupSize: TurboQuantKVCodec.affineK8V4KeyGroupSize,
@@ -652,8 +1150,8 @@ func runCase(
         )
         let qValues = quantized(
             valuesArray,
-            groupSize: TurboQuantKVCodec.affineK8V4ValueGroupSize,
-            bits: TurboQuantKVCodec.affineK8V4ValueBits,
+            groupSize: valueGroupSize,
+            bits: valueBits,
             mode: .affine
         )
         let keyTuple = (qKeys.wq, qKeys.scales, qKeys.biases)
@@ -662,7 +1160,9 @@ func runCase(
             queries: queries,
             quantizedKeys: keyTuple,
             quantizedValues: valueTuple,
-            mask: attentionMask(benchmarkCase.mask)
+            mask: attentionMask(benchmarkCase.mask),
+            valueGroupSize: valueGroupSize,
+            valueBits: valueBits
         )
         let prefillLatency = Date.timeIntervalSinceReferenceDate
         let (decodeLatency, output) = try timed(iterations: iterations) {
@@ -671,7 +1171,9 @@ func runCase(
                 quantizedKeys: keyTuple,
                 quantizedValues: valueTuple,
                 scale: scale,
-                mask: attentionMask(benchmarkCase.mask)
+                mask: attentionMask(benchmarkCase.mask),
+                valueGroupSize: valueGroupSize,
+                valueBits: valueBits
             )
         }
         let reference = MLXFast.scaledDotProductAttention(
@@ -705,35 +1207,51 @@ func runCase(
                 firstTokenLatencySeconds: queryLength == 1 ? decodeLatency : nil
             ),
             quality: quality,
-            selectedPath: usesNativeMixedAttention ? .affineK8V4Native : .mlxPackedFallback,
+            selectedPath: usesNativeMixedAttention
+                ? (valueBits == TurboQuantKVCodec.affineK8V4ValueBits
+                    ? .affineK8V4Native : .affineK8VxNative)
+                : .mlxPackedFallback,
+            fp16Baseline: nil,
+            speedRatioToFP16: nil,
+            memoryRatioToFP16: nil,
             fallbackReason: usesNativeMixedAttention
                 ? nil
-                : "mixed affine K8/V4 uses quantizedMM QK + quantizedMM AV",
+                : "mixed affine K8/Vx uses quantizedMM QK + quantizedMM AV",
             error: nil
         )
     }
 
+    let preset = config.preset ?? .turbo4v2
+    let valueBits = config.valueBits ?? preset.defaultValueBits
     let cache: any TurboQuantCompressedKVCacheProtocol
     switch benchmarkCase.cacheLayout {
     case "ring":
         cache = RotatingTurboQuantKVCache(
             maxSize: min(max(context / 2, 1), context),
             keep: min(16, context),
-            preset: .turbo4v2,
-            backend: .metalPolarQJL
+            preset: preset,
+            backend: config.backend,
+            optimizationPolicy: config.optimizationPolicy,
+            valueBits: valueBits,
+            precisionPolicy: config.precisionPolicy
         )
     case "pinned_prefix":
         cache = RotatingTurboQuantKVCache(
             maxSize: min(max(context / 2, 1), context),
             keep: min(64, context),
-            preset: .turbo4v2,
-            backend: .metalPolarQJL
+            preset: preset,
+            backend: config.backend,
+            optimizationPolicy: config.optimizationPolicy,
+            valueBits: valueBits,
+            precisionPolicy: config.precisionPolicy
         )
     default:
         cache = TurboQuantKVCache(
-            preset: .turbo4v2,
-            backend: .metalPolarQJL,
-            optimizationPolicy: .preferThroughput
+            preset: preset,
+            backend: config.backend,
+            optimizationPolicy: config.optimizationPolicy,
+            valueBits: valueBits,
+            precisionPolicy: config.precisionPolicy
         )
     }
 
@@ -789,6 +1307,9 @@ func runCase(
         ),
         quality: quality,
         selectedPath: cache.attentionDiagnostics.activeAttentionPath,
+        fp16Baseline: nil,
+        speedRatioToFP16: nil,
+        memoryRatioToFP16: nil,
         fallbackReason: cache.attentionDiagnostics.fallbackReason,
         error: nil
     )
@@ -797,6 +1318,22 @@ func runCase(
 let iterations = argumentValue("--iterations", default: 10)
 let codec = argumentCodec("--codec", default: .polarQJL)
 let releaseMatrix = hasFlag("--release-matrix")
+let explicitCodec = CommandLine.arguments.contains("--codec")
+let defaultOptimizationConfigs =
+    explicitCodec ? configs(for: codec)
+        : (releaseMatrix ? validBenchmarkOptimizationConfigs : configs(for: codec))
+let includeFP16Baseline = hasFlag("--include-fp16-baseline")
+let cooldownSeconds = max(
+    0,
+    argumentDouble(
+        "--cooldown-seconds",
+        default: environmentDouble("TURBOQUANT_BENCHMARK_COOLDOWN_SECONDS", default: 0)
+    )
+)
+var benchmarkConfigs = try argumentOptimizationConfigs("--configs", default: defaultOptimizationConfigs)
+if includeFP16Baseline, !benchmarkConfigs.contains(where: { $0.label == "fp16" }) {
+    benchmarkConfigs.insert(.fp16, at: 0)
+}
 let headDims = argumentValues("--head-dims", default: [64, 80, 96, 128, 192, 256])
 let queryHeads = argumentValue("--query-heads", default: 4)
 let kvHeads = argumentValue("--kv-heads", default: 2)
@@ -812,6 +1349,7 @@ let cacheLayouts = argumentStrings(
 let availability = TurboQuantKernelAvailability.current
 let cases = makeCases(
     releaseMatrix: releaseMatrix,
+    configs: benchmarkConfigs,
     headDims: headDims,
     queryHeads: queryHeads,
     kvHeads: kvHeads,
@@ -821,34 +1359,46 @@ let cases = makeCases(
 )
 
 var results = [BenchmarkResult]()
-for benchmarkCase in cases {
+let configsByLabel = Dictionary(uniqueKeysWithValues: benchmarkConfigs.map { ($0.label, $0) })
+for (index, benchmarkCase) in cases.enumerated() {
+    let result: BenchmarkResult
     do {
-        results.append(
-            try runCase(
-                benchmarkCase,
-                iterations: iterations,
-                codec: codec,
-                availability: availability
-            ))
+        guard let config = configsByLabel[benchmarkCase.config] else {
+            throw NSError(
+                domain: "TurboQuantModelBenchmark",
+                code: 3,
+                userInfo: [
+                    NSLocalizedDescriptionKey:
+                        "missing optimization config for benchmark case \(benchmarkCase.id)"
+                ]
+            )
+        }
+        result = try runCase(
+            benchmarkCase,
+            iterations: iterations,
+            config: config,
+            availability: availability
+        )
     } catch {
-        results.append(failed(benchmarkCase, error: "\(error)"))
+        result = failed(benchmarkCase, error: "\(error)")
+    }
+    results.append(result)
+    if index < cases.count - 1, result.status != "skipped" {
+        cooldown(seconds: cooldownSeconds)
     }
 }
 
+results = attachFP16Baselines(results)
 let okCount = results.filter { $0.status == "ok" }.count
 let skippedCount = results.filter { $0.status == "skipped" }.count
 let failedCount = results.filter { $0.status == "failed" }.count
 let aggregateQuality = aggregateQualityGate(results)
-let firstSelectedPath = results.compactMap(\.selectedPath).first
-let firstActualBytesPerToken =
-    results.first(where: { $0.status == "ok" }).flatMap { result -> Double? in
-        guard let keyBytes = result.memory.compressedKeyBytes,
-            let valueBytes = result.memory.compressedValueBytes
-        else {
-            return nil
-        }
-        return Double(keyBytes + valueBytes) / Double(max(1, result.benchmarkCase.contextLength))
-    }
+let optimizationConfigReports = benchmarkConfigs.map {
+    reportConfig(for: $0, cases: cases, results: results, availability: availability)
+}
+let primaryConfigReport =
+    optimizationConfigReports.first(where: { $0.isFP16Baseline != true })
+    ?? optimizationConfigReports.first
 
 let modelConfig = BenchmarkModelConfig(
     family: environmentValue("TURBOQUANT_BENCHMARK_MODEL_FAMILY", default: "synthetic"),
@@ -890,37 +1440,23 @@ let report = BenchmarkReport(
     supportsMetalCodec: availability.supportsMetalPolarQJLCodec,
     supportsMetalAttention: availability.supportsMetalPolarQJLAttention,
     modelConfig: modelConfig,
-    turboQuant: BenchmarkTurboQuantConfig(
-        codec: codec.rawValue,
-        layoutVersion: TurboQuantAttentionLayout.currentVersion,
-        path: firstSelectedPath?.rawValue,
-        backend: (codec == .affineInt4 || codec == .affineK8V4)
-            ? TurboQuantBackend.mlxPacked.rawValue : "metalPolarQJL",
-        preset: TurboQuantPreset.turbo4v2.rawValue,
-        keyBits: codec == .affineK8V4
-            ? Double(TurboQuantKVCodec.affineK8V4KeyBits)
-            : Double(TurboQuantPreset.turbo4v2.targetMagnitudeBits),
-        valueBits: codec == .affineInt4
-            ? TurboQuantKVCodec.affineInt4Bits
-            : codec == .affineK8V4
-                ? TurboQuantKVCodec.affineK8V4ValueBits : TurboQuantPreset.turbo4v2.defaultValueBits,
-        groupSize: codec == .affineInt4
-            ? TurboQuantKVCodec.affineInt4DefaultGroupSize
-            : codec == .affineK8V4 ? TurboQuantKVCodec.affineK8V4KeyGroupSize : 64,
-        scaleBiasBytes: codec == .affineInt4
-            ? (cases.first.map {
-                4 * 2 * 2 * $0.contextLength * max(1, $0.headDim / TurboQuantKVCodec.affineInt4DefaultGroupSize)
-            })
-            : codec == .affineK8V4
-                ? (cases.first.map {
-                    4 * 2 * 2 * $0.contextLength
-                        * max(1, $0.headDim / TurboQuantKVCodec.affineK8V4KeyGroupSize)
-                })
-            : nil,
-        fallbackPolicy: "compressedDecodeAllowed",
-        kernelProfile: availability.selectedKernelProfile.rawValue,
-        actualBytesPerToken: firstActualBytesPerToken
-    ),
+    turboQuant: primaryConfigReport
+        ?? BenchmarkTurboQuantConfig(
+            codec: codec.rawValue,
+            layoutVersion: TurboQuantAttentionLayout.currentVersion,
+            path: nil,
+            backend: "unknown",
+            preset: "unknown",
+            keyBits: 0,
+            valueBits: 0,
+            groupSize: 0,
+            scaleBiasBytes: nil,
+            fallbackPolicy: "unknown",
+            kernelProfile: availability.selectedKernelProfile.rawValue,
+            actualBytesPerToken: nil
+        ),
+    optimizationConfigs: optimizationConfigReports,
+    cooldownSeconds: cooldownSeconds,
     qualityGate: aggregateQuality,
     coverageMatrix: cases,
     results: results,

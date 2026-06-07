@@ -21,6 +21,46 @@ private func turboQuantRuntimeFailure(_ error: Error) -> TurboQuantRuntimeFailur
     TurboQuantRuntimeFailure(error)
 }
 
+private func turboQuantContiguousStorage(_ storage: QuantizedKVStorage) -> QuantizedKVStorage {
+    (
+        storage.0.contiguous(stream: .gpu),
+        storage.1.contiguous(stream: .gpu),
+        storage.2.map { $0.contiguous(stream: .gpu) }
+    )
+}
+
+private func turboQuantPrefixStorage(
+    _ storage: QuantizedKVStorage,
+    tokenCount: Int
+) -> QuantizedKVStorage {
+    guard tokenCount >= 0, storage.0.ndim >= 3, storage.0.dim(-2) != tokenCount else {
+        return storage
+    }
+    let tokens = 0 ..< min(tokenCount, storage.0.dim(-2))
+    return (
+        storage.0[.ellipsis, tokens, 0...],
+        storage.1[.ellipsis, tokens, 0...],
+        storage.2.map { $0[.ellipsis, tokens, 0...] }
+    )
+}
+
+private func turboQuantContiguousPolarWHTCode(
+    _ code: TurboQuantPolarWHTAttentionValueCode
+) -> TurboQuantPolarWHTAttentionValueCode {
+    var contiguous = code
+    contiguous.packedIndices = contiguous.packedIndices.contiguous(stream: .gpu)
+    contiguous.norms = contiguous.norms.contiguous(stream: .gpu)
+    return contiguous
+}
+
+private func turboQuantUsesFailClosedHybridPolarWHTUpdate(
+    _ cache: any TurboQuantCompressedKVCacheProtocol
+) -> Bool {
+    cache.kvCodec == .polarWHT
+        && cache.activeBackend == .metalPolarWHT
+        && cache.precisionPolicy.key.isHighPrecision
+}
+
 /// Cached attention state that can be passed between model layers without assuming raw KV arrays.
 public enum AttentionKVState {
     case raw(keys: MLXArray, values: MLXArray)
@@ -87,6 +127,872 @@ private func supportsPackedQuantizedAttention(
         && values.ndim == 4
         && keys.dim(3).isMultiple(of: cache.groupSize)
         && values.dim(3).isMultiple(of: cache.groupSize)
+}
+
+private let polarWHTReferenceHybridPullOutMaxWorkItems =
+    ProcessInfo.processInfo.environment["TQ_POLARWHT_REFERENCE_PULLOUT_MAX_WORK_ITEMS"]
+    .flatMap(Int.init) ?? 8_388_608
+
+private let polarWHTReferenceHybridMetalAVEnabled: Bool = {
+    guard let value = ProcessInfo.processInfo.environment["TQ_POLARWHT_REFERENCE_METAL_AV"]?
+        .lowercased()
+    else {
+        return true
+    }
+    return !["0", "false", "no", "off", "disabled"].contains(value)
+}()
+
+private func polarWHTReferencePullOutValueAttention(
+    weights: MLXArray,
+    valueCode: TurboQuantPolarWHTAttentionValueCode,
+    batchSize: Int,
+    queryHeadCount: Int,
+    queryLength: Int,
+    kvHeadCount: Int,
+    repeats: Int
+) throws -> (output: MLXArray, usedMetal: Bool)? {
+    let outputVectors = batchSize * queryHeadCount * queryLength
+    let workItems = outputVectors * valueCode.layout.logicalLength
+    if polarWHTReferenceHybridMetalAVEnabled {
+        do {
+            let metalWeights =
+                repeats > 1
+                ? weights.reshaped([
+                    batchSize, queryHeadCount, queryLength, valueCode.layout.logicalLength,
+                ])
+                : weights
+            let metalOutput = try turboQuantMetalPolarWHTAV(
+                attentionWeights: metalWeights.contiguous(stream: .gpu),
+                valueCode: valueCode,
+                outputDType: .float32
+            )
+            return (metalOutput, true)
+        } catch {
+            // Keep the reference path portable: failed experimental JIT AV falls through to
+            // the CPU pull-out budget and then the decoded-value fallback.
+        }
+    }
+
+    guard workItems <= polarWHTReferenceHybridPullOutMaxWorkItems else {
+        return nil
+    }
+
+    let keyLength = valueCode.layout.logicalLength
+    let headDimension = valueCode.layout.headDimension
+    let weightStorage = weights.asType(.float32).asArray(Float.self)
+    var output = [Float]()
+    output.reserveCapacity(outputVectors * headDimension)
+    for batch in 0 ..< batchSize {
+        for queryHead in 0 ..< queryHeadCount {
+            let kvHead = queryHead / repeats
+            let repeatIndex = queryHead % repeats
+            for queryToken in 0 ..< queryLength {
+                var tokenWeights = [Float](repeating: 0, count: keyLength)
+                for keyToken in 0 ..< keyLength {
+                    let sourceIndex: Int
+                    if repeats > 1 {
+                        sourceIndex =
+                            ((((batch * kvHeadCount + kvHead) * repeats + repeatIndex)
+                                * queryLength + queryToken) * keyLength) + keyToken
+                    } else {
+                        sourceIndex =
+                            (((batch * kvHeadCount + kvHead) * queryLength + queryToken)
+                                * keyLength) + keyToken
+                    }
+                    tokenWeights[keyToken] = weightStorage[sourceIndex]
+                }
+                output += try turboQuantPolarWHTReferenceAccumulateAttentionValue(
+                    weights: tokenWeights,
+                    code: valueCode,
+                    batchIndex: batch,
+                    kvHeadIndex: kvHead
+                )
+            }
+        }
+    }
+    return (MLXArray(output, [batchSize, queryHeadCount, queryLength, headDimension]), false)
+}
+
+private func turboQuantMaskedAffineScores(
+    _ scores: MLXArray,
+    mask: MLXFast.ScaledDotProductAttentionMaskMode
+) -> MLXArray {
+    var scores = scores
+    switch mask {
+    case .causal:
+        let (qLength, kLength) = (scores.dim(-2), scores.dim(-1))
+        let qIndices = MLXArray(0 ..< qLength) + MLXArray(kLength - qLength)
+        let kIndices = MLXArray(0 ..< kLength)
+        let causalMask = greaterEqual(
+            expandedDimensions(qIndices, axis: -1),
+            expandedDimensions(kIndices, axis: -2)
+        )
+        scores = MLX.where(
+            causalMask,
+            scores,
+            MLXArray(-Float.greatestFiniteMagnitude)
+        )
+
+    case .array(let maskArray):
+        if maskArray.dtype == .bool {
+            scores = MLX.where(
+                maskArray,
+                scores,
+                MLXArray(-Float.greatestFiniteMagnitude)
+            )
+        } else {
+            scores = scores + maskArray
+        }
+
+    case .arrays(let maskArrays):
+        if let maskArray = maskArrays.first {
+            if maskArray.dtype == .bool {
+                scores = MLX.where(
+                    maskArray,
+                    scores,
+                    MLXArray(-Float.greatestFiniteMagnitude)
+                )
+            } else {
+                scores = scores + maskArray
+            }
+        }
+
+    case .none:
+        break
+    }
+    return scores
+}
+
+private func turboQuantThresholdedAttentionWeights(
+    _ weights: MLXArray,
+    threshold: Float?
+) -> MLXArray {
+    guard let threshold, threshold > 0 else { return weights }
+    return MLX.where(
+        weights .>= threshold,
+        weights,
+        MLXArray.zeros(like: weights)
+    )
+}
+
+private enum HybridAffineKPolarWHTValueRoute {
+    case decodedNative
+    case decodedNativeContiguousRetry
+    case decodedGeneric
+    case segmentedPackedNative
+    case packedNative
+    case packedNativeContiguousRetry
+    case packedGeneric
+}
+
+private func hybridAffineKPolarWHTValueAttention(
+    queries: MLXArray,
+    quantizedKeys: QuantizedKVStorage,
+    tailQuantizedKeys: QuantizedKVStorage? = nil,
+    quantizedCache: any QuantizedKVCacheProtocol,
+    valueCode: TurboQuantPolarWHTAttentionValueCode,
+    tailValueCode: TurboQuantPolarWHTAttentionValueCode? = nil,
+    decodedValues: MLXArray?,
+    decodedValueLayout: MLX.TurboQuantAttentionLayout?,
+    scale: Float,
+    mask: MLXFast.ScaledDotProductAttentionMaskMode,
+    sparseVThreshold: Float?
+) throws -> (
+    output: MLXArray, usedDecodedValueBuffer: Bool, route: HybridAffineKPolarWHTValueRoute
+) {
+    let batchSize = queries.dim(0)
+    let queryHeadCount = queries.dim(1)
+    let queryLength = queries.dim(2)
+    let headDimension = queries.dim(3)
+    let kvHeadCount = valueCode.layout.kvHeadCount
+    let keyLength = valueCode.layout.logicalLength
+    let disableFusedHybrid =
+        TurboQuantRuntimeControl.enabled("TURBOQUANT_DISABLE_HYBRID_POLARWHT_FUSED")
+    guard quantizedKeys.0.ndim >= 4,
+        quantizedKeys.0.dim(-3) == kvHeadCount,
+        quantizedKeys.0.dim(-2) >= keyLength,
+        queryHeadCount % kvHeadCount == 0
+    else {
+        throw TurboQuantRuntimeFailure.compressedAttentionUnavailable(
+            "hybrid affine K scoring requires key sidecar shape to match PolarWHT value layout"
+        )
+    }
+
+    if tailQuantizedKeys != nil || tailValueCode != nil {
+        guard let tailQuantizedKeys, let tailValueCode else {
+            throw TurboQuantRuntimeFailure.compressedAttentionUnavailable(
+                "segmented hybrid tail requires both affine key and PolarWHT value tail sidecars"
+            )
+        }
+        guard sparseVThreshold == nil || sparseVThreshold == 0,
+            quantizedCache.mode == .affine,
+            quantizedCache.bits == 8,
+            let baseKeyBiases = quantizedKeys.2,
+            let tailKeyBiases = tailQuantizedKeys.2,
+            tailValueCode.layout.batchSize == batchSize,
+            tailValueCode.layout.kvHeadCount == kvHeadCount,
+            tailValueCode.layout.headDimension == headDimension,
+            tailValueCode.layout.logicalLength > 0
+        else {
+            throw TurboQuantRuntimeFailure.compressedAttentionUnavailable(
+                "segmented hybrid tail sidecars are present but shape or precision gates failed"
+            )
+        }
+        let compactBaseForSegmentedHybrid =
+            TurboQuantRuntimeControl.enabled("TURBOQUANT_COMPACT_SEGMENTED_HYBRID_BASE")
+        let baseKeyWeight =
+            compactBaseForSegmentedHybrid ? quantizedKeys.0.contiguous(stream: .gpu) : quantizedKeys.0
+        let baseKeyScales =
+            compactBaseForSegmentedHybrid ? quantizedKeys.1.contiguous(stream: .gpu) : quantizedKeys.1
+        let segmentedBaseKeyBiases =
+            compactBaseForSegmentedHybrid ? baseKeyBiases.contiguous(stream: .gpu) : baseKeyBiases
+        let contiguousTailKeyWeight = tailQuantizedKeys.0.contiguous(stream: .gpu)
+        let contiguousTailKeyScales = tailQuantizedKeys.1.contiguous(stream: .gpu)
+        let contiguousTailKeyBiases = tailKeyBiases.contiguous(stream: .gpu)
+        let baseValueCode =
+            compactBaseForSegmentedHybrid ? turboQuantContiguousPolarWHTCode(valueCode) : valueCode
+        let contiguousTailValueCode = turboQuantContiguousPolarWHTCode(tailValueCode)
+        guard let nativeOutput = try MLX
+            .turboQuantMetalSegmentedHybridAffineK8PolarWHTValueScaledDotProductAttentionIfSupported(
+                queries: queries,
+                baseKeyWeight: baseKeyWeight,
+                baseKeyScales: baseKeyScales,
+                baseKeyBiases: segmentedBaseKeyBiases,
+                tailKeyWeight: contiguousTailKeyWeight,
+                tailKeyScales: contiguousTailKeyScales,
+                tailKeyBiases: contiguousTailKeyBiases,
+                keyGroupSize: quantizedCache.groupSize,
+                baseValueCode: baseValueCode,
+                tailValueCode: contiguousTailValueCode,
+                scale: scale,
+                mask: mask,
+                sinks: nil,
+                sparseVThreshold: sparseVThreshold,
+                outputDType: .float32
+            )
+        else {
+            throw TurboQuantRuntimeFailure.compressedAttentionUnavailable(
+                "segmented hybrid native attention was not admitted; q=\(queries.shape) baseKey=\(quantizedKeys.0.shape) baseValueLength=\(valueCode.layout.logicalLength) tailKey=\(tailQuantizedKeys.0.shape) tailValueLength=\(tailValueCode.layout.logicalLength)"
+            )
+        }
+        return (nativeOutput, false, .segmentedPackedNative)
+    }
+
+    if let decodedValues,
+        (sparseVThreshold == nil || sparseVThreshold == 0),
+        decodedValues.ndim == 4,
+        decodedValues.dim(0) == batchSize,
+        decodedValues.dim(1) == kvHeadCount,
+        decodedValues.dim(2) >= keyLength,
+        decodedValues.dim(3) == headDimension
+    {
+        let decodedLayout = decodedValueLayout
+        let decodedLogicalLength = decodedLayout?.logicalLength ?? decodedValues.dim(2)
+        let decodedRingOffset = decodedLayout?.ringOffset ?? 0
+        let decodedPinnedPrefixLength = decodedLayout?.pinnedPrefixLength ?? 0
+        let decodedValuesAreLogical =
+            decodedLogicalLength == keyLength
+            && decodedValues.dim(2) == keyLength
+            && decodedRingOffset == 0
+            && decodedPinnedPrefixLength == 0
+        guard decodedLogicalLength == keyLength else {
+            throw TurboQuantRuntimeFailure.compressedAttentionUnavailable(
+                "hybrid decoded value buffer length \(decodedLogicalLength) does not match PolarWHT value length \(keyLength)"
+            )
+        }
+        if !disableFusedHybrid, quantizedCache.mode == .affine, quantizedCache.bits == 8,
+            let keyBiases = quantizedKeys.2
+        {
+            func nativeDecodedValueOutput(
+                keys: QuantizedKVStorage,
+                decodedValues candidateDecodedValues: MLXArray
+            ) throws -> MLXArray? {
+                guard let candidateKeyBiases = keys.2 else { return nil }
+                return try MLX
+                    .turboQuantMetalHybridAffineK8DecodedValueScaledDotProductAttentionIfSupported(
+                        queries: queries,
+                        keyWeight: keys.0,
+                        keyScales: keys.1,
+                        keyBiases: candidateKeyBiases,
+                        keyGroupSize: quantizedCache.groupSize,
+                        decodedValues: candidateDecodedValues,
+                        decodedValueLogicalLength: decodedLogicalLength,
+                        decodedValueRingOffset: decodedRingOffset,
+                        decodedValuePinnedPrefixLength: decodedPinnedPrefixLength,
+                        scale: scale,
+                        mask: mask,
+                        sinks: nil,
+                        sparseVThreshold: sparseVThreshold,
+                        outputDType: .float32
+                    )
+            }
+
+            if let nativeOutput = try nativeDecodedValueOutput(
+                keys: quantizedKeys,
+                decodedValues: decodedValues
+            ) {
+                return (nativeOutput, true, .decodedNative)
+            }
+            let contiguousKeys = turboQuantContiguousStorage((
+                quantizedKeys.0,
+                quantizedKeys.1,
+                keyBiases
+            ))
+            if let nativeOutput = try nativeDecodedValueOutput(
+                keys: contiguousKeys,
+                decodedValues: decodedValues.contiguous(stream: .gpu)
+            ) {
+                return (nativeOutput, true, .decodedNativeContiguousRetry)
+            }
+        }
+
+        guard decodedValuesAreLogical else {
+            return try hybridAffineKPolarWHTValueAttention(
+                queries: queries,
+                quantizedKeys: quantizedKeys,
+                quantizedCache: quantizedCache,
+                valueCode: valueCode,
+                decodedValues: nil,
+                decodedValueLayout: nil,
+                scale: scale,
+                mask: mask,
+                sparseVThreshold: sparseVThreshold
+            )
+        }
+
+        let repeats = queryHeadCount / kvHeadCount
+        var scaledQueries = queries * scale
+        var qKeys = turboQuantPrefixStorage(quantizedKeys, tokenCount: keyLength)
+        var groupedScores = false
+        if repeats > 1 {
+            scaledQueries = scaledQueries.reshaped([
+                batchSize, kvHeadCount, repeats, queryLength, headDimension,
+            ])
+            qKeys = (
+                expandedDimensions(qKeys.0, axis: -3),
+                expandedDimensions(qKeys.1, axis: -3),
+                qKeys.2.map { expandedDimensions($0, axis: -3) }
+            )
+            groupedScores = true
+        }
+
+        var scores = quantizedMM(
+            scaledQueries,
+            qKeys.0,
+            scales: qKeys.1,
+            biases: qKeys.2,
+            transpose: true,
+            groupSize: quantizedCache.groupSize,
+            bits: quantizedCache.bits,
+            mode: quantizedCache.mode
+        )
+        scores = turboQuantMaskedAffineScores(scores, mask: mask)
+        let weights = softmax(scores.asType(.float32), axis: -1)
+        let output: MLXArray
+        if groupedScores {
+            output = matmul(
+                weights.asType(decodedValues.dtype),
+                expandedDimensions(decodedValues, axis: 2)
+            )
+            .reshaped([batchSize, queryHeadCount, queryLength, headDimension])
+        } else {
+            output = matmul(weights.asType(decodedValues.dtype), decodedValues)
+        }
+        return (output.asType(.float32), true, .decodedGeneric)
+    }
+
+    if !disableFusedHybrid, quantizedCache.mode == .affine, quantizedCache.bits == 8,
+        let keyBiases = quantizedKeys.2
+    {
+        func nativePackedValueOutput(
+            keys: QuantizedKVStorage,
+            valueCode candidateValueCode: TurboQuantPolarWHTAttentionValueCode
+        ) throws -> MLXArray? {
+            guard let candidateKeyBiases = keys.2 else { return nil }
+            return try MLX
+                .turboQuantMetalHybridAffineK8PolarWHTValueScaledDotProductAttentionIfSupported(
+                    queries: queries,
+                    keyWeight: keys.0,
+                    keyScales: keys.1,
+                    keyBiases: candidateKeyBiases,
+                    keyGroupSize: quantizedCache.groupSize,
+                    valueCode: candidateValueCode,
+                    scale: scale,
+                    mask: mask,
+                    sinks: nil,
+                    sparseVThreshold: sparseVThreshold,
+                    outputDType: .float32
+                )
+        }
+
+        if let fusedOutput = try nativePackedValueOutput(
+            keys: quantizedKeys,
+            valueCode: valueCode
+        ) {
+            return (fusedOutput, false, .packedNative)
+        }
+        if let fusedOutput = try nativePackedValueOutput(
+            keys: turboQuantContiguousStorage((quantizedKeys.0, quantizedKeys.1, keyBiases)),
+            valueCode: turboQuantContiguousPolarWHTCode(valueCode)
+        ) {
+            return (fusedOutput, false, .packedNativeContiguousRetry)
+        }
+    }
+
+    let repeats = queryHeadCount / kvHeadCount
+    var scaledQueries = queries * scale
+    var qKeys = turboQuantPrefixStorage(quantizedKeys, tokenCount: keyLength)
+    if repeats > 1 {
+        scaledQueries = scaledQueries.reshaped([
+            batchSize, kvHeadCount, repeats, queryLength, headDimension,
+        ])
+        qKeys = (
+            expandedDimensions(qKeys.0, axis: -3),
+            expandedDimensions(qKeys.1, axis: -3),
+            qKeys.2.map { expandedDimensions($0, axis: -3) }
+        )
+    }
+
+    var scores = quantizedMM(
+        scaledQueries,
+        qKeys.0,
+        scales: qKeys.1,
+        biases: qKeys.2,
+        transpose: true,
+        groupSize: quantizedCache.groupSize,
+        bits: quantizedCache.bits,
+        mode: quantizedCache.mode
+    )
+    scores = turboQuantMaskedAffineScores(scores, mask: mask)
+
+    var weights = softmax(scores.asType(.float32), axis: -1)
+    if repeats > 1 {
+        weights = weights.reshaped([
+            batchSize, queryHeadCount, queryLength, keyLength,
+        ])
+    }
+    weights = turboQuantThresholdedAttentionWeights(weights, threshold: sparseVThreshold)
+    let output = try turboQuantMetalPolarWHTAV(
+        attentionWeights: weights.contiguous(stream: .gpu),
+        valueCode: valueCode,
+        outputDType: .float32
+    )
+    return (output, false, .packedGeneric)
+}
+
+private func turboQuantPolarWHTAttentionDiagnostics(
+    from sparseDiagnostics: TurboQuantSparseValueDiagnostics?,
+    path: TurboQuantAttentionPath
+) -> TurboQuantNativeAttentionDiagnostics? {
+    guard let sparseDiagnostics else { return nil }
+    let kernelKind: Int32 =
+        path == .metalHybridK8PolarWHTValue ? 42 : 41
+    let considered = min(sparseDiagnostics.considered, Int(Int32.max))
+    let skipped = min(sparseDiagnostics.skipped, Int(Int32.max))
+    let retained = max(0, considered - skipped)
+    return TurboQuantNativeAttentionDiagnostics(values: [
+        Int32(TurboQuantNativeAttentionOptions.backendVersion),
+        kernelKind,
+        0,
+        0,
+        Int32(skipped),
+        Int32(considered),
+        0,
+        sparseDiagnostics.enabled ? 1 : 0,
+        0,
+        0,
+        0,
+        0,
+        Int32(considered),
+        Int32(retained),
+    ])
+}
+
+private func metalPolarWHTScaledDotProductAttention(
+    queries: MLXArray,
+    keyCode: TurboQuantAttentionCode,
+    turboQuantCache: any TurboQuantCompressedKVCacheProtocol,
+    scale: Float,
+    mask: MLXFast.ScaledDotProductAttentionMaskMode,
+    sinks: MLXArray?
+) throws -> MLXArray? {
+    let availability = TurboQuantKernelAvailability.current
+    let requiresHybridValueKernel = turboQuantCache.precisionPolicy.key.isHighPrecision
+    let polarWHTAttentionAvailable =
+        requiresHybridValueKernel
+            ? availability.attentionCapabilities.hybridK8PolarWHTValueAttention
+            : availability.supportsMetalPolarWHTAttention
+    guard turboQuantCache.kvCodec == .polarWHT,
+        turboQuantCache.activeBackend == .metalPolarWHT,
+        polarWHTAttentionAvailable
+    else {
+        return nil
+    }
+    guard queries.ndim == 4, queries.dim(2) == 1 else {
+        return nil
+    }
+    guard let valueCode = turboQuantCache.polarWHTValueStateForAttention else {
+        throw TurboQuantRuntimeFailure.compressedAttentionUnavailable(
+            "metalPolarWHT attention requested but PolarWHT value sidecar is unavailable"
+        )
+    }
+    let sparseSelection = turboQuantCache.sparseValueSelection.resolved(
+        runtimeMode: turboQuantCache.resolvedRuntimeMode,
+        contextLength: valueCode.layout.logicalLength,
+        policy: turboQuantCache.sparseValuePolicy
+    )
+    let threshold = sparseSelection.resolvedThreshold
+    let output: MLXArray
+    let reason: String
+    let attentionPath: TurboQuantAttentionPath
+    let sparseDiagnostics: TurboQuantSparseValueDiagnostics?
+    let canUsePolarWHTQK = !turboQuantCache.precisionPolicy.key.isHighPrecision
+    if canUsePolarWHTQK,
+        var sidecarKeyCode = turboQuantCache.polarWHTKeyStateForAttention,
+        sidecarKeyCode.layout.batchSize == valueCode.layout.batchSize,
+        sidecarKeyCode.layout.kvHeadCount == valueCode.layout.kvHeadCount,
+        sidecarKeyCode.layout.logicalLength == valueCode.layout.logicalLength,
+        sidecarKeyCode.layout.headDimension == valueCode.layout.headDimension
+    {
+        sidecarKeyCode = turboQuantContiguousPolarWHTCode(sidecarKeyCode)
+        let result = try MLX.turboQuantMetalPolarWHTScaledDotProductAttentionWithDiagnostics(
+            queries: queries.contiguous(stream: .gpu),
+            keyCode: sidecarKeyCode,
+            valueCode: turboQuantContiguousPolarWHTCode(valueCode),
+            scale: scale,
+            mask: mask,
+            sinks: sinks,
+            sparseVThreshold: threshold,
+            outputDType: queries.dtype
+        )
+        output = result.output
+        attentionPath = .metalPolarWHTHybrid
+        sparseDiagnostics = result.sparseValueDiagnostics
+        reason =
+            threshold.map {
+                "metalPolarWHT used sidecar QK plus WHT-pulled V with sparse threshold \($0)"
+            }
+            ?? "metalPolarWHT used sidecar QK plus WHT-pulled V"
+    } else if requiresHybridValueKernel {
+        guard let quantizedCache = turboQuantCache as? any QuantizedKVCacheProtocol else {
+            throw TurboQuantRuntimeFailure.compressedAttentionUnavailable(
+                "metalHybridK8PolarWHTValue requires a QuantizedKVCache-compatible affine key cache"
+            )
+        }
+        guard let affineKeyState = turboQuantCache.hybridAffineKeyStateForAttention else {
+            throw TurboQuantRuntimeFailure.compressedAttentionUnavailable(
+                "metalHybridK8PolarWHTValue requires an affine K8 key sidecar"
+            )
+        }
+        let decodedValueBufferEnabled =
+            !TurboQuantRuntimeControl.enabled("TURBOQUANT_DISABLE_POLARWHT_DECODED_VALUE_BUFFER")
+            && (
+                turboQuantCache.resolvedRuntimeMode == .throughputTurboQuant
+                    || TurboQuantRuntimeControl.enabled(
+                        "TURBOQUANT_ENABLE_POLARWHT_DECODED_VALUE_BUFFER")
+            )
+        let hybridResult = try hybridAffineKPolarWHTValueAttention(
+            queries: queries.contiguous(stream: .gpu),
+            quantizedKeys: affineKeyState,
+            tailQuantizedKeys: turboQuantCache.hybridAffineKeyTailStateForAttention,
+            quantizedCache: quantizedCache,
+            valueCode: valueCode,
+            tailValueCode: turboQuantCache.polarWHTValueTailStateForAttention,
+            decodedValues: decodedValueBufferEnabled
+                ? turboQuantCache.polarWHTDecodedValueState : nil,
+            decodedValueLayout: decodedValueBufferEnabled
+                ? turboQuantCache.polarWHTDecodedValueLayout : nil,
+            scale: scale,
+            mask: mask,
+            sparseVThreshold: threshold
+        )
+        output = hybridResult.output
+        attentionPath = .metalHybridK8PolarWHTValue
+        sparseDiagnostics = nil
+        switch hybridResult.route {
+        case .decodedNative:
+            reason =
+                "metalHybridK8PolarWHTValue used fused resident affine K8 scoring plus buffered PolarWHT-decoded V"
+        case .decodedNativeContiguousRetry:
+            reason =
+                "metalHybridK8PolarWHTValue used fused contiguous-retry affine K8 scoring plus buffered PolarWHT-decoded V"
+        case .decodedGeneric:
+            reason =
+                "metalHybridK8PolarWHTValue used separate affine K8 scoring plus buffered PolarWHT-decoded V"
+        case .segmentedPackedNative:
+            reason =
+                "metalHybridK8PolarWHTValue used segmented affine K8 scoring plus WHT-pulled V tail"
+        case .packedNative:
+            reason =
+                threshold.map {
+                    "metalHybridK8PolarWHTValue used fused resident affine K8 scoring plus WHT-pulled V with sparse threshold \($0)"
+                }
+                ?? "metalHybridK8PolarWHTValue used fused resident affine K8 scoring plus WHT-pulled V"
+        case .packedNativeContiguousRetry:
+            reason =
+                threshold.map {
+                    "metalHybridK8PolarWHTValue used fused contiguous-retry affine K8 scoring plus WHT-pulled V with sparse threshold \($0)"
+                }
+                ?? "metalHybridK8PolarWHTValue used fused contiguous-retry affine K8 scoring plus WHT-pulled V"
+        case .packedGeneric:
+            reason =
+                threshold.map {
+                    "metalHybridK8PolarWHTValue used separate affine K8 scoring plus WHT-pulled V with sparse threshold \($0)"
+                }
+                ?? "metalHybridK8PolarWHTValue used separate affine K8 scoring plus WHT-pulled V"
+        }
+    } else {
+        guard keyCode.layout.batchSize == valueCode.layout.batchSize,
+            keyCode.layout.kvHeadCount == valueCode.layout.kvHeadCount,
+            keyCode.layout.logicalLength == valueCode.layout.logicalLength,
+            keyCode.layout.headDimension == valueCode.layout.headDimension
+        else {
+            throw TurboQuantRuntimeFailure.compressedAttentionUnavailable(
+                "metalPolarWHT hybrid requires aligned compressed key and PolarWHT value layouts"
+            )
+        }
+        let result = try MLX.turboQuantMetalHybridPolarWHTValueScaledDotProductAttentionWithDiagnostics(
+            queries: queries.contiguous(stream: .gpu),
+            keyCode: keyCode,
+            valueCode: turboQuantContiguousPolarWHTCode(valueCode),
+            scale: scale,
+            mask: mask,
+            sinks: sinks,
+            sparseVThreshold: threshold,
+            outputDType: queries.dtype
+        )
+        output = result.output
+        attentionPath =
+            turboQuantCache.precisionPolicy.key.isHighPrecision
+                ? .metalHybridK8PolarWHTValue : .metalPolarWHTHybrid
+        sparseDiagnostics = result.sparseValueDiagnostics
+        let routeName =
+            attentionPath == .metalHybridK8PolarWHTValue
+                ? "metalHybridK8PolarWHTValue"
+                : "metalPolarWHT"
+        reason =
+            threshold.map {
+                "\(routeName) used compressed key scoring plus WHT-pulled V with sparse threshold \($0)"
+            }
+            ?? "\(routeName) used compressed key scoring plus WHT-pulled V"
+    }
+    let lastRecordedPath = turboQuantCache.fallbackResults.last?.toPath
+    let lastRecordedPolicy = turboQuantCache.fallbackResults.last?.policy
+    let lastRecordedReason = turboQuantCache.fallbackResults.last?.reason
+    if lastRecordedPath != attentionPath || lastRecordedPolicy != .exactRequired
+        || lastRecordedReason != reason
+    {
+        turboQuantCache.recordFallback(
+            TurboQuantFallbackResult(
+                fromPath: turboQuantCache.attentionDiagnostics.activeAttentionPath,
+                toPath: attentionPath,
+                policy: .exactRequired,
+                reason: reason,
+                isSemanticallyExact: false
+            )
+        )
+    }
+    turboQuantCache.recordPolarWHTAttentionDiagnostics(
+        turboQuantPolarWHTAttentionDiagnostics(from: sparseDiagnostics, path: attentionPath),
+        path: attentionPath
+    )
+    return output.asType(queries.dtype)
+}
+
+private func polarWHTReferenceHybridScaledDotProductAttention(
+    queries: MLXArray,
+    quantizedKeys: QuantizedKVStorage,
+    cache: any QuantizedKVCacheProtocol,
+    turboQuantCache: any TurboQuantCompressedKVCacheProtocol,
+    scale: Float,
+    mask: MLXFast.ScaledDotProductAttentionMaskMode,
+    sinks: MLXArray?
+) throws -> MLXArray? {
+    guard turboQuantCache.kvCodec == .polarWHT,
+        turboQuantCache.requestedBackend == .polarWHTReference
+            || turboQuantCache.activeBackend == .polarWHTReference
+    else {
+        return nil
+    }
+    guard sinks == nil else {
+        return nil
+    }
+    guard let valueCode = turboQuantCache.polarWHTValueState else {
+        return nil
+    }
+    guard queries.ndim == 4, quantizedKeys.0.ndim == 4 else {
+        return nil
+    }
+
+    let batchSize = queries.dim(0)
+    let queryHeadCount = queries.dim(1)
+    let queryLength = queries.dim(2)
+    let headDimension = queries.dim(3)
+    let kvHeadCount = quantizedKeys.0.dim(-3)
+    let keyLength = quantizedKeys.0.dim(-2)
+    guard batchSize == valueCode.layout.batchSize,
+        kvHeadCount == valueCode.layout.kvHeadCount,
+        keyLength == valueCode.layout.logicalLength,
+        headDimension == valueCode.layout.headDimension,
+        kvHeadCount > 0,
+        queryHeadCount % kvHeadCount == 0
+    else {
+        return nil
+    }
+    guard queryLength == 1 else {
+        return nil
+    }
+
+    let repeats = queryHeadCount / kvHeadCount
+    var scores: MLXArray?
+    var usedPolarWHTQK = false
+    let canUsePolarWHTQK =
+        queryLength == 1 && !turboQuantCache.precisionPolicy.key.isHighPrecision
+    if canUsePolarWHTQK,
+        var keyCode = turboQuantCache.polarWHTKeyState,
+        keyCode.layout.batchSize == batchSize,
+        keyCode.layout.kvHeadCount == kvHeadCount,
+        keyCode.layout.logicalLength == keyLength,
+        keyCode.layout.headDimension == headDimension
+    {
+        do {
+            keyCode.packedIndices = keyCode.packedIndices.contiguous(stream: .gpu)
+            keyCode.norms = keyCode.norms.contiguous(stream: .gpu)
+            var polarScores = try turboQuantMetalPolarWHTQK(
+                queries: queries.contiguous(stream: .gpu),
+                keyCode: keyCode,
+                scale: scale,
+                mask: mask
+            )
+            if repeats > 1 {
+                polarScores = polarScores.reshaped([
+                    batchSize, kvHeadCount, repeats, queryLength, keyLength,
+                ])
+            }
+            scores = polarScores
+            usedPolarWHTQK = true
+        } catch {
+            usedPolarWHTQK = false
+        }
+    }
+
+    if !usedPolarWHTQK {
+        var scaledQueries = queries * scale
+        var qKeys = quantizedKeys
+        if repeats > 1 {
+            scaledQueries = scaledQueries.reshaped([
+                batchSize, kvHeadCount, repeats, queryLength, headDimension,
+            ])
+            qKeys = (
+                expandedDimensions(qKeys.0, axis: -3),
+                expandedDimensions(qKeys.1, axis: -3),
+                qKeys.2.map { expandedDimensions($0, axis: -3) }
+            )
+        }
+
+        var affineScores = quantizedMM(
+            scaledQueries,
+            qKeys.0,
+            scales: qKeys.1,
+            biases: qKeys.2,
+            transpose: true,
+            groupSize: cache.groupSize,
+            bits: cache.bits,
+            mode: cache.mode
+        )
+
+        switch mask {
+        case .causal:
+            let (qLength, kLength) = (affineScores.dim(-2), affineScores.dim(-1))
+            let qIndices = MLXArray(0 ..< qLength) + MLXArray(kLength - qLength)
+            let kIndices = MLXArray(0 ..< kLength)
+            let causalMask = greaterEqual(
+                expandedDimensions(qIndices, axis: -1),
+                expandedDimensions(kIndices, axis: -2)
+            )
+            affineScores = MLX.where(
+                causalMask,
+                affineScores,
+                MLXArray(-Float.greatestFiniteMagnitude)
+            )
+
+        case .array(let maskArray):
+            if maskArray.dtype == .bool {
+                affineScores = MLX.where(
+                    maskArray,
+                    affineScores,
+                    MLXArray(-Float.greatestFiniteMagnitude)
+                )
+            } else {
+                affineScores = affineScores + maskArray
+            }
+
+        case .arrays(let maskArrays):
+            if let maskArray = maskArrays.first {
+                if maskArray.dtype == .bool {
+                    affineScores = MLX.where(
+                        maskArray,
+                        affineScores,
+                        MLXArray(-Float.greatestFiniteMagnitude)
+                    )
+                } else {
+                    affineScores = affineScores + maskArray
+                }
+            }
+
+        case .none:
+            break
+        }
+        scores = affineScores
+    }
+
+    guard let scores else { return nil }
+    let weights = softmax(scores, axis: -1)
+    let output: MLXArray
+    let valuePathReason: String
+    let scoringPathReason =
+        usedPolarWHTQK ? "Metal PolarWHT QK scoring" : "affine K scoring"
+    if let pullOutResult = try polarWHTReferencePullOutValueAttention(
+        weights: weights,
+        valueCode: valueCode,
+        batchSize: batchSize,
+        queryHeadCount: queryHeadCount,
+        queryLength: queryLength,
+        kvHeadCount: kvHeadCount,
+        repeats: repeats
+    ) {
+        output = pullOutResult.output
+        valuePathReason =
+            pullOutResult.usedMetal
+            ? "PolarWHT reference hybrid used \(scoringPathReason) with Metal WHT-pulled value accumulation"
+            : "PolarWHT reference hybrid used \(scoringPathReason) with CPU WHT-pulled value accumulation"
+    } else {
+        var decodedValues = try turboQuantPolarWHTReferenceDecodeAttentionValues(valueCode)
+            .asType(queries.dtype)
+        if repeats > 1 {
+            decodedValues = expandedDimensions(decodedValues, axis: -3)
+        }
+        var decodedOutput = matmul(weights.asType(decodedValues.dtype), decodedValues)
+        if repeats > 1 {
+            decodedOutput = decodedOutput.reshaped([
+                batchSize, queryHeadCount, queryLength, decodedOutput.dim(-1),
+            ])
+        }
+        output = decodedOutput
+        valuePathReason =
+            "PolarWHT reference hybrid used \(scoringPathReason) with decoded PolarWHT values"
+    }
+
+    turboQuantCache.recordFallback(
+        TurboQuantFallbackResult(
+            fromPath: turboQuantCache.attentionDiagnostics.activeAttentionPath,
+            toPath: .polarWHTReferenceHybrid,
+            policy: .packedAllowed,
+            reason: valuePathReason,
+            isSemanticallyExact: false
+        )
+    )
+    return output.asType(queries.dtype)
 }
 
 public func attentionKeyLengthAfterUpdate(cache: KVCache?, keys: MLXArray) -> Int {
@@ -323,6 +1229,20 @@ private func turboQuantTrace(_ message: String) {
     FileHandle.standardError.write(Data("TurboQuant: \(message)\n".utf8))
 }
 
+private func prepareTurboQuantSparseAuxiliaryState(
+    cache: any TurboQuantCompressedKVCacheProtocol,
+    selection: TurboQuantSparseValueSelection
+) {
+    if selection.mode == .pageTopK {
+        cache.ensureKeyPageSummary()
+    }
+    if selection.mode == .candidateSparse
+        || TurboQuantRuntimeControl.enabled("TURBOQUANT_PREPARE_CANDIDATE_SPARSE_SKETCH")
+    {
+        cache.ensureKeyCandidateSketch()
+    }
+}
+
 private func exactScaledDotProductAttention(
     queries: MLXArray,
     keys: MLXArray,
@@ -399,6 +1319,35 @@ private func turboQuantAttentionFallbackLadder(
     }
 
     var failures: [String] = []
+    let skipQJLCompressedPaths = cache.kvCodec == .polarWHT
+    if skipQJLCompressedPaths {
+        do {
+            if let output = try metalPolarWHTScaledDotProductAttention(
+                queries: queries,
+                keyCode: keyCode,
+                turboQuantCache: cache,
+                scale: scale,
+                mask: adjustedMask,
+                sinks: sinks
+            ) {
+                return output
+            }
+            failures.append("metalPolarWHT attention was not admitted for this cache")
+        } catch {
+            let reason = "metalPolarWHT attention failed: \(error)"
+            failures.append(reason)
+            cache.recordFallback(
+                TurboQuantFallbackResult(
+                    fromPath: cache.attentionDiagnostics.activeAttentionPath,
+                    toPath: cache.precisionPolicy.key.isHighPrecision
+                        ? .metalHybridK8PolarWHTValue : .metalPolarWHTHybrid,
+                    policy: .compressedDecodeAllowed,
+                    reason: reason,
+                    isSemanticallyExact: false
+                )
+            )
+        }
+    }
     if cache.optimizationPolicy == .conservative,
         let output = rawExactOutput(
             reason: "conservative TurboQuant policy requires exact raw attention while the raw shadow is complete"
@@ -411,10 +1360,18 @@ private func turboQuantAttentionFallbackLadder(
     let cachedOnlineAdmission =
         stateAlreadyValidated
         && (cachedPath == .onlineFused || cachedPath == .tiledOnlineFused)
-    let sparseVThreshold = cache.sparseValuePolicy.resolvedThreshold(
+    let sparseSelection = cache.sparseValueSelection.resolved(
         runtimeMode: cache.resolvedRuntimeMode,
-        contextLength: keyCode.layout.logicalLength
+        contextLength: keyCode.layout.logicalLength,
+        policy: cache.sparseValuePolicy
     )
+    let sparseVRequested = sparseSelection.isEnabled
+    let sparseNativeMaxContext =
+        TurboQuantRuntimeControl.intValue("TURBOQUANT_SPARSE_V_NATIVE_MAX_CONTEXT")
+        ?? 16_384
+    let sparseNativeAllowedForContext =
+        !sparseVRequested || sparseNativeMaxContext <= 0
+        || keyCode.layout.logicalLength <= sparseNativeMaxContext
     let nativeCapabilities = TurboQuantKernelAvailability.current.attentionCapabilities
     let nativeBackend =
         nativeCapabilities.nativeSegmentedAttentionBackend ?? .unavailable
@@ -432,8 +1389,15 @@ private func turboQuantAttentionFallbackLadder(
                 ?? "native MLX compressed attention backend is unavailable"
         )
     }
-    if sparseVThreshold != nil && nativeCapabilities.nativeSparseVSupport != true {
+    if sparseVRequested && sparseNativeAllowedForContext
+        && nativeCapabilities.nativeSparseVSupport != true
+    {
         nativeRejectionReasons.append("native MLX compressed attention lacks sparse-V support")
+    }
+    if !sparseNativeAllowedForContext {
+        nativeRejectionReasons.append(
+            "Sparse-V native long-context guard disabled sparse selection at context \(keyCode.layout.logicalLength); set TURBOQUANT_SPARSE_V_NATIVE_MAX_CONTEXT=0 to force"
+        )
     }
     if sinks != nil {
         nativeRejectionReasons.append("native MLX compressed attention does not support sinks")
@@ -453,25 +1417,37 @@ private func turboQuantAttentionFallbackLadder(
             "native MLX compressed attention supports only none/causal masks"
         )
     }
+    if skipQJLCompressedPaths {
+        nativeRejectionReasons.append("QJL native compressed attention bypassed for PolarWHT storage")
+    }
     let canUseNative =
-        nativeRejectionReasons.isEmpty
+        !skipQJLCompressedPaths && nativeRejectionReasons.isEmpty
 
     if canUseNative {
         do {
+            let nativeQueries = queries.dtype == .bfloat16 ? queries.asType(.float16) : queries
+            prepareTurboQuantSparseAuxiliaryState(cache: cache, selection: sparseSelection)
+            let keyPageSummary =
+                sparseSelection.mode == .pageTopK ? cache.keyPageSummary : nil
+            let keyCandidateSketch =
+                sparseSelection.mode == .candidateSparse ? cache.keyCandidateSketch : nil
             let result = try MLX.turboQuantNativeScaledDotProductAttentionWithDiagnostics(
-                queries: queries,
+                queries: nativeQueries,
                 keyCode: keyCode,
                 valueCode: valueCode,
-                options: TurboQuantNativeAttentionOptions(
+                options: sparseSelection.nativeOptions(
                     scale: scale,
                     causal: adjustedMask.isCausal,
-                    sparseVThreshold: sparseVThreshold ?? 0,
-                    diagnostics: nativeCapabilities.nativeDiagnosticsSupport == true,
+                    diagnostics: sparseVRequested
+                        || nativeCapabilities.nativeDiagnosticsSupport == true,
                     backendVersion: nativeCapabilities.nativeBackendVersion
                         ?? TurboQuantNativeAttentionOptions.backendVersion
-                )
+                ),
+                keyPageSummary: keyPageSummary,
+                keyCandidateSketch: keyCandidateSketch
             )
-            return result.output
+            cache.recordNativeAttentionDiagnostics(result.diagnostics, selection: sparseSelection)
+            return queries.dtype == .bfloat16 ? result.output.asType(.bfloat16) : result.output
         } catch {
             let reason =
                 "native MLX compressed attention failed via \(nativeBackend): \(error)"
@@ -488,9 +1464,15 @@ private func turboQuantAttentionFallbackLadder(
                 + nativeRejectionReasons.joined(separator: ", ")
         )
     }
+    if sparseVRequested {
+        failures.append(
+            "Sparse-V \(sparseSelection.mode.rawValue) requested but native compressed attention was unavailable; using dense compressed fallback"
+        )
+    }
 
     let canUseOnline =
-        sinks == nil && cache.prefersOnlineFusedAttention
+        !skipQJLCompressedPaths && sinks == nil && cache.prefersOnlineFusedAttention
+        && (!sparseVRequested || !sparseNativeAllowedForContext)
         && keyCode.layout.headDimension == valueCode.layout.headDimension
         && (cachedOnlineAdmission
             || MLX.turboQuantMetalSupportsOnlineFusedAttention(
@@ -510,7 +1492,7 @@ private func turboQuantAttentionFallbackLadder(
                 sinks: sinks,
                 preferOnlineFused: true,
                 kernelProfile: cache.attentionDiagnostics.selectedKernelProfile,
-                sparseVThreshold: sparseVThreshold
+                sparseVThreshold: nil
             )
         } catch {
             let reason = "online fused compressed attention failed: \(error)"
@@ -520,29 +1502,33 @@ private func turboQuantAttentionFallbackLadder(
         failures.append("online fused compressed attention unsupported for this query/cache/mask")
     }
 
-    do {
-        let output = try turboQuantMetalScaledDotProductAttention(
-            queries: queries,
-            keyCode: keyCode,
-            valueCode: valueCode,
-            scale: scale,
-            mask: adjustedMask,
-            sinks: sinks,
-            preferOnlineFused: false,
-            kernelProfile: cache.attentionDiagnostics.selectedKernelProfile,
-            sparseVThreshold: sparseVThreshold
-        )
-        if !failures.isEmpty {
-            recordTurboQuantFallback(
-                cache: cache,
-                path: .twoStageQKAV,
-                reason: failures.joined(separator: "; ")
+    if skipQJLCompressedPaths {
+        failures.append("QJL two-stage attention bypassed for PolarWHT value storage")
+    } else {
+        do {
+            let output = try turboQuantMetalScaledDotProductAttention(
+                queries: queries,
+                keyCode: keyCode,
+                valueCode: valueCode,
+                scale: scale,
+                mask: adjustedMask,
+                sinks: sinks,
+                preferOnlineFused: false,
+                kernelProfile: cache.attentionDiagnostics.selectedKernelProfile,
+                sparseVThreshold: nil
             )
+            if !failures.isEmpty {
+                recordTurboQuantFallback(
+                    cache: cache,
+                    path: .twoStageQKAV,
+                    reason: failures.joined(separator: "; ")
+                )
+            }
+            return output
+        } catch {
+            let reason = "two-stage compressed QK/AV attention failed: \(error)"
+            failures.append(reason)
         }
-        return output
-    } catch {
-        let reason = "two-stage compressed QK/AV attention failed: \(error)"
-        failures.append(reason)
     }
 
     let failureReason = failures.joined(separator: "; ")
@@ -629,13 +1615,74 @@ private func turboQuantAttentionStorageArrays(_ code: TurboQuantAttentionCode) -
 private func asyncEvalTurboQuantAttentionStorage(
     keys: TurboQuantAttentionCode,
     values: TurboQuantAttentionCode,
+    cache: (any TurboQuantCompressedKVCacheProtocol)? = nil,
     output: MLXArray? = nil
 ) {
     var arrays = turboQuantAttentionStorageArrays(keys) + turboQuantAttentionStorageArrays(values)
+    if let keySidecar = cache?.polarWHTKeyState {
+        arrays.append(keySidecar.packedIndices)
+        arrays.append(keySidecar.norms)
+    }
+    if let valueSidecar = cache?.polarWHTValueState {
+        arrays.append(valueSidecar.packedIndices)
+        arrays.append(valueSidecar.norms)
+    }
     if let output {
         arrays.append(output)
     }
     asyncEval(arrays)
+}
+
+private func supportsTurboQuantCompressedPrefillCommit(
+    cache: any TurboQuantCompressedKVCacheProtocol,
+    queries: MLXArray,
+    keys: MLXArray,
+    values: MLXArray,
+    mask: MLXFast.ScaledDotProductAttentionMaskMode
+) -> Bool {
+    if cache.supportsCompressedAttention(
+        queries: queries,
+        keys: keys,
+        values: values,
+        mask: mask
+    ) {
+        return true
+    }
+    let availability = TurboQuantKernelAvailability.current
+    let requiresHybridValueKernel = cache.precisionPolicy.key.isHighPrecision
+    let polarWHTDecodeAvailable =
+        requiresHybridValueKernel
+            ? availability.attentionCapabilities.hybridK8PolarWHTValueAttention
+            : availability.supports(.metalPolarWHT)
+    guard cache.kvCodec == .polarWHT,
+        cache.activeBackend == .metalPolarWHT,
+        polarWHTDecodeAvailable
+    else {
+        return false
+    }
+    guard queries.ndim == 4, keys.ndim == 4, values.ndim == 4 else {
+        return false
+    }
+    guard queries.dim(2) > 1, queries.dim(2) == keys.dim(2), keys.dim(2) == values.dim(2) else {
+        return false
+    }
+    guard queries.dim(0) == keys.dim(0), queries.dim(0) == values.dim(0),
+        keys.dim(1) == values.dim(1)
+    else {
+        return false
+    }
+    guard queries.dim(3) == keys.dim(3),
+        keys.dim(3) == values.dim(3),
+        queries.dim(3) > 0,
+        queries.dim(3) <= 256,
+        (queries.dim(3) & (queries.dim(3) - 1)) == 0
+    else {
+        return false
+    }
+    guard queries.dim(1) % keys.dim(1) == 0 else {
+        return false
+    }
+    return true
 }
 
 /// Install compressed KV during prefill while honoring the cache optimization policy.
@@ -653,7 +1700,8 @@ private func turboQuantCompressedPrefillAttentionThrowing(
     }
     let canonical = canonicalTurboQuantInputs(queries: queries, keys: keys, values: values)
     guard let turboQuantCache = cache as? TurboQuantCompressedKVCacheProtocol,
-        turboQuantCache.supportsCompressedAttention(
+        supportsTurboQuantCompressedPrefillCommit(
+            cache: turboQuantCache,
             queries: canonical.queries,
             keys: canonical.keys,
             values: canonical.values,
@@ -667,10 +1715,14 @@ private func turboQuantCompressedPrefillAttentionThrowing(
     let checkpoint = turboQuantCache.makeCompressedUpdateCheckpoint(
         appendingTokenCount: canonical.keys.dim(2))
     do {
-        let (compressedKeys, compressedValues) = try turboQuantCache.updateCompressed(
-            keys: canonical.keys,
-            values: canonical.values
-        )
+        let (compressedKeys, compressedValues) = try TurboQuantTiming.measure(
+            .compressedCacheUpdate
+        ) {
+            try turboQuantCache.updateCompressed(
+                keys: canonical.keys,
+                values: canonical.values
+            )
+        }
         let state = AttentionKVState.turboQuant(
             keys: compressedKeys,
             values: compressedValues,
@@ -680,17 +1732,20 @@ private func turboQuantCompressedPrefillAttentionThrowing(
         if previousOffset == 0, turboQuantCache.prefersExactInitialPrefill {
             // The exact raw prefill output does not consume the compressed writes, so
             // schedule them explicitly to avoid carrying raw prompt tensors into decode.
-            let output = exactScaledDotProductAttention(
-                queries: canonical.queries,
-                keys: canonical.keys,
-                values: canonical.values,
-                scale: scale,
-                mask: mask,
-                sinks: sinks
-            )
+            let output = TurboQuantTiming.measure(.exactPrefillAttention) {
+                exactScaledDotProductAttention(
+                    queries: canonical.queries,
+                    keys: canonical.keys,
+                    values: canonical.values,
+                    scale: scale,
+                    mask: mask,
+                    sinks: sinks
+                )
+            }
             asyncEvalTurboQuantAttentionStorage(
                 keys: compressedKeys,
                 values: compressedValues,
+                cache: turboQuantCache,
                 output: output
             )
             recordTurboQuantFallback(
@@ -704,19 +1759,21 @@ private func turboQuantCompressedPrefillAttentionThrowing(
             )
         }
 
-        let output = try turboQuantAttentionFallbackLadder(
-            queries: canonical.queries,
-            keyCode: compressedKeys,
-            valueCode: compressedValues,
-            cache: turboQuantCache,
-            scale: scale,
-            mask: mask,
-            sinks: sinks,
-            rawExactKeys: canonical.keys,
-            rawExactValues: canonical.values,
-            rawExactReason: "compressed prefill failed; using exact raw chunk output",
-            stateAlreadyValidated: true
-        )
+        let output = try TurboQuantTiming.measure(.compressedAttention) {
+            try turboQuantAttentionFallbackLadder(
+                queries: canonical.queries,
+                keyCode: compressedKeys,
+                valueCode: compressedValues,
+                cache: turboQuantCache,
+                scale: scale,
+                mask: mask,
+                sinks: sinks,
+                rawExactKeys: canonical.keys,
+                rawExactValues: canonical.values,
+                rawExactReason: "compressed prefill failed; using exact raw chunk output",
+                stateAlreadyValidated: true
+            )
+        }
         return (output, state)
     } catch {
         turboQuantCache.restoreCompressedUpdateCheckpoint(checkpoint)
@@ -777,6 +1834,24 @@ public func attentionWithKVStateThrowing(
 
     case .quantized(let keys, let values, let cache):
         if let mixedCache = cache as? any NativeAffineK8V4KVCacheProtocol {
+            if let rawState = (mixedCache as? any TurboQuantCompressedKVCacheProtocol)?
+                .exactRawStateIfComplete(),
+                rawState.keys.dim(-1) == queries.dim(-1),
+                rawState.values.dim(-1) == queries.dim(-1)
+            {
+                mixedCache.recordNativeAffineK8V4AttentionPath(
+                    .mlxPackedFallback,
+                    failureReason: "affine K8/Vx quantization unsupported for head dimension \(queries.dim(-1)); used exact raw fallback"
+                )
+                return MLXFast.scaledDotProductAttention(
+                    queries: queries,
+                    keys: rawState.keys,
+                    values: rawState.values,
+                    scale: scale,
+                    mask: mask,
+                    sinks: sinks
+                )
+            }
             let nativeSupported = supportsNativeAffineK8V4ScaledDotProductAttention(
                 queries: queries,
                 quantizedKeys: keys,
@@ -788,23 +1863,55 @@ public func attentionWithKVStateThrowing(
                 valueGroupSize: mixedCache.valueGroupSize,
                 valueBits: mixedCache.valueBits
             )
+            let sparseVThreshold = mixedCache.sparseValuePolicy.resolvedThreshold(
+                runtimeMode: mixedCache.sparseValueRuntimeMode,
+                contextLength: keys.0.dim(-2)
+            )
             do {
-                let output = try mixedAffineK8V4ScaledDotProductAttention(
-                    queries: queries,
-                    quantizedKeys: keys,
-                    quantizedValues: values,
-                    scale: scale,
-                    mask: mask,
-                    sinks: sinks,
-                    keyGroupSize: mixedCache.keyGroupSize,
-                    keyBits: mixedCache.keyBits,
-                    valueGroupSize: mixedCache.valueGroupSize,
-                    valueBits: mixedCache.valueBits
+                let residualState = mixedCache.getValueResidualState()
+                let output =
+                    if let residualState {
+                        try mixedAffineK8VxResidualScaledDotProductAttention(
+                            queries: queries,
+                            quantizedKeys: keys,
+                            quantizedValues: values,
+                            residualState: residualState,
+                            scale: scale,
+                            mask: mask,
+                            sinks: sinks,
+                            keyGroupSize: mixedCache.keyGroupSize,
+                            keyBits: mixedCache.keyBits,
+                            valueGroupSize: mixedCache.valueGroupSize,
+                            valueBits: mixedCache.valueBits,
+                            sparseVThreshold: sparseVThreshold
+                        )
+                    } else {
+                        try mixedAffineK8V4ScaledDotProductAttention(
+                            queries: queries,
+                            quantizedKeys: keys,
+                            quantizedValues: values,
+                            scale: scale,
+                            mask: mask,
+                            sinks: sinks,
+                            keyGroupSize: mixedCache.keyGroupSize,
+                            keyBits: mixedCache.keyBits,
+                            valueGroupSize: mixedCache.valueGroupSize,
+                            valueBits: mixedCache.valueBits,
+                            sparseVThreshold: sparseVThreshold
+                        )
+                    }
+                let nativePath: TurboQuantAttentionPath = (
+                    mixedCache.valueBits == TurboQuantKVCodec.affineK8V4ValueBits
+                        ? .affineK8V4Native
+                        : residualState != nil ? .affineK8VxResidual : .affineK8VxNative
                 )
                 mixedCache.recordNativeAffineK8V4AttentionPath(
-                    nativeSupported ? .affineK8V4Native : .mlxPackedFallback,
+                    (nativeSupported || residualState != nil) ? nativePath : .mlxPackedFallback,
                     failureReason: nativeSupported
-                        ? nil : "affine K8/V4 native attention unsupported; used quantizedMM fallback"
+                        ? nil
+                        : residualState != nil
+                            ? "affine K8/Vx residual correction used quantizedMM residual pass"
+                            : "affine K8/Vx native attention unsupported; used quantizedMM fallback"
                 )
                 return output
             } catch {
@@ -825,6 +1932,19 @@ public func attentionWithKVStateThrowing(
                 sinks: sinks,
                 groupSize: affineCache.groupSize
             )
+        }
+        if let turboQuantCache = cache as? any TurboQuantCompressedKVCacheProtocol,
+            let output = try polarWHTReferenceHybridScaledDotProductAttention(
+                queries: queries,
+                quantizedKeys: keys,
+                cache: cache,
+                turboQuantCache: turboQuantCache,
+                scale: scale,
+                mask: mask,
+                sinks: sinks
+            )
+        {
+            return output
         }
         return quantizedScaledDotProductAttention(
             queries: queries,
@@ -1092,6 +2212,9 @@ public func attentionWithCacheUpdateReturningStateThrowing(
     mask: MLXFast.ScaledDotProductAttentionMaskMode = .none,
     sinks: MLXArray? = nil
 ) throws -> (output: MLXArray, state: AttentionKVState) {
+    let timingStart = TurboQuantTiming.start()
+    defer { TurboQuantTiming.record(.attentionWithCacheUpdate, startedAt: timingStart) }
+
     guard let cache else {
         let state = AttentionKVState.raw(keys: keys, values: values)
         return (
@@ -1159,42 +2282,53 @@ public func attentionWithCacheUpdateReturningStateThrowing(
             mask: mask
         )
     {
-        let checkpoint = turboQuantCache.makeCompressedUpdateCheckpoint(
-            appendingTokenCount: turboQuantInputs.keys.dim(2))
+        let checkpoint =
+            turboQuantUsesFailClosedHybridPolarWHTUpdate(turboQuantCache)
+            ? nil
+            : turboQuantCache.makeCompressedUpdateCheckpoint(
+                appendingTokenCount: turboQuantInputs.keys.dim(2))
         do {
-            let (compressedKeys, compressedValues) = try turboQuantCache.updateCompressed(
-                keys: turboQuantInputs.keys,
-                values: turboQuantInputs.values
-            )
+            let (compressedKeys, compressedValues) = try TurboQuantTiming.measure(
+                .compressedCacheUpdate
+            ) {
+                try turboQuantCache.updateCompressed(
+                    keys: turboQuantInputs.keys,
+                    values: turboQuantInputs.values
+                )
+            }
             let state = AttentionKVState.turboQuant(
                 keys: compressedKeys,
                 values: compressedValues,
                 cache: turboQuantCache
             )
-            let output = try turboQuantAttentionFallbackLadder(
-                queries: turboQuantInputs.queries,
-                keyCode: compressedKeys,
-                valueCode: compressedValues,
-                cache: turboQuantCache,
-                scale: scale,
-                mask: mask,
-                sinks: sinks,
-                stateAlreadyValidated: true
-            )
+            let output = try TurboQuantTiming.measure(.compressedAttention) {
+                try turboQuantAttentionFallbackLadder(
+                    queries: turboQuantInputs.queries,
+                    keyCode: compressedKeys,
+                    valueCode: compressedValues,
+                    cache: turboQuantCache,
+                    scale: scale,
+                    mask: mask,
+                    sinks: sinks,
+                    stateAlreadyValidated: true
+                )
+            }
             return (output, state)
         } catch {
-            turboQuantCache.restoreCompressedUpdateCheckpoint(checkpoint)
-            if let fallback = turboQuantPackedUpdateFallbackAfterFailure(
-                queries: turboQuantInputs.queries,
-                keys: turboQuantInputs.keys,
-                values: turboQuantInputs.values,
-                cache: turboQuantCache,
-                scale: scale,
-                mask: mask,
-                sinks: sinks,
-                failure: turboQuantRuntimeFailure(error)
-            ) {
-                return fallback
+            if let checkpoint {
+                turboQuantCache.restoreCompressedUpdateCheckpoint(checkpoint)
+                if let fallback = turboQuantPackedUpdateFallbackAfterFailure(
+                    queries: turboQuantInputs.queries,
+                    keys: turboQuantInputs.keys,
+                    values: turboQuantInputs.values,
+                    cache: turboQuantCache,
+                    scale: scale,
+                    mask: mask,
+                    sinks: sinks,
+                    failure: turboQuantRuntimeFailure(error)
+                ) {
+                    return fallback
+                }
             }
             turboQuantCache.recordCompressedAttentionFailure(String(describing: error))
             throw turboQuantRuntimeFailure(error)
@@ -1202,6 +2336,7 @@ public func attentionWithCacheUpdateReturningStateThrowing(
     }
     if let turboQuantCache = cache as? TurboQuantCompressedKVCacheProtocol,
         let quantizedKVCache = cache as? QuantizedKVCacheProtocol,
+        !(cache is any NativeAffineK8V4KVCacheProtocol),
         !supportsPackedQuantizedAttention(
             keys: turboQuantInputs.keys,
             values: turboQuantInputs.values,

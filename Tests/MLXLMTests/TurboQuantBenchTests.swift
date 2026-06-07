@@ -112,6 +112,40 @@ extension MLXRuntimeSwiftTests {
             }
         }
 
+        @Test func sparseVTopKBenchCaseUsesNativeSelectionDiagnostics() throws {
+            let profile = try #require(
+                TurboQuantProfileRegistry.bundled.profile(
+                    for: "mlx-community/Qwen3.5-2B-OptiQ-4bit",
+                    modelType: "qwen3_5",
+                    keyHeadDimension: 256,
+                    valueHeadDimension: 256
+                ),
+                "Qwen3.5-2B bundled profile must resolve for the benchmark geometry"
+            )
+            let benchCase = TurboQuantBenchCase.qwen35_2B(
+                contextLength: 4096,
+                scheme: .turbo8,
+                codec: .affineK8V4,
+                sparseSelectionConfig: .topK(128)
+            )
+
+            let result = TurboQuantBench.measure(
+                profile: profile,
+                benchCase,
+                iterations: 1,
+                warmupIterations: 0
+            )
+
+            #expect(result.status != .failed)
+            guard result.status == .ok else { return }
+            #expect(result.sparseVEnabled)
+            #expect(result.sparseVSelectionConfig == .topK(128))
+            #expect((result.sparseVSkippedValueTokens ?? 0) > 0)
+            #expect((result.sparseVRetainedMass ?? 0) > 0)
+            #expect(result.fallbackReason == nil)
+            #expect(result.nativeDiagnostics?[1] == 12)
+        }
+
         @Test func legacyResultJSONDefaultsWave0Fields() throws {
             let json = """
                 {
@@ -133,6 +167,9 @@ extension MLXRuntimeSwiftTests {
 
             let result = try JSONDecoder().decode(TurboQuantBenchResult.self, from: Data(json.utf8))
 
+            #expect(result.measuredIterations == 0)
+            #expect(result.warmupIterations == 0)
+            #expect(result.cooldownMilliseconds == 0)
             #expect(result.route == "compressedFused")
             #expect(result.runtimeMode == "capacityTurboQuant")
             #expect(result.requestedRuntimeMode == "capacityTurboQuant")
@@ -146,6 +183,11 @@ extension MLXRuntimeSwiftTests {
             #expect(result.nativePerfGateRequiredSpeedup == nil)
             #expect(result.nativePerfGatePassed == nil)
             #expect(result.kernelFlags == nil)
+            #expect(result.sparseVSelectionConfig == nil)
+            #expect(result.sparseVSkippedValueTokens == nil)
+            #expect(result.sparseVRetainedMass == nil)
+            #expect(result.maxOutputError == nil)
+            #expect(result.layerHeadDiagnostics == nil)
             #expect(result.selectedColdTokens == nil)
             #expect(result.selectorEscalation == nil)
         }
@@ -158,6 +200,9 @@ extension MLXRuntimeSwiftTests {
                 contextLength: 8192,
                 status: .ok,
                 detail: nil,
+                measuredIterations: 12,
+                warmupIterations: 3,
+                cooldownMilliseconds: 10,
                 route: TurboQuantRuntimeRoute.throughputTurboQuantNativeSDPA.rawValue,
                 runtimeMode: TurboQuantRuntimeMode.throughputTurboQuant.rawValue,
                 requestedRuntimeMode: TurboQuantRuntimeMode.auto.rawValue,
@@ -187,6 +232,9 @@ extension MLXRuntimeSwiftTests {
             )
 
             #expect(decoded.route == "throughputTurboQuantNativeSDPA")
+            #expect(decoded.measuredIterations == 12)
+            #expect(decoded.warmupIterations == 3)
+            #expect(decoded.cooldownMilliseconds == 10)
             #expect(decoded.requestedRuntimeMode == "auto")
             #expect(decoded.resolvedRuntimeMode == "throughputTurboQuant")
             #expect(decoded.precisionPolicy == policy)
@@ -247,6 +295,52 @@ extension MLXRuntimeSwiftTests {
             #expect(decoded.nativePerfGatePassed == false)
         }
 
+        @Test func resultJSONIncludesTimingBreakdownFields() throws {
+            let result = TurboQuantBenchResult(
+                label: "qwen3.5-2b-sparse-timing",
+                scheme: "turbo8",
+                codec: TurboQuantKVCodec.affineK8V4.rawValue,
+                contextLength: 32768,
+                status: .ok,
+                detail: nil,
+                measuredIterations: 8,
+                warmupIterations: 2,
+                cooldownMilliseconds: 25,
+                sparseVEnabled: true,
+                sparseVSelectionConfig: .topK(256),
+                qkMS: 0.11,
+                softmaxMS: 0.22,
+                selectionMS: 0.33,
+                maskOrCompactionMS: 0.44,
+                avMS: 0.55,
+                denseK8V4ReferenceMS: 0.66,
+                compressedTokensPerSecond: 90,
+                plainTokensPerSecond: 100,
+                speedRatioToPlain: 0.9,
+                cosineSimilarity: 0.999,
+                maxAbsErrorP95: 0.01,
+                finite: true,
+                compressedKVBytes: 1024,
+                plainKVBytes: 4096,
+                memoryReductionRatio: 4
+            )
+
+            let decoded = try JSONDecoder().decode(
+                TurboQuantBenchResult.self,
+                from: try JSONEncoder().encode(result)
+            )
+
+            #expect(decoded.measuredIterations == 8)
+            #expect(decoded.warmupIterations == 2)
+            #expect(decoded.cooldownMilliseconds == 25)
+            #expect(decoded.qkMS == 0.11)
+            #expect(decoded.softmaxMS == 0.22)
+            #expect(decoded.selectionMS == 0.33)
+            #expect(decoded.maskOrCompactionMS == 0.44)
+            #expect(decoded.avMS == 0.55)
+            #expect(decoded.denseK8V4ReferenceMS == 0.66)
+        }
+
         @Test func hybridSelectorResultJSONIncludesWave5Diagnostics() throws {
             let result = TurboQuantBench.measureHybridSelector(
                 TurboQuantHybridBenchCase(
@@ -287,6 +381,162 @@ extension MLXRuntimeSwiftTests {
             #expect(decoded.anchorColdTokens == 1024)
             #expect(decoded.selectorEscalation == TurboQuantColdSelectorEscalation.none.rawValue)
             #expect(decoded.fullScanFallbackCount == 0)
+        }
+
+        @Test func sparseVProofConfigsRepresentHardeningGrid() throws {
+            let configs = TurboQuantSparseSelectionConfig.proofMatrix
+
+            #expect(configs.filter { $0.mode == .threshold }.compactMap(\.threshold) == [
+                1e-4, 5e-5, 1e-5,
+            ])
+            #expect(configs.filter { $0.mode == .topK }.compactMap(\.topK) == [128, 256, 512])
+            #expect(
+                configs.filter { $0.mode == .cumulativeMass }
+                    .compactMap(\.cumulativeMassPercent) == [99.0, 99.5, 99.9])
+            #expect(
+                configs.filter { $0.mode == .hybridCumulativeFloorMaxTopK }.compactMap(\.maxTopK)
+                    == [128, 256, 512])
+            let defaultCase = TurboQuantBenchCase.qwen35_2B(
+                contextLength: 8192,
+                scheme: .turbo8
+            )
+            #expect(defaultCase.sparseSelectionConfig == nil)
+            #expect(defaultCase.sparseValuePolicy == .off)
+        }
+
+        @Test func optimizationPathMatrixCoversRuntimeAndCodecPaths() throws {
+            let rows = TurboQuantBench.optimizationPathMatrix(contextLength: 32768)
+
+            #expect(rows.allSatisfy { $0.anchorLabel == "fp16-plain" })
+            #expect(rows.contains {
+                $0.runtimeMode == .rawPreferred
+                    && $0.variantLabel == "fp16-plain-raw-sdpa"
+            })
+            #expect(rows.contains {
+                $0.runtimeMode == .throughputTurboQuant
+                    && $0.variantLabel == "throughput-k8-v4-decoded-sdpa"
+            })
+            #expect(rows.contains {
+                $0.runtimeMode == .capacityTurboQuant
+                    && $0.codec == .affineK8V4
+                    && $0.variantLabel == "capacity-k8-v4-compressed"
+            })
+            #expect(rows.contains {
+                $0.runtimeMode == .capacityTurboQuant
+                    && $0.codec == .affineK8Vx
+                    && $0.precisionPolicy?.value == .turbo3_5
+            })
+            #expect(rows.contains {
+                $0.runtimeMode == .capacityTurboQuant
+                    && $0.codec == .affineInt4
+            })
+            #expect(rows.contains {
+                $0.runtimeMode == .capacityTurboQuant
+                    && $0.codec == .polarQJL
+                    && $0.scheme == .turbo4v2
+            })
+            #expect(rows.contains {
+                $0.runtimeMode == .capacityTurboQuant
+                    && $0.codec == .polarQJL
+                    && $0.scheme == .turbo3_5
+            })
+            #expect(rows.contains {
+                $0.runtimeMode == .capacityTurboQuant
+                    && $0.codec == .polarWHT
+                    && $0.variantLabel == "capacity-polar-wht-v3"
+            })
+            #expect(rows.allSatisfy {
+                $0.runtimeMode == .capacityTurboQuant || $0.sparseSelectionConfig == nil
+            })
+        }
+
+        @Test func sparseVHardeningMatrixAnchorsLowerVAndSparseRows() throws {
+            let rows = TurboQuantBench.sparseVHardeningMatrix(contextLength: 32768)
+
+            #expect(rows.count == 3 + TurboQuantSparseSelectionConfig.proofMatrix.count)
+            #expect(rows.allSatisfy { $0.anchorLabel == "dense-k8-v4" })
+            #expect(rows[0].codec == .affineK8V4)
+            #expect(rows[0].variantLabel == "dense-k8-v4")
+            #expect(rows.contains {
+                $0.codec == .affineK8Vx && $0.precisionPolicy?.value == .turbo3_5
+                    && $0.variantLabel == "k8-v3-protected-boundary"
+            })
+            #expect(rows.contains {
+                $0.codec == .affineK8Vx && $0.precisionPolicy?.value == .turbo2_5
+                    && $0.variantLabel == "k8-v2-protected-boundary"
+            })
+            #expect(rows.contains {
+                $0.sparseSelectionConfig == .threshold(1e-4)
+                    && $0.sparseValuePolicy == .force(threshold: 1e-4)
+            })
+            #expect(rows.contains {
+                $0.sparseSelectionConfig == .topK(256)
+                    && $0.sparseValuePolicy == .off
+            })
+            #expect(TurboQuantSparseSelectionConfig.candidateSparse(
+                recentTokens: 256,
+                candidatePages: 4,
+                olderTokenBudget: 128
+            ).nativeSelectionMode == .candidateSparse)
+        }
+
+        @Test func sparseVDiagnosticsRoundTripInBenchResult() throws {
+            let result = TurboQuantBenchResult(
+                label: "qwen3.5-2b-sparse",
+                anchorLabel: "dense-k8-v4",
+                variantLabel: "sparse-v-threshold",
+                scheme: "turbo8",
+                codec: TurboQuantKVCodec.affineK8V4.rawValue,
+                contextLength: 32768,
+                status: .ok,
+                detail: nil,
+                route: "capacityTurboQuantCompressed",
+                sparseVEnabled: true,
+                sparseVSelectionConfig: .hybrid(cumulativeFloorPercent: 99.5, maxTopK: 256),
+                sparseVThreshold: 1e-5,
+                sparseVSkipRatio: 0.25,
+                sparseVSkippedValueTokens: 1024,
+                sparseVTotalValueTokens: 4096,
+                sparseVRetainedMass: 0.995,
+                maxOutputError: 0.03125,
+                layerHeadDiagnostics: [
+                    TurboQuantBenchLayerHeadDiagnostics(
+                        layerIndex: 3,
+                        headIndex: 1,
+                        skippedValueTokens: 128,
+                        totalValueTokens: 512,
+                        retainedMass: 0.997,
+                        maxOutputError: 0.01,
+                        cosineSimilarity: 0.999,
+                        fallbackReason: nil
+                    )
+                ],
+                compressedTokensPerSecond: 90,
+                plainTokensPerSecond: 100,
+                speedRatioToPlain: 0.9,
+                cosineSimilarity: 0.998,
+                maxAbsErrorP95: 0.03125,
+                finite: true,
+                compressedKVBytes: 1024,
+                compressedKeyBytes: 512,
+                compressedValueBytes: 512,
+                plainKVBytes: 4096,
+                memoryReductionRatio: 4
+            )
+
+            let decoded = try JSONDecoder().decode(
+                TurboQuantBenchResult.self,
+                from: try JSONEncoder().encode(result)
+            )
+
+            #expect(decoded.anchorLabel == "dense-k8-v4")
+            #expect(decoded.sparseVSelectionConfig == .hybrid(cumulativeFloorPercent: 99.5, maxTopK: 256))
+            #expect(decoded.sparseVSkippedValueTokens == 1024)
+            #expect(decoded.sparseVTotalValueTokens == 4096)
+            #expect(decoded.sparseVRetainedMass == 0.995)
+            #expect(decoded.maxOutputError == 0.03125)
+            #expect(decoded.layerHeadDiagnostics?.first?.layerIndex == 3)
+            #expect(decoded.layerHeadDiagnostics?.first?.cosineSimilarity == 0.999)
         }
     }
 }

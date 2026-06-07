@@ -85,7 +85,7 @@ public func partitionedLayerCall<T>(
     return result
 }
 
-/// Throwing variant of ``partitionedLayerCall`` for model paths that need
+/// Throwing variant of `partitionedLayerCall` for model paths that need
 /// recoverable TurboQuant attention failures instead of process-fatal fallbacks.
 public func partitionedLayerCallThrowing<T>(
     index: Int,

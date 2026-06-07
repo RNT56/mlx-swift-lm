@@ -21,6 +21,8 @@ struct TurboQuantCacheRuntimeSnapshotTests {
         #expect(snapshot.valueBytes == 0)
         #expect(!snapshot.rawShadowAllocated)
         #expect(!snapshot.packedFallbackAllocated)
+        #expect(snapshot.polarWHTValueBytes == 0)
+        #expect(!snapshot.polarWHTValuePayloadAllocated)
     }
 
     @Test func legacyV1SnapshotDecodesWithWave1Defaults() throws {
@@ -58,6 +60,8 @@ struct TurboQuantCacheRuntimeSnapshotTests {
         #expect(snapshot.decodedActiveKeyBytes == 0)
         #expect(snapshot.decodedActiveValueBytes == 0)
         #expect(!snapshot.activeCacheAllocated)
+        #expect(snapshot.polarWHTValueBytes == 0)
+        #expect(!snapshot.polarWHTValuePayloadAllocated)
     }
 
     @Test func runtimeSnapshotRoundTripsWave2Metadata() throws {
@@ -85,6 +89,44 @@ struct TurboQuantCacheRuntimeSnapshotTests {
         #expect(decoded.boundaryPolicy == .protectedEdges(first: 2, last: 2))
         #expect(decoded.boundaryProtectedLayerCount == 4)
         #expect(decoded.boundaryProtectionReason == "test")
+    }
+
+    @Test func runtimeSnapshotRoundTripsPolarWHTMetadata() throws {
+        let snapshot = TurboQuantCacheRuntimeSnapshot(
+            lifecycleDescription: "polarWHT(logicalLength:8,capacity:16)",
+            logicalLength: 8,
+            capacity: 16,
+            pinnedPrefixLength: 0,
+            ringOffset: 0,
+            keyBytes: 1024,
+            valueBytes: 384,
+            rawShadowAllocated: false,
+            packedFallbackAllocated: true,
+            lastAttentionPath: TurboQuantAttentionPath.mlxPackedFallback.rawValue,
+            lastFailure: nil,
+            kvCodec: .polarWHT,
+            valueBits: TurboQuantKVCodec.polarWHTDefaultValueBits,
+            selectedPath: TurboQuantAttentionPath.mlxPackedFallback.rawValue,
+            fallbackReason: "PolarWHT Metal kernels unavailable; using MLX packed TurboQuant lanes.",
+            requestedRuntimeMode: .auto,
+            resolvedRuntimeMode: .capacityTurboQuant,
+            runtimeFallbackReason: "PolarWHT Metal kernels unavailable; using MLX packed TurboQuant lanes.",
+            polarWHTValueBytes: 0,
+            polarWHTValuePayloadAllocated: false
+        )
+
+        let decoded = try JSONDecoder().decode(
+            TurboQuantCacheRuntimeSnapshot.self,
+            from: try JSONEncoder().encode(snapshot)
+        )
+
+        #expect(decoded.kvCodec == .polarWHT)
+        #expect(decoded.valueBits == TurboQuantKVCodec.polarWHTDefaultValueBits)
+        #expect(decoded.selectedPath == TurboQuantAttentionPath.mlxPackedFallback.rawValue)
+        #expect(decoded.fallbackReason?.contains("PolarWHT Metal kernels unavailable") == true)
+        #expect(decoded.runtimeFallbackReason?.contains("PolarWHT Metal kernels unavailable") == true)
+        #expect(decoded.polarWHTValueBytes == 0)
+        #expect(!decoded.polarWHTValuePayloadAllocated)
     }
 
     @Test func runtimeSnapshotRoundTripsAffineInt4Metadata() throws {
@@ -137,6 +179,8 @@ struct TurboQuantCacheRuntimeSnapshotTests {
             quantizationMode: QuantizationMode.affine.rawValue,
             keyBits: TurboQuantKVCodec.affineK8V4KeyBits,
             groupSize: TurboQuantKVCodec.affineK8V4KeyGroupSize,
+            valueBits: TurboQuantKVCodec.affineK8V4ValueBits,
+            valueGroupSize: TurboQuantKVCodec.affineK8V4ValueGroupSize,
             selectedPath: TurboQuantAttentionPath.affineK8V4Native.rawValue,
             fallbackReason: nil
         )
@@ -150,7 +194,45 @@ struct TurboQuantCacheRuntimeSnapshotTests {
         #expect(decoded.quantizationMode == QuantizationMode.affine.rawValue)
         #expect(decoded.keyBits == TurboQuantKVCodec.affineK8V4KeyBits)
         #expect(decoded.groupSize == TurboQuantKVCodec.affineK8V4KeyGroupSize)
+        #expect(decoded.valueBits == TurboQuantKVCodec.affineK8V4ValueBits)
+        #expect(decoded.valueGroupSize == TurboQuantKVCodec.affineK8V4ValueGroupSize)
         #expect(decoded.selectedPath == TurboQuantAttentionPath.affineK8V4Native.rawValue)
+    }
+
+    @Test func runtimeSnapshotRoundTripsAffineK8VxMetadata() throws {
+        let snapshot = TurboQuantCacheRuntimeSnapshot(
+            lifecycleDescription: "affineK8V3Native(logicalLength:8,capacity:16)",
+            logicalLength: 8,
+            capacity: 16,
+            pinnedPrefixLength: 0,
+            ringOffset: 0,
+            keyBytes: 1024,
+            valueBytes: 384,
+            rawShadowAllocated: false,
+            packedFallbackAllocated: false,
+            lastAttentionPath: TurboQuantAttentionPath.affineK8VxNative.rawValue,
+            lastFailure: nil,
+            kvCodec: .affineK8Vx,
+            quantizationMode: QuantizationMode.affine.rawValue,
+            keyBits: TurboQuantKVCodec.affineK8V4KeyBits,
+            groupSize: TurboQuantKVCodec.affineK8V4KeyGroupSize,
+            valueBits: 3,
+            valueGroupSize: TurboQuantKVCodec.affineK8V4ValueGroupSize,
+            selectedPath: TurboQuantAttentionPath.affineK8VxNative.rawValue,
+            fallbackReason: nil
+        )
+
+        let decoded = try JSONDecoder().decode(
+            TurboQuantCacheRuntimeSnapshot.self,
+            from: try JSONEncoder().encode(snapshot)
+        )
+
+        #expect(decoded.kvCodec == .affineK8Vx)
+        #expect(decoded.keyBits == TurboQuantKVCodec.affineK8V4KeyBits)
+        #expect(decoded.groupSize == TurboQuantKVCodec.affineK8V4KeyGroupSize)
+        #expect(decoded.valueBits == 3)
+        #expect(decoded.valueGroupSize == TurboQuantKVCodec.affineK8V4ValueGroupSize)
+        #expect(decoded.selectedPath == TurboQuantAttentionPath.affineK8VxNative.rawValue)
     }
 
     @Test func throughputSnapshotRecordsActiveDecodedResidency() {

@@ -33,9 +33,7 @@ public enum TurboQuantSparseValuePolicy: Hashable, Codable, Sendable {
     }
 
     public static let defaultAutoThreshold: Float = 1e-6
-    public static let profileDefault = TurboQuantSparseValuePolicy.auto(
-        threshold: defaultAutoThreshold
-    )
+    public static let profileDefault = TurboQuantSparseValuePolicy.off
 
     public init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
@@ -89,13 +87,186 @@ public enum TurboQuantSparseValuePolicy: Hashable, Codable, Sendable {
         switch self {
         case .off:
             nil
-        case .auto(let threshold):
-            runtimeMode == .capacityTurboQuant && contextLength >= minimumAutoContextLength
-                ? max(0, threshold)
-                : nil
+        case .auto:
+            nil
         case .force(let threshold):
             runtimeMode == .capacityTurboQuant ? max(0, threshold) : nil
         }
+    }
+}
+
+public enum TurboQuantSparseValueSelectionMode: String, Hashable, Codable, Sendable, CaseIterable {
+    case off
+    case threshold
+    case topK
+    case cumulativeMass
+    case hybridCumulativeMassTopK
+    case blockThreshold
+    case pageTopK
+    case candidateSparse
+
+    public var nativeMode: TurboQuantSparseValueNativeSelectionMode {
+        switch self {
+        case .off:
+            return .off
+        case .threshold:
+            return .threshold
+        case .topK:
+            return .topK
+        case .cumulativeMass:
+            return .cumulativeMass
+        case .hybridCumulativeMassTopK:
+            return .hybridCumulativeMassTopK
+        case .blockThreshold:
+            return .blockThreshold
+        case .pageTopK:
+            return .pageTopK
+        case .candidateSparse:
+            return .candidateSparse
+        }
+    }
+}
+
+public struct TurboQuantSparseValueSelection: Hashable, Codable, Sendable {
+    public var mode: TurboQuantSparseValueSelectionMode
+    public var threshold: Float?
+    public var topK: Int?
+    /// Fraction of softmax mass to retain, e.g. 0.995 for 99.5%.
+    public var cumulativeMass: Float?
+    public var maxTopK: Int?
+    public var recentTokens: Int?
+    public var candidatePages: Int?
+
+    public init(
+        mode: TurboQuantSparseValueSelectionMode = .off,
+        threshold: Float? = nil,
+        topK: Int? = nil,
+        cumulativeMass: Float? = nil,
+        maxTopK: Int? = nil,
+        recentTokens: Int? = nil,
+        candidatePages: Int? = nil
+    ) {
+        self.mode = mode
+        self.threshold = threshold.map { max(0, $0) }
+        self.topK = topK.map { max(1, $0) }
+        self.cumulativeMass = cumulativeMass.map { min(1, max(0, $0)) }
+        self.maxTopK = maxTopK.map { max(1, $0) }
+        self.recentTokens = recentTokens.map { max(0, $0) }
+        self.candidatePages = candidatePages.map { max(0, $0) }
+    }
+
+    public static let off = TurboQuantSparseValueSelection()
+
+    public static func threshold(_ threshold: Float) -> Self {
+        Self(mode: .threshold, threshold: threshold)
+    }
+
+    public static func blockThreshold(_ threshold: Float) -> Self {
+        Self(mode: .blockThreshold, threshold: threshold)
+    }
+
+    public static func topK(_ topK: Int) -> Self {
+        Self(mode: .topK, topK: topK)
+    }
+
+    public static func pageTopK(_ topK: Int) -> Self {
+        Self(mode: .pageTopK, topK: topK)
+    }
+
+    public static func candidateSparse(
+        recentTokens: Int,
+        candidatePages: Int,
+        olderTokenBudget: Int
+    ) -> Self {
+        Self(
+            mode: .candidateSparse,
+            topK: olderTokenBudget,
+            recentTokens: recentTokens,
+            candidatePages: candidatePages
+        )
+    }
+
+    public static func cumulativeMass(_ mass: Float) -> Self {
+        Self(mode: .cumulativeMass, cumulativeMass: mass)
+    }
+
+    public static func hybrid(cumulativeMass: Float, maxTopK: Int) -> Self {
+        Self(
+            mode: .hybridCumulativeMassTopK,
+            cumulativeMass: cumulativeMass,
+            maxTopK: maxTopK
+        )
+    }
+
+    public static func thresholdPolicy(_ policy: TurboQuantSparseValuePolicy) -> Self {
+        switch policy {
+        case .off, .auto:
+            return .off
+        case .force(let threshold):
+            return .threshold(threshold)
+        }
+    }
+
+    public var isEnabled: Bool {
+        switch mode {
+        case .off:
+            return false
+        case .threshold, .blockThreshold:
+            return (threshold ?? 0) > 0
+        case .topK, .pageTopK:
+            return (topK ?? 0) > 0
+        case .candidateSparse:
+            return (recentTokens ?? 0) > 0 || (candidatePages ?? 0) > 0 || (topK ?? 0) > 0
+        case .cumulativeMass:
+            return (cumulativeMass ?? 0) > 0
+        case .hybridCumulativeMassTopK:
+            return (cumulativeMass ?? 0) > 0 && (maxTopK ?? topK ?? 0) > 0
+        }
+    }
+
+    public func resolved(
+        runtimeMode: TurboQuantRuntimeMode,
+        contextLength: Int,
+        policy: TurboQuantSparseValuePolicy = .off,
+        minimumAutoContextLength: Int = 16_384
+    ) -> Self {
+        guard runtimeMode == .capacityTurboQuant else { return .off }
+        if mode != .off {
+            return isEnabled ? self : .off
+        }
+        guard let threshold = policy.resolvedThreshold(
+            runtimeMode: runtimeMode,
+            contextLength: contextLength,
+            minimumAutoContextLength: minimumAutoContextLength
+        ) else {
+            return .off
+        }
+        return .threshold(threshold)
+    }
+
+    public var resolvedThreshold: Float? {
+        mode == .threshold || mode == .blockThreshold ? threshold : nil
+    }
+
+    public func nativeOptions(
+        scale: Float,
+        causal: Bool,
+        diagnostics: Bool,
+        backendVersion: Int?
+    ) -> TurboQuantNativeAttentionOptions {
+        TurboQuantNativeAttentionOptions(
+            scale: scale,
+            causal: causal,
+            sparseVThreshold: resolvedThreshold ?? 0,
+            sparseVSelectionMode: mode.nativeMode,
+            sparseVTopK: topK ?? 0,
+            sparseVCumulativeMass: cumulativeMass ?? 0,
+            sparseVMaxTopK: maxTopK ?? 0,
+            sparseVRecentTokens: recentTokens ?? 0,
+            sparseVCandidatePages: candidatePages ?? 0,
+            diagnostics: diagnostics,
+            backendVersion: backendVersion ?? TurboQuantNativeAttentionOptions.backendVersion
+        )
     }
 }
 
@@ -148,8 +319,10 @@ public enum TurboQuantValuePrecision: String, Codable, Sendable, CaseIterable, E
             nil
         case .turbo8:
             8
-        case .turbo4v2, .turbo3_5:
+        case .turbo4v2:
             4
+        case .turbo3_5:
+            3
         case .turbo2_5:
             2
         }
@@ -167,6 +340,11 @@ public enum TurboQuantValuePrecision: String, Codable, Sendable, CaseIterable, E
             return .turbo2_5
         }
     }
+}
+
+public enum TurboQuantBoundaryCachePrecision: String, Codable, Sendable, CaseIterable, Hashable {
+    case affineK8V4
+    case raw
 }
 
 public enum TurboQuantBoundaryPolicy: Hashable, Codable, Sendable {
@@ -289,27 +467,61 @@ public struct TurboQuantKVPrecisionPolicy: Hashable, Codable, Sendable {
     public var key: TurboQuantKeyPrecision
     public var value: TurboQuantValuePrecision
     public var boundary: TurboQuantBoundaryPolicy
+    public var boundaryCachePrecision: TurboQuantBoundaryCachePrecision
 
     public init(
         key: TurboQuantKeyPrecision,
         value: TurboQuantValuePrecision,
-        boundary: TurboQuantBoundaryPolicy = .profileDefault
+        boundary: TurboQuantBoundaryPolicy = .profileDefault,
+        boundaryCachePrecision: TurboQuantBoundaryCachePrecision = .affineK8V4
     ) {
         self.key = key
         self.value = value
         self.boundary = boundary
+        self.boundaryCachePrecision = boundaryCachePrecision
     }
 
     public static let qwenQ4Default = TurboQuantKVPrecisionPolicy(
         key: .fp16OrQ8,
         value: .turbo4v2,
-        boundary: .profileDefault
+        boundary: .protectedEdges(first: 1, last: 1),
+        boundaryCachePrecision: .affineK8V4
     )
+
+    private enum CodingKeys: String, CodingKey {
+        case key
+        case value
+        case boundary
+        case boundaryCachePrecision
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.init(
+            key: try container.decode(TurboQuantKeyPrecision.self, forKey: .key),
+            value: try container.decode(TurboQuantValuePrecision.self, forKey: .value),
+            boundary: try container.decodeIfPresent(TurboQuantBoundaryPolicy.self, forKey: .boundary)
+                ?? .profileDefault,
+            boundaryCachePrecision: try container.decodeIfPresent(
+                TurboQuantBoundaryCachePrecision.self,
+                forKey: .boundaryCachePrecision
+            ) ?? .affineK8V4
+        )
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(key, forKey: .key)
+        try container.encode(value, forKey: .value)
+        try container.encode(boundary, forKey: .boundary)
+        try container.encode(boundaryCachePrecision, forKey: .boundaryCachePrecision)
+    }
 
     public static func legacy(
         preset: TurboQuantPreset,
         valueBits: Int?,
-        boundary: TurboQuantBoundaryPolicy = .disabled
+        boundary: TurboQuantBoundaryPolicy = .profileDefault,
+        boundaryCachePrecision: TurboQuantBoundaryCachePrecision = .affineK8V4
     ) -> TurboQuantKVPrecisionPolicy {
         let key: TurboQuantKeyPrecision =
             switch preset {
@@ -325,7 +537,8 @@ public struct TurboQuantKVPrecisionPolicy: Hashable, Codable, Sendable {
         return TurboQuantKVPrecisionPolicy(
             key: key,
             value: .compressed(bits: valueBits ?? preset.defaultValueBits),
-            boundary: boundary
+            boundary: boundary,
+            boundaryCachePrecision: boundaryCachePrecision
         )
     }
 
@@ -341,29 +554,30 @@ public struct TurboQuantKVPrecisionPolicy: Hashable, Codable, Sendable {
         !key.isHighPrecision
     }
 
-    public var usesCompressedKeyPolicy: Bool {
-        key != .fp16
+    public var usesLowPrecisionValue: Bool {
+        guard let valueBits = value.valueBits else { return false }
+        return valueBits < 8
     }
 
-    public var usesLowPrecisionValue: Bool {
-        value != .fp16
+    public var requiresBoundaryProtection: Bool {
+        usesLowPrecisionKey || usesLowPrecisionValue
     }
 
     public var requiresRawBoundaryProtection: Bool {
-        usesCompressedKeyPolicy || usesLowPrecisionValue
+        requiresBoundaryProtection
     }
 
     public func resolvedBoundaryPolicy(layerCount: Int) -> TurboQuantBoundaryPolicy {
         boundary.resolved(
             layerCount: layerCount,
-            requiresProtection: requiresRawBoundaryProtection
+            requiresProtection: requiresBoundaryProtection
         )
     }
 
     public func protectedBoundaryLayerIndexes(layerCount: Int) -> Set<Int> {
         boundary.protectedLayerIndexes(
             layerCount: layerCount,
-            requiresProtection: requiresRawBoundaryProtection
+            requiresProtection: requiresBoundaryProtection
         )
     }
 
@@ -371,7 +585,7 @@ public struct TurboQuantKVPrecisionPolicy: Hashable, Codable, Sendable {
         boundary.protects(
             layerIndex: layerIndex,
             layerCount: layerCount,
-            requiresProtection: requiresRawBoundaryProtection
+            requiresProtection: requiresBoundaryProtection
         )
     }
 

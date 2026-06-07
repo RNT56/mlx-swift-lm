@@ -45,6 +45,47 @@ extension MLXRuntimeSwiftTests {
             #expect(!TurboQuantProfileStatus.deprecated.isActive)
         }
 
+        @Test func testPolarWHTProfileAppliesDistinctCodecAndBackend() {
+            let profile = TurboQuantProfile(
+                id: "polar-wht-test",
+                modelPatterns: ["polar-wht-test"],
+                supportedKeyHeadDimensions: [128],
+                valueBits: TurboQuantKVCodec.polarWHTDefaultValueBits,
+                kvCodec: .polarWHT
+            )
+
+            let parameters = profile.applying(to: GenerateParameters())
+
+            #expect(parameters.kvCodec == .polarWHT)
+            #expect(parameters.turboQuantBackend == .metalPolarWHT)
+            #expect(parameters.turboQuantValueBits == TurboQuantKVCodec.polarWHTDefaultValueBits)
+        }
+
+        @Test func testPolarWHTReferenceProfileHonorsExplicitBackend() throws {
+            let json = """
+                {
+                  "id": "polar-wht-reference-test",
+                  "modelPatterns": ["polar-wht-reference-test"],
+                  "supportedKeyHeadDimensions": [128],
+                  "valueBits": 3,
+                  "backend": "polarWHTReference",
+                  "kvCodec": "polarWHT"
+                }
+                """
+            let profile = try JSONDecoder().decode(
+                TurboQuantProfile.self,
+                from: Data(json.utf8)
+            )
+
+            let parameters = profile.applying(to: GenerateParameters())
+
+            #expect(profile.kvCodec == .polarWHT)
+            #expect(profile.backend == .polarWHTReference)
+            #expect(parameters.kvCodec == .polarWHT)
+            #expect(parameters.turboQuantBackend == .polarWHTReference)
+            #expect(parameters.turboQuantValueBits == TurboQuantKVCodec.polarWHTDefaultValueBits)
+        }
+
         @Test func testBundledRegistryMatchesKnownModelIDs() throws {
             let registry = TurboQuantProfileRegistry.bundled
 
@@ -138,6 +179,13 @@ extension MLXRuntimeSwiftTests {
             #expect(gemma3Small.safeContextLength == 32768)
             #expect(
                 gemma3Small.optimizationPolicy == TurboQuantOptimizationPolicy.conservative
+            )
+            #expect(
+                gemma3Small.turboQuant.precisionPolicy?.boundary
+                    == .protectedEdges(first: 1, last: 1)
+            )
+            #expect(
+                gemma3Small.turboQuant.precisionPolicy?.boundaryCachePrecision == .affineK8V4
             )
             let gemma31B = try #require(
                 registry.profile(
@@ -1401,14 +1449,86 @@ extension MLXRuntimeSwiftTests {
 
                 #expect(candidates[.turbo2_5] == nil)
 
+                let affineCandidates = Dictionary(
+                    uniqueKeysWithValues: profile.affineK8VxPrecisionCandidates.map {
+                        ($0.valueBits, $0)
+                    }
+                )
+                let k8v4 = try #require(affineCandidates[4])
+                let k8v3 = try #require(affineCandidates[3])
+                let k8v2 = try #require(affineCandidates[2])
+                #expect(k8v4.status == .preferred)
+                #expect(k8v4.keyBits == 8)
+                #expect(k8v3.status == .guarded)
+                #expect(k8v3.keyBits == 8)
+                #expect(k8v2.status == .guarded)
+                #expect(k8v2.keyBits == 8)
+
                 let guardedProfile = try #require(profile.applyingPrecisionCandidate(.turbo4v2))
                 #expect(guardedProfile.recommendedScheme == .turbo4v2)
+                #expect(guardedProfile.kvCodec == .polarQJL)
                 #expect(guardedProfile.keyBits == 4)
                 #expect(guardedProfile.valueBits == 4)
                 #expect(guardedProfile.optimizationPolicy == .preferThroughput)
                 #expect(guardedProfile.turboQuant.fallbackPolicy == .compressedDecodeAllowed)
+                #expect(
+                    guardedProfile.turboQuant.precisionPolicy?.boundary
+                        == .protectedEdges(first: 1, last: 1)
+                )
+                #expect(
+                    guardedProfile.turboQuant.precisionPolicy?.boundaryCachePrecision == .affineK8V4
+                )
+                #expect(guardedProfile.turboQuant.precisionPolicy?.key == .turbo4v2)
+                #expect(guardedProfile.turboQuant.precisionPolicy?.value == .turbo4v2)
                 #expect(profile.applyingPrecisionCandidate(.turbo2_5) == nil)
             }
+        }
+
+        @Test func testQwen35AffineK8VxProtectedProfileVariants() throws {
+            let profile = try #require(
+                TurboQuantProfileRegistry.bundled.profile(
+                    for: "mlx-community/Qwen3.5-2B-OptiQ-4bit",
+                    modelType: "qwen3_5",
+                    keyHeadDimension: 256,
+                    valueHeadDimension: 256
+                )
+            )
+
+            let k8v3 = try #require(profile.applyingAffineK8VxCandidate(valueBits: 3))
+            let k8v2Raw = try #require(
+                profile.applyingAffineK8VxCandidate(
+                    valueBits: 2,
+                    boundaryCachePrecision: .raw
+                )
+            )
+
+            #expect(k8v3.kvCodec == .affineK8Vx)
+            #expect(k8v3.valueBits == 3)
+            #expect(k8v3.status == .guarded)
+            #expect(k8v3.turboQuant.precisionPolicy?.key == .affineQ8)
+            #expect(k8v3.turboQuant.precisionPolicy?.value == .turbo3_5)
+            #expect(
+                k8v3.turboQuant.precisionPolicy?.boundary
+                    == .protectedEdges(first: 5, last: 5)
+            )
+            #expect(k8v3.turboQuant.precisionPolicy?.boundaryCachePrecision == .affineK8V4)
+
+            let parameters = k8v3.applying(to: GenerateParameters())
+            let resolved = try parameters.resolvedForTurboQuantRuntime(layerCount: 12)
+            #expect(parameters.kvCacheStrategy == .affineK8Vx)
+            #expect(parameters.kvCodec == .affineK8Vx)
+            #expect(parameters.turboQuantValueBits == 3)
+            #expect(parameters.turboQuantPrecisionPolicy?.key == .affineQ8)
+            #expect(parameters.turboQuantPrecisionPolicy?.value == .turbo3_5)
+            #expect(resolved.kvLayerPolicy?.defaultCodec == .affineK8Vx(valueBits: 3))
+            #expect(resolved.kvLayerPolicy?.codec(forLayerIndex: 0) == .affineK8V4)
+            #expect(resolved.kvLayerPolicy?.codec(forLayerIndex: 5) == .affineK8Vx(valueBits: 3))
+
+            #expect(k8v2Raw.turboQuant.precisionPolicy?.boundaryCachePrecision == .raw)
+            let rawResolved = try k8v2Raw.applying(to: GenerateParameters())
+                .resolvedForTurboQuantRuntime(layerCount: 8)
+            #expect(rawResolved.kvLayerPolicy?.defaultCodec == .affineK8Vx(valueBits: 2))
+            #expect(rawResolved.kvLayerPolicy?.codec(forLayerIndex: 0) == .rawFP16)
         }
 
         @Test func testQwen35AndQwen36ProfilesApplyWave1TurboQuantRouting() throws {
@@ -1435,6 +1555,22 @@ extension MLXRuntimeSwiftTests {
             #expect(parameters.quantizedKVStart == 16_384)
             #expect(parameters.turboQuantValueBits == TurboQuantKVCodec.affineK8V4ValueBits)
             #expect(parameters.turboQuantOptimizationPolicy == .preferThroughput)
+
+            let guardedProfile = try #require(profile.applyingPrecisionCandidate(.turbo4v2))
+            let guardedParameters = guardedProfile.applying(to: GenerateParameters())
+
+            #expect(guardedParameters.kvCacheStrategy == .turboQuant)
+            #expect(guardedParameters.kvCodec == .polarQJL)
+            #expect(guardedParameters.turboQuantPreset == .turbo4v2)
+            #expect(guardedParameters.turboQuantPrecisionPolicy?.key == .turbo4v2)
+            #expect(guardedParameters.turboQuantPrecisionPolicy?.value == .turbo4v2)
+            #expect(
+                guardedParameters.turboQuantPrecisionPolicy?.boundary
+                    == .protectedEdges(first: 1, last: 1)
+            )
+            #expect(
+                guardedParameters.turboQuantPrecisionPolicy?.boundaryCachePrecision == .affineK8V4
+            )
         }
 
         @Test func testVerifiedLowBitKProfileRequiresExactEvidence() throws {
@@ -1873,6 +2009,9 @@ extension MLXRuntimeSwiftTests {
                 #expect(bundledProfile.safeContextLength == jsonProfile.safeContextLength)
                 #expect(bundledProfile.qualityProfile == jsonProfile.qualityProfile)
                 #expect(bundledProfile.backend == jsonProfile.backend)
+                #expect(bundledProfile.kvCodec == jsonProfile.kvCodec)
+                #expect(bundledProfile.turboQuant == jsonProfile.turboQuant)
+                #expect(bundledProfile.affineInt4 == jsonProfile.affineInt4)
                 #expect(bundledProfile.optimizationPolicy == jsonProfile.optimizationPolicy)
                 #expect(
                     bundledProfile.requiresMetalSelfTest

@@ -100,6 +100,307 @@ extension MLXRuntimeSwiftTests {
             #expect(allClose(restored[2]!, b).item(Bool.self))
         }
 
+        @Test func testTurboQuantLinearCacheBuildsPageSummary() throws {
+            guard TurboQuantKernelAvailability.current.supportsMetalPolarQJLAttention else {
+                return
+            }
+            let cache = TurboQuantKVCache(
+                backend: .metalPolarQJL,
+                sparseValueSelection: .pageTopK(1)
+            )
+            let keys = MLXArray.ones([1, 1, 513, 64], dtype: .float32)
+            let values = keys + 0.25
+
+            _ = try cache.updateCompressed(keys: keys, values: values)
+
+            let summary = try #require(cache.keyPageSummary)
+            #expect(summary.shape == [1, 1, 2, 1])
+        }
+
+        @Test func testTurboQuantLinearCacheUpdatesPageSummaryForSingleTokenAppend() throws {
+            guard TurboQuantKernelAvailability.current.supportsMetalPolarQJLAttention else {
+                return
+            }
+            let cache = TurboQuantKVCache(
+                backend: .metalPolarQJL,
+                sparseValueSelection: .pageTopK(1)
+            )
+            let initialKeys = MLXArray.ones([1, 1, 512, 64], dtype: .float32)
+            let initialValues = initialKeys + 0.25
+            _ = try cache.updateCompressed(keys: initialKeys, values: initialValues)
+
+            let appendedKeys = MLXArray.ones([1, 1, 1, 64], dtype: .float32) * 3
+            let appendedValues = appendedKeys + 0.25
+            _ = try cache.updateCompressed(keys: appendedKeys, values: appendedValues)
+
+            let summary = try #require(cache.keyPageSummary)
+            let compressedKeys = try #require(cache.compressedState?.0)
+            let recomputed = try MLX.turboQuantKeyPageSummaries(keyCode: compressedKeys)
+            #expect(summary.shape == [1, 1, 2, 1])
+            #expect(allClose(summary, recomputed).item(Bool.self))
+        }
+
+        @Test func testTurboQuantLinearCacheBuildsKeyCandidateSketchFromDecodedKeys() throws {
+            guard TurboQuantKernelAvailability.current.supportsMetalPolarQJLAttention else {
+                return
+            }
+            let cache = TurboQuantKVCache(backend: .metalPolarQJL)
+            let tokenCount = 513
+            let headDimension = 64
+            let keyValues = (0 ..< (tokenCount * headDimension)).map { index in
+                Float(index / headDimension) + Float(index % headDimension) / 100
+            }
+            let keys = MLXArray(keyValues, [1, 1, tokenCount, headDimension])
+            let values = keys + 0.25
+
+            _ = try cache.updateCompressed(keys: keys, values: values)
+            cache.ensureKeyCandidateSketch()
+
+            let sketch = try #require(cache.keyCandidateSketch)
+            #expect(sketch.shape == [1, 1, 2, 64])
+            #expect(cache.attentionDiagnostics.keyCandidateSketchAvailable == true)
+            #expect(cache.attentionDiagnostics.keyCandidateSketchShape == [1, 1, 2, 64])
+            #expect(cache.attentionDiagnostics.keyCandidateSketchUnavailableReason == nil)
+
+            let compressedKeys = try #require(cache.compressedState?.0)
+            let decoded = try MLX.turboQuantMetalDecodeAttention(
+                compressedKeys,
+                outputDType: .float32
+            )
+            let decodedValues = decoded.asArray(Float.self)
+            let sketchValues = sketch.asArray(Float.self)
+
+            func projectedValue(token: Int, projection: Int) -> Float {
+                var projected: Float = 0
+                for dimension in 0 ..< headDimension {
+                    let sign = turboQuantKeyCandidateSketchProjectionSign(
+                        projectionIndex: projection,
+                        dimension: dimension
+                    )
+                    projected += decodedValues[token * headDimension + dimension] * sign
+                }
+                return projected
+            }
+
+            func expected(page: Int, projection: Int) -> (minimum: Float, maximum: Float) {
+                let pageSize = MLX.turboQuantKeyPageSummaryPageSize
+                let start = page * pageSize
+                let end = min(start + pageSize, tokenCount)
+                let values = (start ..< end).map { projectedValue(token: $0, projection: projection) }
+                return (values.min()!, values.max()!)
+            }
+
+            for page in [0, 1] {
+                for projection in [0, 1, 31] {
+                    let expected = expected(page: page, projection: projection)
+                    let slotBase = page * 64
+                    #expect(abs(sketchValues[slotBase + projection] - expected.minimum) < 1e-4)
+                    #expect(
+                        abs(
+                            sketchValues[
+                                slotBase + turboQuantKeyCandidateSketchProjectionCount + projection
+                            ] - expected.maximum) < 1e-4)
+                }
+            }
+        }
+
+        @Test func testTurboQuantPageTopKDecodeRoutesToFusedSummaryKernel() throws {
+            guard TurboQuantKernelAvailability.current.supportsMetalPolarQJLAttention else {
+                return
+            }
+            let cache = TurboQuantKVCache(
+                backend: .metalPolarQJL,
+                sparseValueSelection: .pageTopK(1)
+            )
+            let keys = MLXArray.zeros([1, 1, 1024, 64], dtype: .float32)
+            let values = MLXArray.ones([1, 1, 1024, 64], dtype: .float32)
+            let queries = MLXArray.zeros([1, 1, 1, 64], dtype: .float32)
+
+            _ = try attentionWithCacheUpdateReturningStateThrowing(
+                queries: queries,
+                keys: keys,
+                values: values,
+                cache: cache,
+                scale: 0.125
+            )
+
+            #expect(cache.keyPageSummary != nil)
+            #expect(cache.attentionDiagnostics.sparseVEnabled)
+            #expect(cache.attentionDiagnostics.sparseVActive == true)
+            #expect(cache.attentionDiagnostics.nativeKernelKind == 15)
+            #expect(cache.attentionDiagnostics.sparseVSkippedTokens == 512)
+        }
+
+        @Test func testTurboQuantPageTopKQwen35GeometryRoutesToFusedSummaryKernel() throws {
+            guard TurboQuantKernelAvailability.current.supportsMetalPolarQJLAttention else {
+                return
+            }
+            let cache = TurboQuantKVCache(
+                backend: .metalPolarQJL,
+                sparseValueSelection: .pageTopK(1)
+            )
+            let keys = MLXArray.zeros([1, 2, 2048, 256], dtype: .float32)
+            let values = MLXArray.ones([1, 2, 2048, 256], dtype: .float32)
+            let queries = MLXArray.zeros([1, 8, 1, 256], dtype: .float32)
+
+            _ = try attentionWithCacheUpdateReturningStateThrowing(
+                queries: queries,
+                keys: keys,
+                values: values,
+                cache: cache,
+                scale: 0.0625
+            )
+
+            #expect(cache.keyPageSummary != nil)
+            #expect(cache.keyPageSummary?.shape == [1, 2, 4, 4])
+            #expect(cache.attentionDiagnostics.sparseVEnabled)
+            #expect(cache.attentionDiagnostics.sparseVActive == true)
+            #expect(cache.attentionDiagnostics.nativeKernelKind == 15)
+            #expect(cache.attentionDiagnostics.sparseVSkippedTokens == 12_288)
+            #expect(cache.attentionDiagnostics.sparseVTotalTokens == 16_384)
+        }
+
+        @Test func testTurboQuantPageTopKQwen35BFloat16GeometryRoutesToFusedSummaryKernel() throws {
+            guard TurboQuantKernelAvailability.current.supportsMetalPolarQJLAttention else {
+                return
+            }
+            let cache = TurboQuantKVCache(
+                backend: .metalPolarQJL,
+                sparseValueSelection: .pageTopK(1)
+            )
+            let keys = MLXArray.zeros([1, 2, 2048, 256], dtype: .bfloat16)
+            let values = MLXArray.ones([1, 2, 2048, 256], dtype: .bfloat16)
+            let queries = MLXArray.zeros([1, 8, 1, 256], dtype: .bfloat16)
+
+            _ = try attentionWithCacheUpdateReturningStateThrowing(
+                queries: queries,
+                keys: keys,
+                values: values,
+                cache: cache,
+                scale: 0.0625
+            )
+
+            #expect(cache.keyPageSummary != nil)
+            #expect(cache.keyPageSummary?.shape == [1, 2, 4, 4])
+            #expect(cache.attentionDiagnostics.keyPageSummaryAvailable == true)
+            #expect(cache.attentionDiagnostics.nativeKernelKind == 15)
+        }
+
+        @Test func testRotatingTurboQuantPageTopKWithHeadroomKeepsFusedSummaryKernel() throws {
+            guard TurboQuantKernelAvailability.current.supportsMetalPolarQJLAttention else {
+                return
+            }
+            let cache = RotatingTurboQuantKVCache(
+                maxSize: 2064,
+                keep: 0,
+                backend: .metalPolarQJL,
+                sparseValueSelection: .pageTopK(1)
+            )
+            let promptKeys = MLXArray.zeros([1, 2, 2048, 256], dtype: .bfloat16)
+            let promptValues = MLXArray.ones([1, 2, 2048, 256], dtype: .bfloat16)
+            let promptQuery = MLXArray.zeros([1, 8, 1, 256], dtype: .bfloat16)
+            _ = try attentionWithCacheUpdateReturningStateThrowing(
+                queries: promptQuery,
+                keys: promptKeys,
+                values: promptValues,
+                cache: cache,
+                scale: 0.0625
+            )
+
+            let nextKey = MLXArray.zeros([1, 2, 1, 256], dtype: .bfloat16)
+            let nextValue = MLXArray.ones([1, 2, 1, 256], dtype: .bfloat16)
+            let nextQuery = MLXArray.zeros([1, 8, 1, 256], dtype: .bfloat16)
+            _ = try attentionWithCacheUpdateReturningStateThrowing(
+                queries: nextQuery,
+                keys: nextKey,
+                values: nextValue,
+                cache: cache,
+                scale: 0.0625
+            )
+
+            #expect(cache.keyPageSummary != nil)
+            #expect(cache.attentionDiagnostics.keyPageSummaryAvailable == true)
+            #expect(cache.attentionDiagnostics.keyPageSummaryUnavailableReason == nil)
+            #expect(cache.attentionDiagnostics.nativeKernelKind == 15)
+        }
+
+        @Test func testTurboQuantRotatingCacheKeepsCandidateSketchForPinnedLayout() throws {
+            guard TurboQuantKernelAvailability.current.supportsMetalPolarQJLAttention else {
+                return
+            }
+            let cache = RotatingTurboQuantKVCache(
+                maxSize: 1024,
+                keep: 128,
+                backend: .metalPolarQJL,
+                sparseValueSelection: .pageTopK(1)
+            )
+            let keys = MLXArray.ones([1, 1, 256, 64], dtype: .float32)
+            let values = keys + 0.25
+
+            _ = try cache.updateCompressed(keys: keys, values: values)
+
+            #expect(cache.keyPageSummary == nil)
+            #expect(cache.attentionDiagnostics.keyPageSummaryAvailable == false)
+            #expect(
+                cache.attentionDiagnostics.keyPageSummaryUnavailableReason?.contains(
+                    "pinned prefix length") == true)
+            cache.ensureKeyCandidateSketch()
+            #expect(cache.keyCandidateSketch?.shape == [1, 1, 2, 64])
+            #expect(cache.attentionDiagnostics.keyCandidateSketchAvailable == true)
+            #expect(cache.attentionDiagnostics.keyCandidateSketchUnavailableReason == nil)
+        }
+
+        @Test func testTurboQuantCandidateSparseBuildsSketchDuringInitialAppend() throws {
+            guard TurboQuantKernelAvailability.current.supportsMetalPolarQJLAttention else {
+                return
+            }
+            let cache = RotatingTurboQuantKVCache(
+                maxSize: 1024,
+                keep: 128,
+                backend: .metalPolarQJL,
+                sparseValueSelection: .candidateSparse(
+                    recentTokens: 256,
+                    candidatePages: 1,
+                    olderTokenBudget: 64
+                )
+            )
+            let keys = MLXArray.ones([1, 1, 256, 64], dtype: .float32)
+            let values = keys + 0.25
+
+            _ = try cache.updateCompressed(keys: keys, values: values)
+
+            #expect(cache.keyCandidateSketch?.shape == [1, 1, 2, 64])
+            #expect(cache.attentionDiagnostics.keyCandidateSketchAvailable == true)
+            #expect(cache.attentionDiagnostics.keyCandidateSketchUnavailableReason == nil)
+        }
+
+        @Test func testTurboQuantRotatingCacheClearsKeyCandidateSketchForRingLayout() throws {
+            guard TurboQuantKernelAvailability.current.supportsMetalPolarQJLAttention else {
+                return
+            }
+            let cache = RotatingTurboQuantKVCache(
+                maxSize: 16,
+                keep: 0,
+                backend: .metalPolarQJL
+            )
+            let keys = MLXArray.ones([1, 1, 16, 64], dtype: .float32)
+            let values = keys + 0.25
+            _ = try cache.updateCompressed(keys: keys, values: values)
+            cache.ensureKeyCandidateSketch()
+            #expect(cache.keyCandidateSketch?.shape == [1, 1, 1, 64])
+
+            let nextKeys = MLXArray.ones([1, 1, 1, 64], dtype: .float32) * 2
+            let nextValues = nextKeys + 0.25
+            _ = try cache.updateCompressed(keys: nextKeys, values: nextValues)
+            cache.ensureKeyCandidateSketch()
+
+            #expect(cache.keyCandidateSketch == nil)
+            #expect(cache.attentionDiagnostics.keyCandidateSketchAvailable == false)
+            #expect(
+                cache.attentionDiagnostics.keyCandidateSketchUnavailableReason?.contains(
+                    "ring offset") == true)
+        }
+
         // MARK: - ArraysCache leftPadding round-trip
 
         @Test func testArraysCacheLeftPadding() throws {
@@ -243,7 +544,7 @@ extension MLXRuntimeSwiftTests {
             }
         }
 
-        @Test func testAdaptiveTurboQuantStartsRawAndConvertsAfterThreshold() throws {
+        @Test func testAdaptiveTurboQuantStartsRawAndConvertsAtThreshold() throws {
             guard TurboQuantKernelAvailability.current.supportsMetalPolarQJLCodec else { return }
 
             try Device.withDefaultDevice(.cpu) {
@@ -270,24 +571,10 @@ extension MLXRuntimeSwiftTests {
                     turboQuantBackend: parameters.turboQuantBackend,
                     turboQuantOptimizationPolicy: parameters.turboQuantOptimizationPolicy
                 )
-                #expect(cache[0] is KVCacheSimple)
-
-                let nextKeys = MLXArray.ones([1, 8, 1, 64], dtype: .bfloat16)
-                let nextValues = MLXArray.ones([1, 8, 1, 64], dtype: .bfloat16)
-                _ = cache[0].update(keys: nextKeys, values: nextValues)
-                maybeQuantizeKVCache(
-                    cache: &cache,
-                    kvBits: nil,
-                    kvGroupSize: 64,
-                    quantizedKVStart: parameters.quantizedKVStart,
-                    kvCacheStrategy: parameters.kvCacheStrategy,
-                    turboQuantPreset: parameters.turboQuantPreset,
-                    turboQuantBackend: parameters.turboQuantBackend,
-                    turboQuantOptimizationPolicy: parameters.turboQuantOptimizationPolicy
-                )
 
                 #expect(cache[0] is TurboQuantKVCache)
                 let turbo = try #require(cache[0] as? TurboQuantKVCache)
+                #expect(turbo.offset == 4)
                 #expect(turbo.preset == .turbo3_5)
                 #expect(turbo.optimizationPolicy == .preferThroughput)
             }
@@ -305,6 +592,21 @@ extension MLXRuntimeSwiftTests {
             let rotating = RotatingTurboQuantKVCache(maxSize: 32)
             #expect(rotating.requestedBackend == .metalPolarQJL)
             #expect(rotating.activeBackend == expectedBackend)
+        }
+
+        @Test func testDefaultTurboQuantPackedProbeHandlesTinyHeadDimension() {
+            let keys = MLXArray.ones([1, 2, 3, 16], dtype: .float32)
+            let values = MLXArray.ones([1, 2, 3, 16], dtype: .float32)
+
+            let simple = TurboQuantKVCache()
+            _ = simple.updateQuantized(keys: keys, values: values)
+            #expect(simple.offset == 3)
+            #expect(simple.groupSize == 64)
+
+            let rotating = RotatingTurboQuantKVCache(maxSize: 32)
+            _ = rotating.updateQuantized(keys: keys, values: values)
+            #expect(rotating.offset == 3)
+            #expect(rotating.groupSize == 64)
         }
 
         @Test func testDefaultTurboQuantCacheUsesCompressedAttentionWhenAvailable() {
@@ -620,6 +922,47 @@ extension MLXRuntimeSwiftTests {
             #expect(immediate.valueBits == TurboQuantKVCodec.affineK8V4ValueBits)
             #expect(immediate.keyGroupSize == TurboQuantKVCodec.affineK8V4KeyGroupSize)
             #expect(immediate.valueGroupSize == TurboQuantKVCodec.affineK8V4ValueGroupSize)
+        }
+
+        @Test func testAffineK8VxStrategyCarriesLowerValueBits() throws {
+            let cache = try #require(
+                makeAttentionKVCache(
+                    parameters: GenerateParameters(
+                        kvCacheStrategy: .affineK8Vx,
+                        kvCodec: .affineK8Vx,
+                        turboQuantValueBits: 3,
+                        turboQuantValueGroupSize: 64
+                    )
+                ) as? AffineK8V4KVCache)
+
+            #expect(cache.keyBits == TurboQuantKVCodec.affineK8V4KeyBits)
+            #expect(cache.valueBits == 3)
+            #expect(cache.valueGroupSize == 64)
+            #expect(cache.activeAttentionPath == .affineK8VxNative)
+            #expect(cache.runtimeSnapshot().kvCodec == .affineK8Vx)
+            #expect(cache.runtimeSnapshot().valueBits == 3)
+            #expect(cache.runtimeSnapshot().valueGroupSize == 64)
+        }
+
+        @Test func testAffineK8VxMetaStateRestoresValueBits() throws {
+            let cache = AffineK8V4KVCache(valueBits: 3)
+            cache.metaState = [
+                "0",
+                "None",
+                "0",
+                String(TurboQuantKVCodec.affineK8V4KeyGroupSize),
+                String(TurboQuantKVCodec.affineK8V4KeyBits),
+                String(TurboQuantKVCodec.affineK8V4ValueGroupSize),
+                "2",
+                QuantizationMode.affine.rawValue,
+                "0",
+                TurboQuantAttentionPath.affineK8VxNative.rawValue,
+                "None",
+            ]
+
+            #expect(cache.valueBits == 2)
+            #expect(cache.metaState[6] == "2")
+            #expect(cache.activeAttentionPath == .affineK8VxNative)
         }
 
         @Test func testAffineK8V4TrimRollsBackNewestTokens() throws {
@@ -1502,7 +1845,9 @@ extension MLXRuntimeSwiftTests {
 
             let compressed = try #require(cache.compressedState)
             #expect(cache.state.count == 10)
-            #expect(compressed.0.layout.layoutVersion == TurboQuantAttentionLayout.currentVersion)
+            #expect(
+                compressed.0.layout.layoutVersion == TurboQuantAttentionLayout.productionDefaultVersion
+            )
             #expect(compressed.0.layout.capacity == 8)
             #expect(compressed.0.layout.logicalLength == 8)
             #expect(compressed.0.layout.pinnedPrefixLength == 4)
@@ -1611,7 +1956,12 @@ extension MLXRuntimeSwiftTests {
             #expect(expanded.1.layout.capacity == 512)
             #expect(expanded.1.packedMagnitudes.dim(2) == 512)
             #expect(expanded.0.signs.dim(2) == 512)
-            #expect(expanded.0.highPrecisionMask.shape == [1])
+            if beforeExpansion.0.highPrecisionMask.shape == [1] {
+                #expect(expanded.0.highPrecisionMask.shape == [1])
+            } else {
+                #expect(expanded.0.highPrecisionMask.ndim == 5)
+                #expect(expanded.0.highPrecisionMask.dim(2) == 512)
+            }
             #expect(expanded.0.residualSigns.shape == [1])
             #expect(expanded.1.signs.shape == [1])
             #expect(expanded.1.highPrecisionMask.shape == [1])

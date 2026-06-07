@@ -3,6 +3,7 @@
 
 # Abstract/base protocol surfaces.
 ^Libraries/MLXLMCommon/LanguageModel\.swift:.*callAsFunction\(inputs:cache:\) not implemented
+^Libraries/MLXLMCommon/LanguageModel\.swift:.*Non-throwing language model compatibility wrapper
 ^Libraries/MLXLMCommon/KVCache\.swift:.*must be implemented by subclass
 ^Libraries/MLXLMCommon/KVCache\.swift:.*CacheList should not use update
 
@@ -14,6 +15,8 @@
 ^Libraries/MLXLMCommon/KVCache\.swift:.*not properly initialized
 ^Libraries/MLXLMCommon/KVCache\.swift:.*Failed to convert
 ^Libraries/MLXLMCommon/KVCache\.swift:.*fatalError\(
+^Libraries/MLXLMCommon/TurboQuantHybridKVCache\.swift:.*HybridTurboQuantKVCache restore requires metaState-aware loading
+^Libraries/MLXLMCommon/TurboQuantHybridKVCache\.swift:.*HybridTurboQuantKVCache metaState restore is not supported without state decoding
 ^Libraries/MLXLMCommon/AttentionUtils\.swift:.*fatalError\(
 ^Libraries/MLXLMCommon/InterpolationUtils\.swift:.*Either size or scaleFactor
 ^Libraries/MLXLMCommon/UserInput\.swift:.*This functionality is not implemented

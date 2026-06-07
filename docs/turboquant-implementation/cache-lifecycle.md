@@ -114,6 +114,24 @@ Required behavior:
 - release raw chunk after commit according to fallback policy;
 - partial compressed writes are not visible to decode.
 
+## Dynamic conversion boundary
+
+For adaptive and affine throughput routes, conversion now triggers when the
+logical cache offset is non-zero and at or beyond the effective
+`quantizedKVStart` threshold. This matters for the default affine K8/V4 profile:
+short 4K runs remain raw and must report `1.00x` resident KV compression, while
+16K runs exercise compressed native attention.
+
+After dynamic conversion, the converted cache state is explicitly evaluated, the
+GPU stream is synchronized, and cache pressure is cleared before decode
+continues. Timing for that work is reported in
+`TurboQuantTimingSnapshot.dynamicCacheQuantizationCalls` and
+`dynamicCacheQuantizationSeconds`. In the current exact-prefill route, this cost
+should appear in prompt-prefill timing, not as hidden first-decode latency.
+
+Continuation details and the exact 16K rerun command are recorded in
+[TurboQuant Continuation Handoff - 2026-06-07](continuation-handoff-2026-06-07.md).
+
 ## Tests
 
 Required:

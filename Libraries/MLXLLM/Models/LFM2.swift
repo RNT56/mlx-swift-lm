@@ -150,7 +150,7 @@ class LFM2Attention: Module {
         do {
             return try callThrowing(x, mask: mask, cache: cache)
         } catch {
-            fatalError(String(describing: error))
+            nonThrowingLanguageModelRuntimeFailure(error, owner: type(of: self))
         }
     }
 
@@ -309,7 +309,7 @@ class LFM2DecoderLayer: Module {
         do {
             return try callThrowing(x, mask: mask, cache: cache)
         } catch {
-            fatalError(String(describing: error))
+            nonThrowingLanguageModelRuntimeFailure(error, owner: type(of: self))
         }
     }
 
@@ -363,7 +363,7 @@ public class LFM2ModelInner: Module {
             return try callThrowing(
                 inputs, mask: mask, cache: cache, inputEmbeddings: inputEmbeddings)
         } catch {
-            fatalError(String(describing: error))
+            nonThrowingLanguageModelRuntimeFailure(error, owner: type(of: self))
         }
     }
 
@@ -411,7 +411,7 @@ public class LFM2Model: Module, LLMModel, KVCacheDimensionProvider, ThrowingLang
         do {
             return try callAsFunctionThrowing(inputs, cache: cache)
         } catch {
-            fatalError(String(describing: error))
+            nonThrowingLanguageModelRuntimeFailure(error, owner: type(of: self))
         }
     }
 

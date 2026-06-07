@@ -351,7 +351,7 @@ final class Qwen35Attention: Module {
         do {
             return try callThrowing(x, mask: mask, cache: cache)
         } catch {
-            fatalError(String(describing: error))
+            nonThrowingLanguageModelRuntimeFailure(error, owner: type(of: self))
         }
     }
 
@@ -503,7 +503,7 @@ final class Qwen35DecoderLayer: Module {
                 cache: cache
             )
         } catch {
-            fatalError(String(describing: error))
+            nonThrowingLanguageModelRuntimeFailure(error, owner: type(of: self))
         }
     }
 
@@ -564,7 +564,7 @@ public class Qwen35TextModelInner: Module, LayerPartitionable, StreamableMoE {
         do {
             return try callThrowing(inputs, cache: cache)
         } catch {
-            fatalError(String(describing: error))
+            nonThrowingLanguageModelRuntimeFailure(error, owner: type(of: self))
         }
     }
 
@@ -670,7 +670,7 @@ public class Qwen35TextModel: Module, LLMModel, KVCacheDimensionProvider, Throwi
         do {
             return try callAsFunctionThrowing(inputs, cache: cache)
         } catch {
-            fatalError(String(describing: error))
+            nonThrowingLanguageModelRuntimeFailure(error, owner: type(of: self))
         }
     }
 
@@ -685,14 +685,20 @@ public class Qwen35TextModel: Module, LLMModel, KVCacheDimensionProvider, Throwi
     }
 
     public func newCache(parameters: GenerateParameters?) -> [KVCache] {
+        let attentionLayerCount = model.layers.filter { !$0.isLinear }.count
+        var attentionLayerIndex = 0
         return model.layers.enumerated().map { index, layer in
             if layer.isLinear {
                 return MambaCache()
             }
+            let boundaryLayerIndex = attentionLayerIndex
+            attentionLayerIndex += 1
             return makeAttentionKVCache(
                 parameters: parameters,
                 layerIndex: index,
-                layerCount: model.layers.count
+                layerCount: model.layers.count,
+                boundaryLayerIndex: boundaryLayerIndex,
+                boundaryLayerCount: attentionLayerCount
             )
         }
     }
@@ -778,7 +784,7 @@ public class Qwen35Model: Module, LLMModel, KVCacheDimensionProvider, ThrowingLa
         do {
             return try callAsFunctionThrowing(inputs, cache: cache)
         } catch {
-            fatalError(String(describing: error))
+            nonThrowingLanguageModelRuntimeFailure(error, owner: type(of: self))
         }
     }
 
@@ -889,7 +895,9 @@ extension Qwen35TextModel: MTPLanguageModel {
                 makeAttentionKVCache(
                     parameters: parameters,
                     layerIndex: 0,
-                    layerCount: 1
+                    layerCount: 1,
+                    boundaryLayerIndex: 0,
+                    boundaryLayerCount: 1
                 )
             ]
         }
