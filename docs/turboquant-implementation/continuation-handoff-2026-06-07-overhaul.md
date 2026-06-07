@@ -69,7 +69,7 @@ Qwen3-4B/Llama-3.2-3B for representative validation, disk now freed).
 | N7 ① async prefetch | overlap verify forward, bit-exact | **DONE + validated** (opt-in/default-off): 16K long-doc 1.43→**1.76×**, 8K regression nearly gone; long-context lever |
 | ③ banked lm_head | shrink the 30%-of-weights head | **gating microbench DONE** — kernel-viable (subset 2.6–4.1× at batch=1) but product-modest (~6% of forward latency); build only coupled with ① |
 | PolarQJL metadata diet | realize paper 4–7× compression | **N4 step 1 (fp16 scales) already implemented + structurally tested in mlx-swift**; remaining = native numerical/KL gate + LM wiring + steps 2–4 (focused cross-repo cycle) |
-| recency-tiering | exact-recent + harder cold tail | **tier already exists** (`TurboQuantHybridKVCache`: raw hot window + compressed cold); N5 increment = harder cold-tail bits + real-model KL gate |
+| recency-tiering | exact-recent + harder cold tail | **VALIDATED (N5)** — wide edge protection (`affineK8V3-protectedK8V4-edge6`) recovers V3 bulk to near-V4 quality (Qwen3-4B@32K cosine 0.9973→0.9988); narrow protection neutral/negative. Capacity/quality, modest. |
 | ② recurrent-sync removal | Qwen3.5 product-only | **DONE** (N6) — folded 2→1 sync+clearCache/token on the hybrid recurrent path; byte-identical on Qwen3.5-2B, KVCacheTests green; no % claim (timing probe pending) |
 
 ### Coverage status (2026-06-07)
@@ -94,16 +94,20 @@ promotion rules) and the models for it (Qwen3.5-2B hybrid for N6; mlx-swift kern
   the diagnostic codec config (defaults `.float32`), so it isn't exercised — wire it + bump the pin
   only after the KL gate passes. Steps 2–4 (one-norm-per-vector, dead-plane collapse, data-free
   quantizer) are the larger remaining diet. Compression/quality only — NOT speed.
-- **N5 — the recency tier ALREADY EXISTS (grounding correction, 2026-06-07).**
-  `TurboQuantHybridKVCache` already stores a raw/FP16-exact **hot window** (`hotKeys`/`hotValues`
-  plain MLXArrays = "rawShadowBytes", size `hotWindowTokens`) + a **compressed cold tail** (cold
-  blocks, `coldAttentionMode` off/selected/exhaustive). So "exact-recent + compressed-cold" tiering
-  is built and wired (it's the `.hybridTurboQuant`/Gemma3-global path). The genuinely-new N5
-  increment: a **separately harder cold-tail bit-depth** (e.g. cold V4→V3 / K8→K6 below the hot/
-  default) — today the cold tail uses the SAME `valueBits`/preset as configured — plus the real-model
-  **KL/p95/cos gate vs all-FP16** proving the net compression+quality wins. Capacity/quality only
-  (extra dispatch is net overhead in the weight-dominated regime). Missing piece is validation +
-  the harder-cold knob, NOT the tiering itself.
+- **N5 — VALIDATED via the real-model KL/cos gate (2026-06-07).** The recency tier already exists
+  two ways: the affine **protected-edge** configs (`affineK8V3-protectedK8V4-edge{4,5,6}`,
+  `-last2`, `-protectedRaw` — recent/edge tokens at higher precision, bulk compressed) AND
+  `TurboQuantHybridKVCache` (raw/FP16 hot window + compressed cold). Ran
+  `TurboQuantInferenceParity --quality-gates --skip-throughput` at **32768** (compression engages
+  only above `quantizedKVStart=16384`, so 4096 is vacuous KL=0). **Result (Qwen3-4B):** WIDE edge
+  protection `affineK8V3-protectedK8V4-edge6` recovers V3-bulk quality to **cosine 0.9988 / p95
+  0.411 — near flat V4 (0.9994) and well above flat V3 (0.9973)**; narrow (`last2`/first2) is
+  neutral-to-negative; the 0.6B model is brittle (fails V2/narrow — a small-model artifact, the 4B
+  passes all). Full report: `artifacts/turboquant-n5-recency-20260607/N5-summary.md`. **Verdict:**
+  recency-tiering is real but **modest** (recovers the small V3→V4 gap; robust models have large
+  compression headroom) and needs **WIDE** protection. It's capacity/quality, NOT speed (the reframe
+  holds). Remaining: adopt `protectedK8V4-edge6` as the recommended recency config; if a harder cold
+  tail is wanted, re-run this gate on the V2-bulk+wide-protected variant for the target model.
 - **N6 — DONE (2026-06-07).** Folded the 2 sync+clearCache/token on the hybrid recurrent path into
   1: `materializeRecurrentKVCacheState(_:synchronize:)` gained a `synchronize:` param (default true —
   keeps the other caller, `NgramSpeculativeTokenIterator.syncRecurrentIfNeeded`, unchanged); the
