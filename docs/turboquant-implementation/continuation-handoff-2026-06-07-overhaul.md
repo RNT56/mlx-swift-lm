@@ -69,7 +69,7 @@ Qwen3-4B/Llama-3.2-3B for representative validation, disk now freed).
 | N7 ① async prefetch | overlap verify forward, bit-exact | **DONE + validated** (opt-in/default-off): 16K long-doc 1.43→**1.76×**, 8K regression nearly gone; long-context lever |
 | ③ banked lm_head | shrink the 30%-of-weights head | **gating microbench DONE** — kernel-viable (subset 2.6–4.1× at batch=1) but product-modest (~6% of forward latency); build only coupled with ① |
 | PolarQJL metadata diet | realize paper 4–7× compression | **N4 step 1 (fp16 scales) already implemented + structurally tested in mlx-swift**; remaining = native numerical/KL gate + LM wiring + steps 2–4 (focused cross-repo cycle) |
-| recency-tiering | exact-recent + harder cold tail | scoped — new cache policy (N5) |
+| recency-tiering | exact-recent + harder cold tail | **tier already exists** (`TurboQuantHybridKVCache`: raw hot window + compressed cold); N5 increment = harder cold-tail bits + real-model KL gate |
 | ② recurrent-sync removal | Qwen3.5 product-only | **DONE** (N6) — folded 2→1 sync+clearCache/token on the hybrid recurrent path; byte-identical on Qwen3.5-2B, KVCacheTests green; no % claim (timing probe pending) |
 
 ### Coverage status (2026-06-07)
@@ -94,9 +94,16 @@ promotion rules) and the models for it (Qwen3.5-2B hybrid for N6; mlx-swift kern
   the diagnostic codec config (defaults `.float32`), so it isn't exercised — wire it + bump the pin
   only after the KL gate passes. Steps 2–4 (one-norm-per-vector, dead-plane collapse, data-free
   quantizer) are the larger remaining diet. Compression/quality only — NOT speed.
-- **N5** — recency-tier exact-FP16 last W≈256 + harder-compressed cold tail via the existing hybrid
-  dequant+concat merge. Gate: KL/p95/cos vs all-FP16. Capacity/quality only (extra dispatch is net
-  overhead in the weight-dominated regime).
+- **N5 — the recency tier ALREADY EXISTS (grounding correction, 2026-06-07).**
+  `TurboQuantHybridKVCache` already stores a raw/FP16-exact **hot window** (`hotKeys`/`hotValues`
+  plain MLXArrays = "rawShadowBytes", size `hotWindowTokens`) + a **compressed cold tail** (cold
+  blocks, `coldAttentionMode` off/selected/exhaustive). So "exact-recent + compressed-cold" tiering
+  is built and wired (it's the `.hybridTurboQuant`/Gemma3-global path). The genuinely-new N5
+  increment: a **separately harder cold-tail bit-depth** (e.g. cold V4→V3 / K8→K6 below the hot/
+  default) — today the cold tail uses the SAME `valueBits`/preset as configured — plus the real-model
+  **KL/p95/cos gate vs all-FP16** proving the net compression+quality wins. Capacity/quality only
+  (extra dispatch is net overhead in the weight-dominated regime). Missing piece is validation +
+  the harder-cold knob, NOT the tiering itself.
 - **N6 — DONE (2026-06-07).** Folded the 2 sync+clearCache/token on the hybrid recurrent path into
   1: `materializeRecurrentKVCacheState(_:synchronize:)` gained a `synchronize:` param (default true —
   keeps the other caller, `NgramSpeculativeTokenIterator.syncRecurrentIfNeeded`, unchanged); the
