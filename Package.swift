@@ -50,6 +50,9 @@ let package = Package(
             name: "TurboQuantNativeVxBenchmark",
             targets: ["TurboQuantNativeVxBenchmark"]),
         .executable(
+            name: "TurboQuantAcceptanceHarness",
+            targets: ["TurboQuantAcceptanceHarness"]),
+        .executable(
             name: "TurboQuantCacheUpdateBenchmark",
             targets: ["TurboQuantCacheUpdateBenchmark"]),
         .executable(
@@ -177,6 +180,15 @@ let package = Package(
                 .product(name: "MLX", package: "mlx-swift"),
             ],
             path: "tools/TurboQuantNativeVxBenchmark"
+        ),
+        .executableTarget(
+            name: "TurboQuantAcceptanceHarness",
+            dependencies: [
+                "MLXLLM",
+                "MLXLMCommon",
+                .product(name: "MLX", package: "mlx-swift"),
+            ],
+            path: "tools/TurboQuantAcceptanceHarness"
         ),
         .executableTarget(
             name: "TurboQuantCacheUpdateBenchmark",

@@ -832,7 +832,7 @@ extension GenerateParameters {
     }
 }
 
-private func resolvedGenerationParameters(
+func resolvedGenerationParameters(
     for model: any LanguageModel,
     parameters: GenerateParameters
 ) throws -> GenerateParameters {
