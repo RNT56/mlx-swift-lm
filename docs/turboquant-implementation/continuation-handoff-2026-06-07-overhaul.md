@@ -68,9 +68,34 @@ Qwen3-4B/Llama-3.2-3B for representative validation, disk now freed).
 | ① n-gram self-speculation | weight-stream amortization, bit-exact | **DONE + validated on 0.6B AND Qwen3-4B** (N1 done — context-gated, crossover ≈12–16K; needs product wiring) |
 | N7 ① async prefetch | overlap verify forward, bit-exact | **DONE + validated** (opt-in/default-off): 16K long-doc 1.43→**1.76×**, 8K regression nearly gone; long-context lever |
 | ③ banked lm_head | shrink the 30%-of-weights head | **gating microbench DONE** — kernel-viable (subset 2.6–4.1× at batch=1) but product-modest (~6% of forward latency); build only coupled with ① |
-| PolarQJL metadata diet | realize paper 4–7× compression | **pending (the focus)** |
-| recency-tiering | exact-recent + harder cold tail | pending (capacity/quality) |
-| ② recurrent-sync removal | Qwen3.5 product-only | pending |
+| PolarQJL metadata diet | realize paper 4–7× compression | **scoped (entry point confirmed)** — cross-repo mlx-swift, focused cycle (N4) |
+| recency-tiering | exact-recent + harder cold tail | scoped — new cache policy (N5) |
+| ② recurrent-sync removal | Qwen3.5 product-only | scoped — cross-cutting + hybrid-only validation (N6) |
+
+### Coverage status (2026-06-07)
+The product-relevant **speed levers are DONE + validated**: ① (N1), **N7 async prefetch (bit-exact,
+16K 1.76×)**, ③ gating (N3). The remaining levers (N4 PolarQJL diet, N5 recency-tiering, N6 ②
+recurrent-sync) are **compression/quality or hybrid-cadence** levers; each is investigated with its
+entry point confirmed below, but each needs a **focused cross-repo and/or hybrid-model validation
+cycle** that can't be honestly landed without parity/KL gates + same-machine evidence (per the
+promotion rules) and the models for it (Qwen3.5-2B hybrid for N6; mlx-swift kernel work for N4):
+- **N4** — `attentionScaleStorage` (`mlx-swift Source/MLX/TurboQuant.swift:864`, default `.float32`;
+  encode/decode switch on it at `:9602+`). fp32→fp16 halves the scale metadata. Cross-repo: needs
+  the encode/decode parity unit test + real-model KL/cosine at matched bits, then bump the
+  mlx-swift-lm pin. First of the metadata-diet steps (then one-norm-per-vector, dead-plane collapse,
+  data-free quantizer). Compression/quality only — NOT speed.
+- **N5** — recency-tier exact-FP16 last W≈256 + harder-compressed cold tail via the existing hybrid
+  dequant+concat merge. Gate: KL/p95/cos vs all-FP16. Capacity/quality only (extra dispatch is net
+  overhead in the weight-dominated regime).
+- **N6** — the redundancy is concrete: `materializeRecurrentKVCacheState` (`KVCache.swift:2864`,
+  eval+sync+clearCache) runs in the quantize flow AND `evaluateGeneratedToken` (`Evaluate.swift:1521`,
+  eval+sync+clearCache) runs per token → **2 sync+clearCache/token on hybrid**. Fold: add a
+  `synchronize:` param to `materializeRecurrentKVCacheState` (default true to keep both current call
+  sites — note `NgramSpeculativeTokenIterator.syncRecurrentIfNeeded` is ALSO a caller), eval state
+  WITHOUT syncing, then let `evaluateGeneratedToken` do the single eval(token+state)+sync+clearCache.
+  "Can't alter output" is the GOAL but must be PROVEN: gate = KVCacheTests determinism + a
+  Qwen3.5-2B-hybrid byte-identical run (harness works with IdentityTokenizer) + a timing probe.
+  Hybrid-only (no MambaCache on standard models, so unmeasurable on Qwen3-4B).
 
 ## 4. Next steps (prioritized — goal · gate · commands · files · acceptance)
 
