@@ -68,7 +68,7 @@ Qwen3-4B/Llama-3.2-3B for representative validation, disk now freed).
 | ① n-gram self-speculation | weight-stream amortization, bit-exact | **DONE + validated on 0.6B AND Qwen3-4B** (N1 done — context-gated, crossover ≈12–16K; needs product wiring) |
 | N7 ① async prefetch | overlap verify forward, bit-exact | **DONE + validated** (opt-in/default-off): 16K long-doc 1.43→**1.76×**, 8K regression nearly gone; long-context lever |
 | ③ banked lm_head | shrink the 30%-of-weights head | **gating microbench DONE** — kernel-viable (subset 2.6–4.1× at batch=1) but product-modest (~6% of forward latency); build only coupled with ① |
-| PolarQJL metadata diet | realize paper 4–7× compression | **scoped (entry point confirmed)** — cross-repo mlx-swift, focused cycle (N4) |
+| PolarQJL metadata diet | realize paper 4–7× compression | **N4 step 1 (fp16 scales) already implemented + structurally tested in mlx-swift**; remaining = native numerical/KL gate + LM wiring + steps 2–4 (focused cross-repo cycle) |
 | recency-tiering | exact-recent + harder cold tail | scoped — new cache policy (N5) |
 | ② recurrent-sync removal | Qwen3.5 product-only | **DONE** (N6) — folded 2→1 sync+clearCache/token on the hybrid recurrent path; byte-identical on Qwen3.5-2B, KVCacheTests green; no % claim (timing probe pending) |
 
@@ -79,11 +79,21 @@ recurrent-sync) are **compression/quality or hybrid-cadence** levers; each is in
 entry point confirmed below, but each needs a **focused cross-repo and/or hybrid-model validation
 cycle** that can't be honestly landed without parity/KL gates + same-machine evidence (per the
 promotion rules) and the models for it (Qwen3.5-2B hybrid for N6; mlx-swift kernel work for N4):
-- **N4** — `attentionScaleStorage` (`mlx-swift Source/MLX/TurboQuant.swift:864`, default `.float32`;
-  encode/decode switch on it at `:9602+`). fp32→fp16 halves the scale metadata. Cross-repo: needs
-  the encode/decode parity unit test + real-model KL/cosine at matched bits, then bump the
-  mlx-swift-lm pin. First of the metadata-diet steps (then one-norm-per-vector, dead-plane collapse,
-  data-free quantizer). Compression/quality only — NOT speed.
+- **N4 — step 1 (fp16 scales) is ALREADY IMPLEMENTED + structurally tested in mlx-swift (grounding
+  correction, 2026-06-07).** `attentionScaleStorage` (`mlx-swift TurboQuant.swift:864`, default
+  `.float32`) is accepted at the **V6 default layout** (`validateAttentionScaleStorage` allows it for
+  `layoutVersion>=5`; the `allowExperimentalLayoutV5` gate is only for explicitly requesting the
+  *experimental* V5, not for fp16 scales at V6) and unit-tested:
+  `testLayoutV5AcceptsFp16ScaleStorage`, `testLayoutV4RejectsFp16ScaleStorage` (fail-closed on
+  legacy), `testLayoutV5RequiresExplicitOptInWhileV6IsDefault`. So fp16 scales halving the scale
+  metadata is **wired in the Metal attention layout** — NOT an unbuilt step. **Remaining for N4 step 1
+  (a native focused cycle):** (a) a *numerical* parity test through the Metal attention decode (the
+  reference/CPU codec keeps Float scales and does NOT model `attentionScaleStorage`, so the parity
+  test must go through the native path — needs the fp16-scale decode kernel available + a real-model
+  KL/cosine at matched bits); (b) the LM does not currently set `attentionScaleStorage=.float16` in
+  the diagnostic codec config (defaults `.float32`), so it isn't exercised — wire it + bump the pin
+  only after the KL gate passes. Steps 2–4 (one-norm-per-vector, dead-plane collapse, data-free
+  quantizer) are the larger remaining diet. Compression/quality only — NOT speed.
 - **N5** — recency-tier exact-FP16 last W≈256 + harder-compressed cold tail via the existing hybrid
   dequant+concat merge. Gate: KL/p95/cos vs all-FP16. Capacity/quality only (extra dispatch is net
   overhead in the weight-dominated regime).
