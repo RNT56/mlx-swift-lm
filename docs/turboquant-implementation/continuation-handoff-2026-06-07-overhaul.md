@@ -66,7 +66,7 @@ Qwen3-4B/Llama-3.2-3B for representative validation, disk now freed).
 | Instrumentation (roofline/amortization) | GB/s + ms/qtok | **DONE** |
 | Combined affine 16K gate | promotion artifact | **DONE** |
 | ① n-gram self-speculation | weight-stream amortization, bit-exact | **DONE + validated on 0.6B AND Qwen3-4B** (N1 done — context-gated, crossover ≈12–16K; needs product wiring) |
-| ③ banked lm_head | shrink the 30%-of-weights head | **next — gating microbench first** |
+| ③ banked lm_head | shrink the 30%-of-weights head | **gating microbench DONE** — kernel-viable (subset 2.6–4.1× at batch=1) but product-modest (~6% of forward latency); build only coupled with ① |
 | PolarQJL metadata diet | realize paper 4–7× compression | **pending (the focus)** |
 | recency-tiering | exact-recent + harder cold tail | pending (capacity/quality) |
 | ② recurrent-sync removal | Qwen3.5 product-only | pending |
@@ -114,17 +114,23 @@ reproduce: `artifacts/turboquant-acceptance-4b-20260607/N1-summary.md`. Build pr
 - **Gate:** forced-rejection determinism test on the hybrid Qwen3.5 (MambaCache rollback
   correctness is UNTESTED — see caveats); byte-identical greedy stream vs non-speculative.
 
-### N3. ③ banked / candidate-subset lm_head — GATING microbench FIRST
-- The tied head is ~30% of the weight stream. `gatherQuantizedMatmul` exists (mlx-swift
-  `Source/MLX/Ops.swift:1427`).
-- **Do first (cheap, kills it if it fails):** microbench `gatherQuantizedMatmul(rhsIndices,
-  ~8192 rows, transpose:true, groupSize:64, bits:4, mode:.affine, batch=1)` vs the full
-  vocab×hidden qmv head at batch=1 on M2. If not clearly faster at batch=1 → **stop**
-  (the occupancy wall that made byte-cuts neutral). Verify the kernel actually ships with
-  `LC_ALL=C grep -a -c` (the pin trap).
-- If it wins: candidate-subset head + exactness guard (frequent full-vocab pass or a
-  bounded mismatch window clearing KL≤2e-6 / top-1==1.000). Near-dependency for ① (verify
-  pays the head per draft position).
+### N3. ③ banked / candidate-subset lm_head — GATING microbench DONE (kernel-viable, product-modest)
+Ran `TurboQuantHeadBenchmark` (new tool, `tools/TurboQuantHeadBenchmark`) at Qwen3-4B head dims
+(hidden 2560, vocab 151936, affine g64/4-bit, batch=1). Full report:
+`artifacts/turboquant-head-20260607/N3-summary.md`.
+- **Kernel-viable:** the head is **output-bound at full vocab** (fixed floor ≈ 0.185 ms +
+  marginal ≈ 7.3 ns/row → marginal is 86% of head latency at 151936). A candidate-subset head
+  (K=8192) is **2.6–4.1× faster** than the full head at batch=1 (gather+matmul 0.33 ms vs full
+  1.37 ms; matmul-only 0.25 ms = 5.6×). NOTE: `gatherQuantizedMatmul` gathers along *batch* dims
+  (MoE-style), NOT a subset of one matrix's output rows — use `take(rows)` + `quantizedMatmul`.
+- **BUT product-modest:** the head is only ~**6% of the batch=1 forward latency** (1.37 ms of
+  ~22 ms; it is ~30% of the *bytes* but batch=1 decode is occupancy-bound not bandwidth-bound —
+  the N1 forward-scaling finding). Realistic plain-decode win ~**3–5%**, and it needs an
+  exactness guard (candidate set must contain the true argmax → periodic full pass or a verified
+  window clearing top-1==1.000 / KL≤2e-6).
+- **Verdict: build ONLY coupled with ①** — the head is paid per verify-position, so a subset head
+  helps the multi-query verify (raises ①'s ceiling a few %) more than plain decode. Not a
+  standalone priority over N7.
 
 ### N4. PolarQJL metadata diet (THE diagnostic-path focus — realize paper 4–7×)
 Root cause of our ~2.1–2.6× (vs paper 4–7×) is metadata, not payload. In priority order

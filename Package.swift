@@ -53,6 +53,9 @@ let package = Package(
             name: "TurboQuantAcceptanceHarness",
             targets: ["TurboQuantAcceptanceHarness"]),
         .executable(
+            name: "TurboQuantHeadBenchmark",
+            targets: ["TurboQuantHeadBenchmark"]),
+        .executable(
             name: "TurboQuantCacheUpdateBenchmark",
             targets: ["TurboQuantCacheUpdateBenchmark"]),
         .executable(
@@ -189,6 +192,13 @@ let package = Package(
                 .product(name: "MLX", package: "mlx-swift"),
             ],
             path: "tools/TurboQuantAcceptanceHarness"
+        ),
+        .executableTarget(
+            name: "TurboQuantHeadBenchmark",
+            dependencies: [
+                .product(name: "MLX", package: "mlx-swift"),
+            ],
+            path: "tools/TurboQuantHeadBenchmark"
         ),
         .executableTarget(
             name: "TurboQuantCacheUpdateBenchmark",
