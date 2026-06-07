@@ -94,6 +94,15 @@ promotion rules) and the models for it (Qwen3.5-2B hybrid for N6; mlx-swift kern
   the diagnostic codec config (defaults `.float32`), so it isn't exercised — wire it + bump the pin
   only after the KL gate passes. Steps 2–4 (one-norm-per-vector, dead-plane collapse, data-free
   quantizer) are the larger remaining diet. Compression/quality only — NOT speed.
+  **Decisive scoping (2026-06-07):** `attentionScaleStorage` drives the **PolarQJL/compressed-attention
+  layout** (`turbo*`/`polarWHT*` configs); the **production affine path does NOT use it** (affine =
+  MLX-stock quantized SDPA with its own scales). So N4 is purely a **diagnostic-path** lever needing the
+  PolarQJL native attention path. A quality-gate probe of PolarQJL configs (`turbo4v2`/`polarWHTV3`/
+  `hybridK8PolarWHTV4`) on Qwen3-0.6B @ 32K was **killed after ~14 min** (the affine gate over 6 configs
+  took ~2 min) — the PolarQJL diagnostic path is impractically slow on this M2 for iterative quality
+  validation. **Conclusion: N4 is a diagnostic-path research cycle** (wire `attentionScaleStorage` into
+  `CacheConfig` + a PolarQJL-native quality run, ideally on faster hardware), de-prioritized vs the
+  validated affine work.
 - **N5 — VALIDATED via the real-model KL/cos gate (2026-06-07).** The recency tier already exists
   two ways: the affine **protected-edge** configs (`affineK8V3-protectedK8V4-edge{4,5,6}`,
   `-last2`, `-protectedRaw` — recent/edge tokens at higher precision, bulk compressed) AND
