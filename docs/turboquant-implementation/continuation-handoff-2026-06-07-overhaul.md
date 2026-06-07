@@ -184,8 +184,30 @@ ceiling is positive (1.2–1.47×).
   the discard path must fully restore cache state (trim R+1's appends + R's rejects). Pairs with the
   EMA gate (only prefetch when recent acceptance is high, else it thrashes). This is a substantial
   feature, NOT a refinement — give it its own implementation + determinism cycle.
-- **Expected:** the 1.2–1.47× synchronous ceiling becomes realizable at ALL contexts (not just
-  ≥16K), and the long-context win rises from ~1.4× toward the ~1.8× async-fair ceiling.
+- **Expected — CORRECTED (long-context-only; earlier "all contexts" was wrong).** The realizable
+  ceiling is **async-plain ms/tok ÷ pipelined-spec ms/qtok**, NOT the synchronous ceiling (that
+  compared spec to *synchronous* plain, but real plain is `asyncEval`-pipelined). Pipelined-spec
+  ms/qtok ≈ the back-to-back forward ms/qtok (≈28 ms @8K(q≈5), ≈27 ms @16K). So even a PERFECT N7:
+  short ≈ 1.07×, **8K ≈ 0.97× (still LOSES** — the q_seq≈5 verify forward is intrinsically more
+  expensive per-qtok than async-plain per-token below the crossover**), 16K ≈ 1.81× (win).** Net:
+  N7 lifts the existing ≥16K win from ~1.4× to ~1.8× and lowers the crossover modestly (~12K); it
+  does NOT broaden ① to short/medium context. A long-context-only payoff for a multi-state-rollback
+  feature — weigh that before building.
+- **Optimistic-prefetch implementation spec (greedy path), worked out for the next cycle.** Per
+  round the verify forward of `[seed]+draft` (q_seq = draft+1) appends `1+draftCount` KV entries;
+  on accept=a it trims `draftCount-a` rejects (kept = seed + accepted drafts; the correction token
+  `mainTokens[a]` becomes next seed and enters the cache next round). To pipeline: during forward(R)
+  precompute `propose(R+1)` from `history+drafts(R)` (full-accept assumption; cheap, safe), then
+  `asyncEval` forward(R+1) of `[bonusR]+draft(R+1)` BEFORE reading R's argmax — but `bonusR =
+  argmax@last` needs a 1-token readback, so the gap shrinks to that readback, not zero. On
+  misprediction (R accepted a<draftCount): roll back **(1) KV cache** — trim `(1+draftCount(R+1))`
+  [R+1's appends] + `(draftCount(R)-a)` [R's rejects]; **(2) speculator** — it was `append`ed
+  optimistically with R's full drafts + R+1's seed/drafts, so it needs truncation (add a
+  `PromptLookupSpeculator.truncate(to:)` that pops `tokens` and rebuilds/pops the `index` — the
+  index is append-ordered so popping is feasible); **(3) iterator state** — `pendingTokens`,
+  `tokenCount`-not-yet-emitted, `acceptanceEMA`, `y`. Gate the prefetch behind the EMA (only when
+  recent acceptance is high) AND `speculationExact`, behind an opt-in flag (default off) so the
+  validated synchronous path is untouched.
 - **Gate:** byte-identical determinism on greedy (`--validate-speculative` short/8K/16K) PLUS a
   **forced-misprediction determinism test** (drafts deliberately wrong → output still byte-identical
   to plain greedy, proving the rollback restores state) + re-run `--forward-scaling` to confirm the
