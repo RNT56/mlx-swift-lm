@@ -77,6 +77,7 @@ private struct ValidationResult: Sendable {
     var acceptanceRate: Double
     var forwards: Int
     var tokensPerForward: Double
+    var plainTokens: [Int]  // for --dump-plain before/after determinism diffs (e.g. N6)
 }
 
 private func arg(_ name: String, default def: String? = nil) -> String? {
@@ -187,7 +188,8 @@ struct TurboQuantAcceptanceHarness {
                             speedup: plainTPS > 0 ? specTPS / plainTPS : 0,
                             acceptanceRate: spec.acceptanceRate, forwards: spec.modelForwards,
                             tokensPerForward: spec.modelForwards > 0
-                                ? Double(specTokens.count) / Double(spec.modelForwards) : 0))
+                                ? Double(specTokens.count) / Double(spec.modelForwards) : 0,
+                            plainTokens: plainTokens))
                 }
                 return out
             }
@@ -212,6 +214,15 @@ struct TurboQuantAcceptanceHarness {
             }
             print(
                 "\n=== determinism gate: \(allIdentical ? "PASS (all byte-identical)" : "FAIL (mismatch)") ===")
+            if let dumpPath = arg("--dump-plain") {
+                // Plain greedy token streams keyed by label — for before/after determinism
+                // diffs of cadence-only changes (e.g. N6 recurrent-sync fold).
+                let dump = Dictionary(uniqueKeysWithValues: results.map { ($0.label, $0.plainTokens) })
+                let enc = JSONEncoder()
+                enc.outputFormatting = [.sortedKeys]
+                try enc.encode(dump).write(to: URL(fileURLWithPath: dumpPath), options: .atomic)
+                print("wrote plain token dump: \(dumpPath)")
+            }
             return
         }
 
@@ -363,6 +374,18 @@ struct TurboQuantAcceptanceHarness {
                         promptLength: prompt.ids.count))
             }
             return out
+        }
+
+        // Plain greedy generated streams keyed by label — for before/after determinism diffs
+        // of cadence-only changes (e.g. N6 recurrent-sync fold) on models whose cache is not
+        // trimmable (so --validate-speculative cannot run, e.g. the Qwen3.5 hybrid).
+        if let dumpPath = arg("--dump-plain") {
+            let dump = Dictionary(
+                uniqueKeysWithValues: runs.map { ($0.label, Array($0.tokens[$0.promptLength...])) })
+            let enc = JSONEncoder()
+            enc.outputFormatting = [.sortedKeys]
+            try enc.encode(dump).write(to: URL(fileURLWithPath: dumpPath), options: .atomic)
+            print("wrote plain token dump: \(dumpPath)")
         }
 
         var rows: [AcceptanceRow] = []

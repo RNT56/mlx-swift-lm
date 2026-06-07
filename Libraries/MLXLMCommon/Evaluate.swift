@@ -1513,7 +1513,11 @@ public struct TokenIterator: TokenIteratorProtocol {
             spillMemoryWatermarkBytes: spillMemoryWatermarkBytes,
             kvLayerPolicy: kvLayerPolicy
         )
-        if materializeRecurrentKVCacheState(cache) {
+        // N6: don't synchronize/clearCache here — `evaluateGeneratedToken` does a single
+        // synchronize()+clearCache() over the generated token below, which also drains the
+        // (already-materialized) recurrent state. Folds two per-token barriers into one on the
+        // hybrid recurrent path. `eval(state)` still runs, so the output is unchanged.
+        if materializeRecurrentKVCacheState(cache, synchronize: false) {
             requiresSynchronousGenerationEval = true
         }
     }

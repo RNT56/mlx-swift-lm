@@ -70,7 +70,7 @@ Qwen3-4B/Llama-3.2-3B for representative validation, disk now freed).
 | ③ banked lm_head | shrink the 30%-of-weights head | **gating microbench DONE** — kernel-viable (subset 2.6–4.1× at batch=1) but product-modest (~6% of forward latency); build only coupled with ① |
 | PolarQJL metadata diet | realize paper 4–7× compression | **scoped (entry point confirmed)** — cross-repo mlx-swift, focused cycle (N4) |
 | recency-tiering | exact-recent + harder cold tail | scoped — new cache policy (N5) |
-| ② recurrent-sync removal | Qwen3.5 product-only | scoped — cross-cutting + hybrid-only validation (N6) |
+| ② recurrent-sync removal | Qwen3.5 product-only | **DONE** (N6) — folded 2→1 sync+clearCache/token on the hybrid recurrent path; byte-identical on Qwen3.5-2B, KVCacheTests green; no % claim (timing probe pending) |
 
 ### Coverage status (2026-06-07)
 The product-relevant **speed levers are DONE + validated**: ① (N1), **N7 async prefetch (bit-exact,
@@ -87,15 +87,15 @@ promotion rules) and the models for it (Qwen3.5-2B hybrid for N6; mlx-swift kern
 - **N5** — recency-tier exact-FP16 last W≈256 + harder-compressed cold tail via the existing hybrid
   dequant+concat merge. Gate: KL/p95/cos vs all-FP16. Capacity/quality only (extra dispatch is net
   overhead in the weight-dominated regime).
-- **N6** — the redundancy is concrete: `materializeRecurrentKVCacheState` (`KVCache.swift:2864`,
-  eval+sync+clearCache) runs in the quantize flow AND `evaluateGeneratedToken` (`Evaluate.swift:1521`,
-  eval+sync+clearCache) runs per token → **2 sync+clearCache/token on hybrid**. Fold: add a
-  `synchronize:` param to `materializeRecurrentKVCacheState` (default true to keep both current call
-  sites — note `NgramSpeculativeTokenIterator.syncRecurrentIfNeeded` is ALSO a caller), eval state
-  WITHOUT syncing, then let `evaluateGeneratedToken` do the single eval(token+state)+sync+clearCache.
-  "Can't alter output" is the GOAL but must be PROVEN: gate = KVCacheTests determinism + a
-  Qwen3.5-2B-hybrid byte-identical run (harness works with IdentityTokenizer) + a timing probe.
-  Hybrid-only (no MambaCache on standard models, so unmeasurable on Qwen3-4B).
+- **N6 — DONE (2026-06-07).** Folded the 2 sync+clearCache/token on the hybrid recurrent path into
+  1: `materializeRecurrentKVCacheState(_:synchronize:)` gained a `synchronize:` param (default true —
+  keeps the other caller, `NgramSpeculativeTokenIterator.syncRecurrentIfNeeded`, unchanged); the
+  TokenIterator (`Evaluate.swift:1516`) calls it with `synchronize: false`, and the existing per-token
+  `evaluateGeneratedToken` sync+clearCache drains the already-`eval`'d recurrent state. `eval` is
+  synchronous so output is unchanged. **Validated byte-identical** (Qwen3.5-2B hybrid, 480 plain
+  greedy tokens, `artifacts/turboquant-n6-20260607/` baseline-vs-after diff) + **KVCacheTests 90/90
+  pass**. NO speed % claim — a clean before/after timing probe on-device is still pending. New harness
+  `--dump-plain` (default + validate modes) captures the plain stream for such cadence-only diffs.
 
 ## 4. Next steps (prioritized — goal · gate · commands · files · acceptance)
 

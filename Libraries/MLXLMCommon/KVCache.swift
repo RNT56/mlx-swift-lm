@@ -2861,12 +2861,18 @@ public class CacheList: BaseKVCache {
 /// prevents lazy graph chains from accumulating while leaving standard
 /// attention KV caches untouched.
 @discardableResult
-public func materializeRecurrentKVCacheState(_ caches: [KVCache]) -> Bool {
+public func materializeRecurrentKVCacheState(_ caches: [KVCache], synchronize: Bool = true) -> Bool {
     let state = recurrentGenerationStateArrays(in: caches)
     guard !state.isEmpty else { return false }
+    // `eval` is synchronous, so the recurrent state is materialized at this call regardless
+    // of `synchronize`. Pass `synchronize: false` when the caller will immediately do its own
+    // `synchronize()`+`clearCache()` over the generated token (the TokenIterator path), folding
+    // the two per-token barriers on the hybrid recurrent path into one — see N6.
     eval(state)
-    Stream.gpu.synchronize()
-    Memory.clearCache()
+    if synchronize {
+        Stream.gpu.synchronize()
+        Memory.clearCache()
+    }
     return true
 }
 
