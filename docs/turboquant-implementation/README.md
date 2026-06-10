@@ -36,6 +36,11 @@ Current status:
 - The earlier same-day anchor
   [TurboQuant Continuation Handoff - 2026-06-07](continuation-handoff-2026-06-07.md)
   remains valid for the affine quality-gate work (state, artifacts, nonclaims).
+- For a full, self-contained, externally-auditable description of the whole design
+  (architecture, every codec's math, how the decode kernels are built at the Metal
+  level, the speculation algorithms, the measured evidence, the non-claims, and an
+  explicit "what to scrutinize" list), see
+  [TurboQuant Architecture Report](turboquant-architecture-2026-06-07.md).
 - The practical upstream-comparable route is affine K8/V4. Upstream's pinned
   README K8+V4 row is the mixed affine route, not the PolarWHT-V scaffold.
   Full `polarWHTV3` and `hybridK8PolarWHTV3/V4` remain experimental diagnostics
