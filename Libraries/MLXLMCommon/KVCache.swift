@@ -2696,6 +2696,62 @@ public class MambaCache: ArraysCache {
         super.init(size: 2, leftPadding: leftPadding)
     }
 
+    // MARK: - §4 speculative-rollback support (lever ① on the hybrid)
+    //
+    // A recurrent cache cannot be `trim`ed (no per-token KV to drop), so the hybrid is
+    // excluded from speculation via `canTrimPromptCache`. Instead it supports
+    // INDEX rollback: during a q_seq=k verify forward the GatedDeltaNet scan runs
+    // step-by-step and calls `recordVerifyStep()` after each consumed verify-input
+    // token, so `verifyStepStates[i]` is the (conv, ssm) state after consuming verify
+    // token i. Accepting `consumed` committed tokens then commits `verifyStepStates
+    // [consumed-1]` — an index, not a recompute or snapshot-restore (correct by
+    // construction). `discardVerify()` restores the pre-verify state. This keeps the
+    // projections batched (weight-amortized) and needs no Metal kernel change.
+    private var verifyPreState: [MLXArray]?
+    private var verifyPreOffset: Int = 0
+    private var verifyStepStates: [[MLXArray]] = []
+    private(set) public var inVerify = false
+
+    /// True: this cache supports speculative rollback via index selection (vs `trim`).
+    public var supportsSpeculativeRollback: Bool { true }
+
+    /// Snapshot the pre-verify recurrent state and arm per-step recording.
+    public func beginVerify() {
+        verifyPreState = state.map { $0[.ellipsis] }
+        verifyPreOffset = offset
+        verifyStepStates.removeAll(keepingCapacity: true)
+        inVerify = true
+    }
+
+    /// Record the recurrent state after one verify-input token was consumed.
+    public func recordVerifyStep() {
+        guard inVerify else { return }
+        verifyStepStates.append(state.map { $0[.ellipsis] })
+    }
+
+    /// Commit the recurrent state to the point after `consumed` verify-input tokens
+    /// (1-based; the greedy round always commits ≥1 token). Ends verify mode.
+    public func selectAcceptedStep(consumed: Int) {
+        defer { endVerify() }
+        guard inVerify, consumed >= 1, consumed <= verifyStepStates.count else { return }
+        state = verifyStepStates[consumed - 1].map { $0[.ellipsis] }
+        offset = verifyPreOffset + consumed
+    }
+
+    /// Restore the pre-verify recurrent state (full discard / misprediction rollback).
+    public func discardVerify() {
+        defer { endVerify() }
+        guard inVerify, let pre = verifyPreState else { return }
+        state = pre.map { $0[.ellipsis] }
+        offset = verifyPreOffset
+    }
+
+    private func endVerify() {
+        inVerify = false
+        verifyStepStates.removeAll(keepingCapacity: true)
+        verifyPreState = nil
+    }
+
     fileprivate func detachedGenerationState() -> [MLXArray] {
         var detached = [MLXArray]()
         for index in 0 ..< slotCount {

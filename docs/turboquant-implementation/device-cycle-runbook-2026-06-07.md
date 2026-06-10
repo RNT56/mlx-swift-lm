@@ -67,9 +67,44 @@ sustained tok/s within an acceptable fraction of burst AND thermalState does not
 - ① ships **default-off** until G3 passes on-device; the working tree is behavior-inert until
   enabled + device-validated (N2 Pines wiring is applied-but-held for exactly this).
 
-## §4 in parallel (CPU-verifiable, kernel-free, can't be invalidated by device data — only repriced)
-SSM per-position rollback (turn ① on for the Qwen3.5 hybrid). Build alongside the device cycle
-if agent bandwidth allows; else it follows. Gate: byte-identical output AND byte-identical
-cacheStateHash (both MambaCache slots) under the differential fuzz {accept 0/partial/full/
-full+bonus, adversarial proposers}. Per-step states fp32; `isTrimmable` armed only around the
-verify; N7 prefetch OFF for hybrids this cycle.
+## §4 SSM per-position rollback (turn ① on for the Qwen3.5 hybrid) — DE-RISKED + foundation landed
+
+**KEY FINDING: §4 needs NO Metal kernel change.** The GatedDeltaNet scan is a Metal kernel
+(`GatedDelta.swift` `gatedDeltaKernel`) that loops T tokens and emits only the *final* state,
+PLUS a Swift single-step reference (`GatedDelta.swift:180-213`). So during a q_seq=k verify the
+scan can run **step-by-step via the existing single-step path** to capture per-position
+recurrent states, while the projections (conv/in/out) stay **batched at m=k** (weight-
+amortization preserved). The recurrent scan is O(k) sequential either way and the state is
+small ⇒ negligible cost, verify-only.
+
+**Foundation LANDED + verified (this cycle):** `MambaCache` rollback API
+(`KVCache.swift`): `beginVerify()` snapshots pre-verify state+offset and arms recording;
+`recordVerifyStep()` appends the (conv,ssm) state after each consumed verify token;
+`selectAcceptedStep(consumed:)` commits `verifyStepStates[consumed-1]` and sets
+`offset = preOffset + consumed` (the off-by-one); `discardVerify()` restores pre-state;
+`supportsSpeculativeRollback = true`. 6 CPU unit tests pin the index mapping
+(`MambaCacheRollbackTests.swift`). MambaCache stays NON-trimmable so standard speculation
+admission still excludes it — the hybrid routes through `selectAcceptedStep`, not `trim`.
+
+**Remaining wiring (next increment, gated by the fuzz determinism test):**
+1. **Forward verify-mode:** when a layer's `MambaCache.inVerify` and S>1, run
+   `Qwen35GatedDeltaNet` (Qwen35.swift:258-297) scan step-by-step over the S tokens via the
+   single-step reference, calling `recordVerifyStep()` after each (conv state from the
+   step's tail, ssm state from the step's `gatedDeltaUpdate`). Keep conv1d/projections batched.
+2. **Iterator/admission:** add `canSpeculate(cache)` = each layer `isTrimmable` (attention) OR
+   `supportsSpeculativeRollback` (recurrent); `makeGenerationIterator` admits the hybrid under
+   it. In `NgramSpeculativeTokenIterator`: before the verify, `beginVerify()` on each MambaCache;
+   after accept-j, `selectAcceptedStep(consumed: accepted+1)` on MambaCaches AND
+   `trimPromptCache(k-accepted)` on attention caches (committed tokens this round = accepted
+   drafts + 1 bonus). N7 prefetch stays OFF for hybrids (optimistic R+1 advances recurrent
+   state past unverified R).
+3. **CONVENTION (pin before wiring):** `consumed = accepted + 1` (greedy round commits ≥1);
+   `verifyStepStates[i]` = state after consuming verify-input token i (the verify feeds
+   `[seed]+draft`, so index alignment must match the iterator's cache-lag — verify against the
+   fuzz oracle, do not assume).
+4. **GATE (the proof obligation):** differential fuzz on the real Qwen3.5-2B hybrid —
+   adversarial proposers {always-wrong, always-right, boundary, misprediction storm} × accept
+   lengths {0, partial, full, full+bonus}, asserting **byte-identical output AND byte-identical
+   cacheStateHash** (BOTH MambaCache slots: conv + fp32 ssm) after EVERY round vs the
+   plain-greedy oracle; plus full-reject ⇒ slots byte-identical to the pre-verify snapshot,
+   j-accept ⇒ slots byte-identical to j sequential single-steps. Per-step states MUST be fp32.
