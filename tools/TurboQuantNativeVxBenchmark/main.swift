@@ -367,11 +367,82 @@ private func runContext(
     return rows
 }
 
+// §1 keystone probe: does quantized_matmul re-stream the weight matrix per
+// activation row (m×) at decode-verify widths, or amortize? Times quantizedMatmul
+// at the real Qwen3-4B MLP/lm_head shapes for m=1..32. If median(m)/median(1) ≈ m,
+// the qmv path re-reads weights per row (no activation reuse) → a batched-qmv that
+// holds m rows in registers and emits m outputs per streamed weight tile is the
+// fix (the 1.8× ① ceiling is an artificial kernel gap). If ≈ 1, it already amortizes.
+private func runQmmScaling(
+    mList: [Int], iterations: Int, warmup: Int, cooldownMs: Int,
+    bits: Int, groupSize: Int, seed: UInt64
+) throws {
+    struct Shape { let name: String; let n: Int; let k: Int }
+    // Qwen3-4B: hidden 2560, intermediate 9728, vocab 151936.
+    let shapes = [
+        Shape(name: "mlp_up/gate", n: 9728, k: 2560),
+        Shape(name: "mlp_down", n: 2560, k: 9728),
+        Shape(name: "lm_head", n: 151936, k: 2560),
+    ]
+    print("shape          N        K     m   median ms   ms/m      vs m=1   eff GB/s")
+    print("-----------   ------   -----  --   ---------   -------   ------   --------")
+    for shape in shapes {
+        MLXRandom.seed(seed)
+        let w = (MLXRandom.normal([shape.n, shape.k]) * 0.1).asType(.float16)
+        let (wq, scales, biasesOpt) = quantized(w, groupSize: groupSize, bits: bits, mode: .affine)
+        guard let biases = biasesOpt else {
+            throw NSError(domain: "qmm-scaling", code: 1)
+        }
+        eval(wq, scales, biases)
+        Stream().synchronize()
+        let weightBytes = Double(wq.nbytes + scales.nbytes + biases.nbytes)
+        var baseMs = 0.0
+        for m in mList {
+            let x = (MLXRandom.normal([m, shape.k]) * 0.1).asType(.float16)
+            eval(x)
+            Stream().synchronize()
+            let r = try timed(iterations: iterations, warmup: warmup, cooldownMilliseconds: cooldownMs) {
+                quantizedMatmul(
+                    x, wq, scales: scales, biases: biases, transpose: true,
+                    groupSize: groupSize, bits: bits, mode: .affine)
+            }
+            if m == mList.first { baseMs = r.median }
+            // eff GB/s assumes weights read ONCE; if the path re-streams m×, the true
+            // bytes are m× and this number stays ~flat instead of falling.
+            let gbps = weightBytes / max(r.median, .leastNonzeroMagnitude) / 1_000_000_000
+            print(
+                [
+                    pad(shape.name, 11), String(format: "%6d", shape.n),
+                    String(format: "%5d", shape.k), String(format: "%2d", m),
+                    String(format: "%9.4f", r.median * 1000),
+                    String(format: "%7.4f", r.median * 1000 / Double(m)),
+                    String(format: "%6.2f", r.median / max(baseMs, .leastNonzeroMagnitude)),
+                    String(format: "%8.1f", gbps),
+                ].joined(separator: "   "))
+        }
+        Memory.clearCache()
+    }
+}
+
 @main
 struct TurboQuantNativeVxBenchmarkCLI {
     static func main() throws {
         if CommandLine.arguments.contains("--help") {
             printUsage()
+            return
+        }
+        if CommandLine.arguments.contains("--qmm-scaling") {
+            guard Device.defaultDevice().deviceType == .gpu else {
+                throw NSError(domain: "qmm-scaling", code: 3)
+            }
+            try runQmmScaling(
+                mList: argumentInts("--query-lengths", default: [1, 2, 4, 8, 16, 32]),
+                iterations: argumentInt("--iterations", default: 7),
+                warmup: argumentInt("--warmup", default: 2),
+                cooldownMs: argumentInt("--cooldown-ms", default: 25),
+                bits: argumentInt("--bits", default: 4),
+                groupSize: argumentInt("--qmm-group-size", default: 64),
+                seed: argumentUInt64("--seed", default: 54_512_026_0602))
             return
         }
 
