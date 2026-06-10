@@ -140,6 +140,32 @@ just magnitude), but that is a larger build with its own realized-prune-rate gat
 gates point away); revisit only as cluster-bounds with a fresh gate if the lm_head verify
 cost becomes the binding constraint after §2/§3.
 
+**#3 §3a ghost-kernel attribution (BEFORE §2 codec-in-SDPA) — DONE: affine decode is
+launch/ALU-bound, NOT bandwidth-bound ⇒ §2 is NO-GO.** Built a `ghost_mode` function
+constant (id 40) in the affine SDPA kernel (`mlx-swift` submodule
+`backend/metal/{kernels/sdpa_vector.h, scaled_dot_product_attention.cpp}`), env-driven
+(`TURBOQUANT_GHOST_SDPA_MODE`), default 0 = production byte-identical (distinct pipeline
+via the `_ghost` hash). Mode 2 = math-only (hold the per-key K/V code/scale/bias pointers
+⇒ loads collapse to L1, full dequant/dot/accumulate runs every iter ⇒ isolates ALU+launch
+from DRAM streaming). Measured (Qwen3-4B affine K8/V4, hd128 16Q/8KV; artifacts/
+turboquant-ghost-sdpa-20260607/, gitignored): **removing DRAM streaming saves only ~12%
+@16K, ~8% @32K, ~0% @65K/131K.** Corroborated: affine is *slower* than FP16 @16K (fp16x
+0.874) despite moving 2× fewer bytes. **Verdict: the affine decode is launch/occupancy/ALU-
+bound, not bandwidth-bound** — the "0.39–0.62× effective bandwidth" is a red herring; bytes
+move in the shadow of the launch/compute cost. **⇒ §2 (port polarLM LUT-gather + d·log d
+WHT butterfly INTO this kernel) is NO-GO**: it adds heavy per-element math to a kernel with
+no compute headroom and would regress (precisely why PolarQJL lost round one — the codec
+*math*, not just coalescing). **§3b (inline metadata) and §3c (DRAM prefetch) are also low-
+value** (only ~12% of time is DRAM to recover). The N4 Gaussian capacity codec must live on
+a decode path / accept the slow diagnostic path — it cannot be made fast by porting into the
+affine kernel. The launch/occupancy-bound component is the only structural lever left
+(more SIMD-groups per threadgroup; PERF_AUDIT #1) — a separate investigation.
+*Instrument status:* the two submodule edits are default-off/production-safe and left in the
+working tree (uncommitted) to avoid an uncoordinated mlx-swift pin bump; include them in the
+next coordinated mlx-swift commit. Reproduce: `TURBOQUANT_GHOST_SDPA_MODE=2
+.build/release/TurboQuantNativeVxBenchmark --value-bits 4 --query-lengths 1 --head-dim 128
+--query-heads 16 --kv-heads 8 --contexts 16384,32768`.
+
 ## The live baseline (must be beaten to justify §5a / §1-batched-qmv)
 **Adaptive-k** (landed, opt-in, bit-exact): per-round proposal width tracks the
 acceptance EMA, defaulting to the cheap width (≤2, below the lm_head verify cliff)
