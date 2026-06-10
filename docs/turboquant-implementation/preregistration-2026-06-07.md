@@ -166,6 +166,41 @@ next coordinated mlx-swift commit. Reproduce: `TURBOQUANT_GHOST_SDPA_MODE=2
 .build/release/TurboQuantNativeVxBenchmark --value-bits 4 --query-lengths 1 --head-dim 128
 --query-heads 16 --kv-heads 8 --contexts 16384,32768`.
 
+**#3 §3a second-stage (launch vs ALU vs LSU) — DONE: affine decode is LAUNCH/MERGE-bound,
+and the block-count ladder OVER-SPLITS batch=1 decode.** Added ghost_mode==3 (launch-only:
+skip all per-key work, keep grid/ladder + pass-2 merge). 3-mode decomposition (Qwen3-4B
+affine K8/V4 hd128; artifacts/turboquant-ghost-sdpa-20260607/): **launch/dispatch/merge is
+~45–63% of the kernel** (0.82/1.55/1.55/1.70 ms @16/32/65/131K), tracking the block-count
+ladder (256/512/512/1024) almost exactly — confirming the N-trend fingerprint (the growing
+cost is block count, i.e. dispatch + pass-2 merge, NOT per-element ALU/bytes). **Block-count
+sweep (`TURBOQUANT_SDPA_DECODE_BLOCKS`, env override, no new kernel): 256 beats the default
+512/1024 by ~10–15% at ≥32K** (16K 256=1.63 vs 512=2.35; 32K 256=2.01 vs 512=2.32; 65K
+256=2.38 vs 512=2.62; b1024 worst everywhere). **Lever = a decode-specific ladder cap (~256)
+in `select_sdpa_blocks`** — tiny, env-validated, no codec change. CAVEATS: single-sample
+(needs the A/B+CI rigor below before changing the ladder); attention is a minority of
+weight-dominated decode (≤47K) so the end-to-end win is a few %; **M2-Pro-measured** — the
+optimal block count is device-specific, re-tune on A-series; production change is
+coordination-gated (mlx-swift pin bump). PERF_AUDIT #1 is re-pointed at the **launch/merge
+path** (ladder cap + cheaper pass-2 merge), not simdgroups-per-threadgroup.
+NOTE the instrument can't yet split launch- vs ALU- vs LSU-bound below the launch floor
+(ghost keeps load instructions, cache-hitting) — a further ALU-vs-LSU stub (codec math → 1
+FMA, loads kept) is the next decomposition if the ladder cap doesn't fully close the gap.
+
+**Repricing the §2 / §5a / §1 NO-GOs (annotation, honest record):**
+- §2 is "compute-bound kernel + a *nonzero* per-element delta (the deferred-WHT V path is ONE
+  threadgroup LUT gather; rotation/residual were algebraically removed; the butterfly is
+  per-query, amortized to ~0) + *modest* marginal capacity (the big jump needs LM-K5, which
+  DOES touch the hot K loop) ⇒ **not worth it NOW**" — a **priced contingency**, NOT "any codec
+  math regresses heavily." Revive if the device cycle changes the boundedness.
+- **The capacity story is NOT closed** — it moved to the lever that survives a compute-bound
+  kernel **for free: affine-V3** (already native in the value-bits gate, same FMA decode) **+
+  N5 recency tiering** (wide protected-edge). If the device cycle shows RAM pressure, that is
+  the play, **no new kernels**.
+- **Every NO-GO above is M2-Pro-measured.** A-series has less bandwidth per ALU + different
+  launch/thermal behaviour, so the boundedness verdicts may shift on-device. The ghost_mode
+  and the block-count env overrides are function-constant / env — they **travel to the device
+  for free**; carry them in the device cycle (one extra env var per run settles transfer).
+
 ## The live baseline (must be beaten to justify §5a / §1-batched-qmv)
 **Adaptive-k** (landed, opt-in, bit-exact): per-round proposal width tracks the
 acceptance EMA, defaulting to the cheap width (≤2, below the lm_head verify cliff)
