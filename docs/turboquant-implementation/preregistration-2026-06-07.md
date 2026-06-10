@@ -126,6 +126,20 @@ long-doc-16K gain (1.313→1.568×) is **within single-sample noise** — the sa
 long-doc-8K returned 0.678× at full width (a clear thermal outlier), which *proves* the
 A/B+bootstrap-CI requirement below. Kept opt-in/default-off; not a claimed win.
 
+**#2 §5a prune-rate keystone (BEFORE writing Metal) — FAILED for plain norm-pruning.**
+Dequantized the Qwen3-4B tied head (`model.embed_tokens`, 4-bit g64, 151936×2560) and
+measured the row-norm spread: **std/mean 0.156, p50 1.127, p95 1.294, p99 1.353** —
+tightly clustered. Cauchy-Schwarz prune fraction = P(‖w_i‖ < ‖w*‖·cos*): **0% at
+cos*≤0.3, 3% @0.5, 5% @0.7, 30% @0.95, 50% only @cos*=1.0**. LM-head top-1 cosines are
+low (~0.1–0.4: the hidden state is not aligned to a single embedding row), so realized
+pruning ≈ **0–5%** — far below the pre-registered ≥50%@k1. **Plain norm-pruning is dead
+before any kernel** (the exact "clustered norms ⇒ prune≈0" failure mode). Pivot per the
+gate = **cluster bounds** (k-means centroids, bound `⟨h,c⟩ + ‖h‖·r` — uses direction, not
+just magnitude), but that is a larger build with its own realized-prune-rate gate, and
+#1 already demoted §5a to incremental. **Verdict: §5a deprioritized this cycle** (both
+gates point away); revisit only as cluster-bounds with a fresh gate if the lm_head verify
+cost becomes the binding constraint after §2/§3.
+
 ## The live baseline (must be beaten to justify §5a / §1-batched-qmv)
 **Adaptive-k** (landed, opt-in, bit-exact): per-round proposal width tracks the
 acceptance EMA, defaulting to the cheap width (≤2, below the lm_head verify cliff)
