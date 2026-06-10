@@ -216,3 +216,24 @@ async-pipelined single-token fallback so the disabled path matches plain on smal
 7. Recency-tiering codec; ② (Qwen3.5 hybrid) redundant-sync removal.
 8. ① on a 3–4B at long context (download once disk freed) to show the clean
    weight-dominated speedup without the tiny-model fallback overhead.
+
+## §1 keystone result (2026-06-07) — the q_seq scaling is lm_head-localized
+Probe `TurboQuantNativeVxBenchmark --qmm-scaling` (committed `ffc883e`) timed
+`quantizedMatmul` (4-bit g64) at real Qwen3-4B shapes for m=1..32. T(m)/T(1):
+- **MLP up/gate (9728×2560) & down (2560×9728): already amortize** — m=8 ≈
+  1.45–1.52× (not 8×). The qmv path reuses activations across rows; the
+  "qmv re-streams weights m×" structural claim is **refuted for the MLP**.
+- **lm_head (151936×2560, 194 MB): the artificial fall-off** — sharp jump m=2
+  (0.93×) → m=4 (2.50×) → m=8 (2.86×). Huge N → low qmv `vector_limit` → verify
+  widths m≥~3 drop onto the 32×32 `qmm` tile (wrong for tiny m).
+
+So the 2.7× full-forward q_seq scaling = lm_head fall-off + attention's real
+k-work; the MLP bulk (~54% of weights) is already fine. **Revised plan:**
+(a) **§5a norm-pruned exact-argmax lm_head is elevated to the first build** —
+greedy verify needs only the argmax, so a Cauchy-Schwarz bank-pruned argmax reads a
+fraction of the 194 MB head, is bit-exact, and composes with ①'s bonus token;
+(b) **batched-qmv is a lm_head-only lever** (route verify-width m∈[3,vector_limit)
+huge-N matmuls onto it; MLP untouched) — modest, build after §5a;
+(c) "① ceiling → 4–5×" is **overstated** — re-measure with `--forward-scaling`
+after the lm_head lever lands. Evidence: `artifacts/turboquant-qmm-scaling-20260607/`
+(gitignored; raw table + `N-keystone-summary.md`).
