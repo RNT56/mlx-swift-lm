@@ -40,6 +40,22 @@ public struct NgramSpeculativeTokenIterator: TokenIteratorProtocol {
 
     private var speculator: PromptLookupSpeculator
     private let maxProposalTokens: Int
+    private let adaptiveK: Bool
+    private let cheapProposalTokens: Int
+
+    /// Per-round proposal width. With adaptive-k off, the fixed `maxProposalTokens`.
+    /// With it on: explore at full width during EMA warmup, then scale the width by
+    /// the acceptance EMA between `cheapProposalTokens` (below the lm_head verify
+    /// cliff) and `maxProposalTokens` — high acceptance earns a wider (costlier)
+    /// verify; marginal acceptance stays at the near-free cheap width.
+    private func currentProposalCap() -> Int {
+        guard adaptiveK, roundsCompleted >= emaWarmupRounds else { return maxProposalTokens }
+        // Full width when acceptance is high (wide rounds pay off — and at the long,
+        // weight-dominated contexts where the lm_head verify cliff bites, acceptance
+        // IS high so we want full width); shrink to the cheap width (below the cliff)
+        // only when acceptance is genuinely low and a wide verify would be wasted.
+        return acceptanceEMA >= 0.7 ? maxProposalTokens : cheapProposalTokens
+    }
 
     // Acceptance EMA self-disable: skip proposing when recent acceptance is poor.
     private var acceptanceEMA: Double = 1.0
@@ -97,11 +113,25 @@ public struct NgramSpeculativeTokenIterator: TokenIteratorProtocol {
         emaWarmupRounds: Int = 8,
         // N7: opt-in async prefetch pipeline. Default off — the synchronous path is the
         // validated one; prefetch is a long-context (≥~16K) throughput lever.
-        enablePrefetch: Bool = false
+        enablePrefetch: Bool = false,
+        // Adaptive-k (free lever): the §1 qmm probe showed the lm_head verify cost
+        // cliffs sharply above the cheap width (T(2)≈0.93–1.1× vs T(4)≈2.5× on the
+        // 194 MB head), so a verify forward at the cheap width is nearly free today
+        // while wider rounds pay the head fall-off. When enabled, the per-round
+        // proposal width tracks the acceptance EMA — default to `cheapProposalTokens`
+        // (below the cliff) and widen toward `maxProposalTokens` only when recent
+        // acceptance is high enough to justify the wider (more expensive) verify.
+        // Bit-exact: only the proposal WIDTH changes; the greedy-argmax verify is
+        // unchanged, so output stays byte-identical. A zero-kernel baseline that
+        // §5a / §1-batched-qmv must beat. Default off (validated path untouched).
+        adaptiveK: Bool = false,
+        cheapProposalTokens: Int = 2
     ) throws {
         self.model = model
         self.y = input.text
         self.enablePrefetch = enablePrefetch
+        self.adaptiveK = adaptiveK
+        self.cheapProposalTokens = Swift.max(1, Swift.min(cheapProposalTokens, maxProposalTokens))
         let runtime = try resolvedGenerationParameters(for: model, parameters: parameters)
         self.cache = cache ?? model.newCache(parameters: runtime)
         self.sampler = runtime.sampler()
@@ -228,7 +258,7 @@ public struct NgramSpeculativeTokenIterator: TokenIteratorProtocol {
             && (roundsCompleted < emaWarmupRounds || acceptanceEMA >= emaFloor)
         if gateOpen {
             let proposed = speculator.propose()
-            let budget = Swift.min(maxProposalTokens, Swift.max(0, remaining - 1))
+            let budget = Swift.min(currentProposalCap(), Swift.max(0, remaining - 1))
             if !proposed.isEmpty && budget > 0 {
                 draft = Array(proposed.prefix(budget))
             }
@@ -297,7 +327,7 @@ public struct NgramSpeculativeTokenIterator: TokenIteratorProtocol {
         let gateOpen = roundsCompleted < emaWarmupRounds || acceptanceEMA >= emaFloor
         guard gateOpen else { return nil }
         let proposed = speculator.propose()
-        let budget = Swift.min(maxProposalTokens, Swift.max(0, remaining - 1))
+        let budget = Swift.min(currentProposalCap(), Swift.max(0, remaining - 1))
         guard !proposed.isEmpty, budget > 0 else { return nil }
         let draft = Array(proposed.prefix(budget))
         let verifyTokens = concatenated([seed, MLXArray(draft.map { Int32($0) })])

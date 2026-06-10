@@ -145,6 +145,8 @@ struct TurboQuantAcceptanceHarness {
         if CommandLine.arguments.contains("--validate-speculative") {
             let ngram = argInt("--ngram", default: 3)
             let enablePrefetch = CommandLine.arguments.contains("--prefetch")
+            let adaptiveK = CommandLine.arguments.contains("--adaptive-k")
+            let cheapWidth = argInt("--cheap-width", default: 2)
             let results: [ValidationResult] = try await container.perform { (ctx: ModelContext) in
                 var out: [ValidationResult] = []
                 for prompt in prompts {
@@ -168,7 +170,8 @@ struct TurboQuantAcceptanceHarness {
                         input: LMInput(text: LMInput.Text(tokens: MLXArray(prompt.ids.map { Int32($0) }))),
                         model: ctx.model, parameters: greedyParams(),
                         ngram: ngram, maxProposalTokens: maxProposal,
-                        enablePrefetch: enablePrefetch)
+                        enablePrefetch: enablePrefetch,
+                        adaptiveK: adaptiveK, cheapProposalTokens: cheapWidth)
                     var specTokens: [Int] = []
                     let t1 = Date.timeIntervalSinceReferenceDate
                     for _ in 0 ..< maxTokens { guard let t = spec.next() else { break }; specTokens.append(t) }
