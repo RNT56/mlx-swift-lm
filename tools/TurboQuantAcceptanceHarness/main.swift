@@ -546,7 +546,8 @@ struct TurboQuantAcceptanceHarness {
                         String(format: "%3d", w.index), String(format: "%9.1f", w.elapsedSeconds),
                         String(format: "%7.2f", w.tokensPerSec),
                         w.thermalState.padding(toLength: 10, withPad: " ", startingAt: 0),
-                        String(format: "%12d", w.activeBytes),
+                        // %d truncates a 64-bit Int to 32 bits; interpolate the byte count instead.
+                        "\(w.activeBytes)".padding(toLength: 12, withPad: " ", startingAt: 0),
                     ].joined(separator: "  "))
             }
             let firstWindow = windows.first?.tokensPerSec ?? 0
