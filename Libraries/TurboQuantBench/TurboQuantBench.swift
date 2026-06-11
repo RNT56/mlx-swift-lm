@@ -1007,6 +1007,39 @@ public struct TurboQuantBenchResult: Codable, Sendable {
     }
 }
 
+/// A device-environment snapshot captured around a benchmark sub-sweep: the data the
+/// device-cycle G1 (RAM fit) and G2 (thermal soak) gates need but that is not part of a
+/// per-shape kernel measurement. Captured per context on-device so the emitted JSON carries
+/// a memory + thermal *trajectory* across the (multi-minute) full matrix, not a point reading.
+public struct TurboQuantBenchEnvironment: Codable, Sendable {
+    /// Free-form marker, e.g. "ctx=32768/before" or "sweep/after".
+    public var label: String
+    /// `ProcessInfo.thermalState`: nominal | fair | serious | critical. `.serious`/`.critical`
+    /// flag the surrounding rows non-promotable per the pre-registration.
+    public var thermalState: String
+    /// MLX active resident bytes (the effective cache-policy footprint).
+    public var activeMemoryBytes: Int
+    /// MLX peak resident bytes since process start / last reset.
+    public var peakMemoryBytes: Int
+    /// MLX cache (reclaimable) bytes.
+    public var cacheMemoryBytes: Int
+    /// iOS jetsam headroom (bytes until the app is killed); 0 on macOS / Simulator where it is
+    /// not meaningful — the device-cycle G1 number is only trustworthy on a physical A-series die.
+    public var availableMemoryBytes: Int
+
+    public init(
+        label: String, thermalState: String, activeMemoryBytes: Int,
+        peakMemoryBytes: Int, cacheMemoryBytes: Int, availableMemoryBytes: Int
+    ) {
+        self.label = label
+        self.thermalState = thermalState
+        self.activeMemoryBytes = activeMemoryBytes
+        self.peakMemoryBytes = peakMemoryBytes
+        self.cacheMemoryBytes = cacheMemoryBytes
+        self.availableMemoryBytes = availableMemoryBytes
+    }
+}
+
 public enum TurboQuantBench {
     public static let nativePerfGateMinimumContextLength = 32_768
     public static let nativePerfGateRequiredSpeedup = 2.0
@@ -2003,6 +2036,28 @@ public enum TurboQuantBench {
                     + pad(fmt(r.memoryReductionRatio, 2), 5))
         }
         return lines.joined(separator: "\n")
+    }
+
+    /// Snapshot the device environment (thermal + MLX memory + jetsam headroom) for the
+    /// G1/G2 gates. Cheap (no GPU work) — call it around each context's sub-sweep on-device.
+    public static func captureEnvironment(label: String) -> TurboQuantBenchEnvironment {
+        let snapshot = Memory.snapshot()
+        let thermal: String
+        switch ProcessInfo.processInfo.thermalState {
+        case .nominal: thermal = "nominal"
+        case .fair: thermal = "fair"
+        case .serious: thermal = "serious"
+        case .critical: thermal = "critical"
+        @unknown default: thermal = "unknown"
+        }
+        var available = 0
+        #if os(iOS)
+            available = Int(os_proc_available_memory())
+        #endif
+        return TurboQuantBenchEnvironment(
+            label: label, thermalState: thermal,
+            activeMemoryBytes: snapshot.activeMemory, peakMemoryBytes: snapshot.peakMemory,
+            cacheMemoryBytes: snapshot.cacheMemory, availableMemoryBytes: available)
     }
 }
 

@@ -58,6 +58,70 @@ sustained tok/s within an acceptable fraction of burst AND thermalState does not
   evidence (status stays `failed`/`unverified` until compressed throughput meets the bar —
   hand-editing it is fabrication, guardrail-blocked).
 
+## Turnkey invocations (the benchmark is refined — 2026-06-11)
+
+Two measurement vehicles; **which gate runs where is fixed by where the code can run**. A
+SwiftPM executable runs only on macOS; only an `xcodebuild test` bundle runs on the A-series die.
+
+### Vehicle A — `TurboQuantAcceptanceHarness` CLI (macOS; full model; G3 + G2-soak methodology)
+Refined to emit the pre-registered rigor. `--ab-repeats N` interleaves plain/spec trials with the
+arm order **alternated each trial** (cancels order/thermal drift), reports **bootstrap 95% CIs** on
+both arms and on the speedup ratio, logs `thermalState` per trial, captures MLX active/peak memory,
+and writes the machine-readable G1–G4 artifact. `--soak-seconds` is the G2 sustained-vs-burst loop.
+
+```bash
+cd mlx-swift-lm
+swift build -c release --product TurboQuantAcceptanceHarness
+# tokenize prompts externally (token IDs only — the in-package tool has no swift-transformers):
+python3 - <<'PY'  # writes prompts-*.json = [{"label","ids":[Int]}], order them short→long
+from transformers import AutoTokenizer; import json
+# ... encode short / 8K / 16K / 32K contexts ...
+PY
+# G3 determinism + ① speedup with CIs (order prompts short→long so crossoverPrompt is meaningful):
+TQ_DEVICE="<host>" TQ_COMMIT_MLX_SWIFT_LM=<sha> TQ_COMMIT_MLX_SWIFT=<sha> \
+  .build/release/TurboQuantAcceptanceHarness --model-dir <dir> --prompt-ids-file prompts.json \
+    --validate-speculative --ab-repeats 8 --bootstrap 2000 --ngram 3 --max-proposal 8 \
+    --max-tokens 96 --output artifacts/<run>/validate-spec.json
+# G2 soak (sustained vs burst), e.g. 600s = the mandated 10-minute thermal soak:
+.build/release/TurboQuantAcceptanceHarness --model-dir <dir> --prompt-ids-file prompts.json \
+    --soak-seconds 600 --max-tokens 128 --output artifacts/<run>/soak.json
+# G4 ghost/block decomposition travels for FREE — one extra env var per run, re-run --validate-speculative:
+TURBOQUANT_GHOST_SDPA_MODE=2 ...   # {0,2,3}; echoed into artifact.config.ghostSdpaMode
+TURBOQUANT_SDPA_DECODE_BLOCKS=256 ...   # {64,128,256,512}; echoed into artifact.config.sdpaDecodeBlocks
+```
+
+Mac same-machine reference (2026-06-11, Qwen3-4B-4bit, ace7d5c/4a83f63, 3 repeats, 48 tok) PROVING
+the rigor emits a valid artifact: `artifacts/device-cycle-prep-20260611/mac-ref-validate-spec.json`
+— determinism PASS byte-identical; short 1.323× [1.323,1.417], ctx≈11K 1.777× **[0.969,2.033]** (the
+wide CI at 3 repeats is the point — use **≥8 repeats** on device). NOTE: tok/s here includes the
+one-time prefill amortized over the generated tokens (both arms equally), so the **ratio** is the
+gate metric, not the absolute tok/s; raise `--max-tokens` to dilute prefill. `availableMemoryBytes`
+is 0 on macOS (jetsam headroom is iOS-only) — the G1 RAM number is only trustworthy on device.
+
+### Vehicle B — `MLXLMTests/TurboQuantBenchSuite` (A-series via xcodebuild; kernels; G1 + G2-trajectory + G4)
+The on-device attention-throughput / quality / KV-bytes sweep. Refined (2026-06-11) to snapshot a
+`TurboQuantBenchEnvironment` (thermalState + MLX active/peak/cache + iOS jetsam headroom) **before and
+after each context's sub-sweep**, so the emitted `{environments, results}` JSON carries a G1 memory +
+G2 thermal **trajectory** across the multi-minute full matrix. A `.critical` thermalState fails the run.
+
+```bash
+xcodebuild test -scheme mlx-swift-lm-Package \
+  -destination 'platform=iOS,name=<device>' \
+  -only-testing:MLXLMTests/TurboQuantBenchSuite TQ_BENCH=1
+# G4 on-device: prefix the test action env with TURBOQUANT_GHOST_SDPA_MODE / TURBOQUANT_SDPA_DECODE_BLOCKS.
+```
+
+### Gate → vehicle map (honest)
+- **G1 RAM fit** — Vehicle B `environments[].{activeMemoryBytes,peakMemoryBytes,availableMemoryBytes}`
+  (jetsam headroom is real only here) + `results[].{compressedKVBytes,plainKVBytes,memoryReductionRatio}`.
+- **G2 thermal** — Vehicle A `--soak-seconds` for the true 10-min sustained-vs-burst tok/s on the full
+  model; Vehicle B's per-context environment trajectory for the kernel-sweep thermal drift. Both fail on `.critical`.
+- **G3 ① byte-identity + speedup** — Vehicle A `--validate-speculative`. **GAP:** Vehicle A is macOS-only,
+  so a literal *on-device* G3 needs a small full-model ①-A/B test added to the iOS test bundle (next
+  increment); the M2-Pro byte-identity proof is same-device-internal and conservative to re-earn. Until
+  then, run G3 on the Mac and treat the on-device ① speedup as carried by Vehicle B-adjacent evidence + Pines.
+- **G4 ghost/block** — either vehicle via the two `TURBOQUANT_*` env vars; both echo them into the artifact.
+
 ## Decision logic the cycle feeds
 - G1 outcome sets **§4 priority** (dense-fits ⇒ §4 nice-to-have; hybrid-only ⇒ §4 critical).
 - G1 RAM pressure **revives the parked capacity contingency** (affine-V3 + N5 recency, no new

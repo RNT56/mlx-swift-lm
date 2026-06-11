@@ -48,28 +48,56 @@ extension MLXRuntimeSwiftTests {
             let iterations = runFullMatrix ? 12 : 3
             let warmup = runFullMatrix ? 3 : 1
 
-            let cases = contexts.flatMap { context in
-                schemes.map {
+            // Sweep one context at a time, snapshotting the device environment (G1 memory +
+            // G2 thermalState) before and after each context's sub-sweep. Over the full matrix
+            // (minutes of sustained GPU load) this yields a memory + thermal *trajectory* — the
+            // device-cycle evidence the per-shape kernel rows cannot carry on their own.
+            var results: [TurboQuantBenchResult] = []
+            var environments: [TurboQuantBenchEnvironment] = [
+                TurboQuantBench.captureEnvironment(label: "sweep/before")
+            ]
+            for context in contexts {
+                environments.append(
+                    TurboQuantBench.captureEnvironment(label: "ctx=\(context)/before"))
+                let cases = schemes.map {
                     TurboQuantBenchCase.qwen35_2B(contextLength: context, scheme: $0)
                 }
+                results += TurboQuantBench.sweep(
+                    profile: profile, cases: cases,
+                    iterations: iterations, warmupIterations: warmup)
+                environments.append(
+                    TurboQuantBench.captureEnvironment(label: "ctx=\(context)/after"))
             }
-            let results = TurboQuantBench.sweep(
-                profile: profile, cases: cases,
-                iterations: iterations, warmupIterations: warmup)
+            environments.append(TurboQuantBench.captureEnvironment(label: "sweep/after"))
 
             print(
                 "\n=== TurboQuant A-series attention sweep "
                     + "(qwen3.5-2b geometry, \(runFullMatrix ? "full matrix" : "smoke")) ===")
             print(TurboQuantBench.renderTable(results))
+            for env in environments {
+                print(
+                    "  env[\(env.label)] thermal=\(env.thermalState) "
+                        + "active=\(env.activeMemoryBytes) peak=\(env.peakMemoryBytes) "
+                        + "headroom=\(env.availableMemoryBytes)")
+            }
+            // Combined deliverable: the G1/G2 environment trajectory + the per-shape rows.
+            struct Deliverable: Codable {
+                var environments: [TurboQuantBenchEnvironment]
+                var results: [TurboQuantBenchResult]
+            }
             let encoder = JSONEncoder()
             encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-            if let json = try? encoder.encode(results),
+            if let json = try? encoder.encode(Deliverable(environments: environments, results: results)),
                 let text = String(data: json, encoding: .utf8)
             {
                 print("\n--- TurboQuantBench JSON ---\n\(text)\n")
             }
+            // G2 guard: any .critical thermalState during the matrix is a non-promotable run.
+            #expect(!environments.contains { $0.thermalState == "critical" })
 
-            #expect(results.count == cases.count)
+            #expect(results.count == contexts.count * schemes.count)
+            // before + after + (before,after per context).
+            #expect(environments.count == 2 + 2 * contexts.count)
             // Kernel-level failures are real bugs; environment-dependent skips are not.
             #expect(!results.contains { $0.status == .failed })
             // When a case does measure, the compressed output must be finite and
@@ -110,6 +138,20 @@ extension MLXRuntimeSwiftTests {
                     #expect(result.fullScanFallbackCount == 0)
                 }
             }
+        }
+
+        @Test func captureEnvironmentReportsThermalAndMemory() throws {
+            let env = TurboQuantBench.captureEnvironment(label: "unit/probe")
+            #expect(env.label == "unit/probe")
+            #expect(["nominal", "fair", "serious", "critical", "unknown"].contains(env.thermalState))
+            #expect(env.activeMemoryBytes >= 0)
+            #expect(env.peakMemoryBytes >= 0)
+            #expect(env.availableMemoryBytes >= 0)
+            // Codable round-trip (the device deliverable is JSON).
+            let decoded = try JSONDecoder().decode(
+                TurboQuantBenchEnvironment.self, from: try JSONEncoder().encode(env))
+            #expect(decoded.thermalState == env.thermalState)
+            #expect(decoded.peakMemoryBytes == env.peakMemoryBytes)
         }
 
         @Test func sparseVTopKBenchCaseUsesNativeSelectionDiagnostics() throws {
