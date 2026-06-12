@@ -1,5 +1,12 @@
 # A-series device cycle — pre-registered measurement campaign (2026-06-07)
 
+> **RESULTS (2026-06-13):** first physical A-series run landed — GBU-12 (iPhone 15 Pro Max /
+> A17 Pro), full 8K→131K × turbo8/turbo4v2/turbo3_5 matrix, **15/15 ok**, via the Pines DEBUG
+> app host (`PINES_TURBOQUANT_BENCH=1`). Quality holds (cosine 0.9976–0.99999), 2.21× KV memory,
+> compressed/FP16 ratio 0.22 @8K → 0.47 @64K (never parity ⇒ dynamic FP16-when-it-fits validated;
+> ~2–3× better ratio than M2 Pro). Synthetic-attention scope — promotes nothing; G2/G3 not covered.
+> Evidence + provenance: `evidence/device-cycle-20260613/README.md`.
+
 The one remaining unmeasured assumption is **the thesis**: does compressed long-context
 inference actually work on an A-series die? It has repricing power over the whole program
 (incl. §4 priority and the parked capacity contingency), and ① runs **today** on the dense
