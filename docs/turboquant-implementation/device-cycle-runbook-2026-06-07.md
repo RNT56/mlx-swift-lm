@@ -6,6 +6,13 @@
 > compressed/FP16 ratio 0.22 @8K → 0.47 @64K (never parity ⇒ dynamic FP16-when-it-fits validated;
 > ~2–3× better ratio than M2 Pro). Synthetic-attention scope — promotes nothing; G2/G3 not covered.
 > Evidence + provenance: `evidence/device-cycle-20260613/README.md`.
+>
+> **REAL-MODEL (2026-06-13):** actual Qwen3.5-2B-OptiQ-4bit weights generating on the A17 Pro via a
+> DEBUG Pines hook + the `InferenceParityBenchmark` engine (`real-model-inference-v1`). **At 16K the
+> compressed affineK8V4 path runs real decode at 0.96× FP16 (≈4% slower) with BYTE-IDENTICAL greedy
+> output (top-1 = 1.000), cosine 0.982, no fallback** — far better than the synthetic 0.2–0.47×
+> because real decode is weight-bound (compressing KV is nearly free end-to-end). 4K stays raw
+> (below quantizedKVStart). Evidence: `evidence/device-cycle-20260613/REAL-MODEL.md`.
 
 The one remaining unmeasured assumption is **the thesis**: does compressed long-context
 inference actually work on an A-series die? It has repricing power over the whole program

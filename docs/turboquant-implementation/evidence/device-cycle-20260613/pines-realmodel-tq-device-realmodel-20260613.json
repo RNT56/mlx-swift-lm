@@ -1,0 +1,108 @@
+{
+  "comparisonBasis" : "real-model-inference-v1 (actual weights, real generation; affineK8V4 vs FP16)",
+  "contexts" : [
+    4096,
+    16384
+  ],
+  "createdAt" : "2026-06-13T00:36:27Z",
+  "generateTokens" : 48,
+  "host" : {
+    "deviceID" : "GBU-12-iPhone15ProMax-A17Pro",
+    "hardwareModel" : "iPhone16,2",
+    "mlxPinPair" : "mlx-swift-6bfa04e2924152c52c56eac5c3420a7cc7e8d720+mlx-swift-lm-295e66bef0b3d85be70290b5c1adea83d694660c",
+    "osVersion" : "Version 26.5 (Build 23F77)"
+  },
+  "modelDirectory" : "\/var\/mobile\/Containers\/Data\/Application\/5B72054D-9B3E-4E8C-A0EC-BBFDC389518A\/Library\/Application Support\/Pines\/Models\/mlx-community__Qwen3.5-2B-OptiQ-4bit",
+  "quality" : [
+    {
+      "attentionOutputCosineMean" : 1,
+      "context" : 4096,
+      "deterministicTop1MatchRate" : 1,
+      "fallbackReasons" : [
+
+      ],
+      "label" : "affineK8V4",
+      "logitKLDivergenceMean" : 0,
+      "logitMaxAbsErrorP95" : 0,
+      "passed" : true,
+      "rawFallbackAllocated" : false,
+      "referenceLabel" : "fp16",
+      "selectedAttentionPaths" : [
+
+      ]
+    },
+    {
+      "attentionOutputCosineMean" : 0.9815307587249547,
+      "context" : 16384,
+      "deterministicTop1MatchRate" : 1,
+      "fallbackReasons" : [
+
+      ],
+      "label" : "affineK8V4",
+      "logitKLDivergenceMean" : 2.9910300376880785e-05,
+      "logitMaxAbsErrorP95" : 1.970703125,
+      "passed" : true,
+      "rawFallbackAllocated" : false,
+      "referenceLabel" : "fp16",
+      "selectedAttentionPaths" : [
+        "affineK8V4Native"
+      ]
+    }
+  ],
+  "repo" : "mlx-community\/Qwen3.5-2B-OptiQ-4bit",
+  "runID" : "device-realmodel-20260613",
+  "schemaVersion" : 1,
+  "speedups" : [
+    {
+      "compressedTokensPerSecond" : 20.711956040899114,
+      "context" : 4096,
+      "fp16TokensPerSecond" : 20.673010344381442,
+      "ratioCompressedOverFP16" : 1.001883890921975
+    },
+    {
+      "compressedTokensPerSecond" : 17.72332083591966,
+      "context" : 16384,
+      "fp16TokensPerSecond" : 18.45939446696576,
+      "ratioCompressedOverFP16" : 0.9601247141468616
+    }
+  ],
+  "throughput" : [
+    {
+      "activeMemoryEndBytes" : 1604698304,
+      "context" : 4096,
+      "decodeTokensPerSecond" : 20.711956040899114,
+      "generationTokenCount" : 48,
+      "label" : "affineK8V4",
+      "peakActiveMemoryBytes" : 2083031280,
+      "sampleCount" : 1
+    },
+    {
+      "activeMemoryEndBytes" : 1604698304,
+      "context" : 4096,
+      "decodeTokensPerSecond" : 20.673010344381442,
+      "generationTokenCount" : 48,
+      "label" : "fp16",
+      "peakActiveMemoryBytes" : 2083031280,
+      "sampleCount" : 1
+    },
+    {
+      "activeMemoryEndBytes" : 1639252160,
+      "context" : 16384,
+      "decodeTokensPerSecond" : 17.72332083591966,
+      "generationTokenCount" : 48,
+      "label" : "affineK8V4",
+      "peakActiveMemoryBytes" : 2379844118,
+      "sampleCount" : 1
+    },
+    {
+      "activeMemoryEndBytes" : 1755742400,
+      "context" : 16384,
+      "decodeTokensPerSecond" : 18.45939446696576,
+      "generationTokenCount" : 48,
+      "label" : "fp16",
+      "peakActiveMemoryBytes" : 2379844118,
+      "sampleCount" : 1
+    }
+  ],
+  "throughputRepeats" : 2
+}
