@@ -24,6 +24,35 @@ TurboQuant work in `mlx-swift-lm` and the paired native `mlx-swift` kernels.
   `dynamicCacheQuantizationSeconds`, usually in the prompt-prefill timing
   block rather than the first decode token.
 
+## Upstream PR Branch Queue - 2026-06-25
+
+- `mlx-swift-lm` upstream maintenance queue:
+  - `upstream-pr/vlm-processor-completions` is open as
+    `ml-explore/mlx-swift-lm#301`, approved, and waiting on GitHub-side
+    `mac_build_and_test` recovery/rerun.
+  - `upstream-pr/model-compatibility-docs` is open as draft
+    `ml-explore/mlx-swift-lm#303`; keep it draft until maintainers want the
+    compatibility guide.
+  - `upstream-pr/rope-config-validation` is open as
+    `ml-explore/mlx-swift-lm#371` and replaces the useful narrow slice of the
+    former broad runtime-hardening draft.
+  - Drafts `#302` and `#304` were closed because they were too broad for
+    reviewable upstream PRs.
+- `mlx-swift` upstream maintenance queue:
+  - `upstream-pr/swiftpm-metal-library-resource` is open as
+    `ml-explore/mlx-swift#430`.
+  - `upstream-pr/linalg-norm-kind-nuc` is already merged upstream and is
+    archival only.
+- `mlx` quantized SDPA queue:
+  - Do not open a competing main-based PR for the current quantized SDPA stack.
+    Upstream already has active `ml-explore/mlx#3026` for the core API/kernels.
+  - Local `pr/quantized-sdpa-followups` is a one-commit follow-up on top of
+    `#3026` (`6 files changed, 184 insertions, 11 deletions`) but is still a
+    large stale diff when compared to upstream `main`. Rebase it only after
+    `#3026` lands or if maintainers ask for a follow-up against that PR branch.
+  - The broader `codex/*`, `pr/turboquant-*`, and `integration/*` branches are
+    staging branches, not upstream-ready PR branches.
+
 ## Key Local Files
 
 - `/Users/mt/Programming/Schtack/mlx-forks/mlx-swift-lm/Libraries/IntegrationTestHelpers/InferenceParityBenchmark.swift`
