@@ -30,12 +30,15 @@ TurboQuant work in `mlx-swift-lm` and the paired native `mlx-swift` kernels.
   - `upstream-pr/vlm-processor-completions` is open as
     `ml-explore/mlx-swift-lm#301`, approved, and waiting on GitHub-side
     `mac_build_and_test` recovery/rerun.
-  - `upstream-pr/model-compatibility-docs` is open as draft
-    `ml-explore/mlx-swift-lm#303`; keep it draft until maintainers want the
-    compatibility guide.
+  - `upstream-pr/model-compatibility-docs` is open as
+    `ml-explore/mlx-swift-lm#303` and was marked ready after docs validation.
   - `upstream-pr/rope-config-validation` is open as
     `ml-explore/mlx-swift-lm#371` and replaces the useful narrow slice of the
     former broad runtime-hardening draft.
+  - `upstream-pr/runtime-stop-strings` is open as
+    `ml-explore/mlx-swift-lm#372`. It was split from the broader runtime
+    parity branch as a single stop-string handling commit and deliberately
+    excludes DFlash/MTP/TurboQuant stack changes.
   - Drafts `#302` and `#304` were closed because they were too broad for
     reviewable upstream PRs.
 - `mlx-swift` upstream maintenance queue:
@@ -50,6 +53,10 @@ TurboQuant work in `mlx-swift-lm` and the paired native `mlx-swift` kernels.
     `#3026` (`6 files changed, 184 insertions, 11 deletions`) but is still a
     large stale diff when compared to upstream `main`. Rebase it only after
     `#3026` lands or if maintainers ask for a follow-up against that PR branch.
+  - The next inspected candidates are not upstream-ready as small PRs:
+    `pr/runtime-parity-dflash-mtp` depends on broader lazy-load/MTP runtime
+    work, and `mlx-swift` runtime/SSD commits are submodule or generated-runtime
+    changes tied to larger native stacks.
   - The broader `codex/*`, `pr/turboquant-*`, and `integration/*` branches are
     staging branches, not upstream-ready PR branches.
 
