@@ -25,6 +25,9 @@ Current status:
 - The current local delivery contract for upstream PRs, staging branches,
   dependency order, and product gates is
   [Fork Stack Delivery Roadmap - 2026-06-25](fork-stack-delivery-roadmap-2026-06-25.md).
+- The current local launch packet for future upstream PRs, including blocked
+  branches, validation commands, and copy-ready PR descriptions, is
+  [Upstream PR Launch Packets - 2026-06-25](upstream-pr-launch-packets-2026-06-25.md).
 - The active Pines compatibility pair is non-green. Local TurboQuant gates and
   synthetic app-host smoke have passed in recent runs, but product promotion
   still requires same-report real-model quality/throughput evidence, physical
@@ -96,15 +99,16 @@ compatibility pair and Pines production pin gate recorded in the Pines packet.
 ## Required reading
 
 1. [Fork Stack Delivery Roadmap - 2026-06-25](fork-stack-delivery-roadmap-2026-06-25.md)
-2. [LM Worker Cards](worker-cards.md)
-3. [Runtime Failures](runtime-failures.md)
-4. [Cache Lifecycle](cache-lifecycle.md)
-5. [Fallback Policy](fallback-policy.md)
-6. [Model Profile v2 and Quality](model-profile-v2-quality.md)
-7. [Current Paths and Benchmarks](current-paths-and-benchmarks.md)
-8. [External Port Optimization Map](external-port-optimization-map.md)
-9. [TurboQuant Continuation Handoff - 2026-06-07](continuation-handoff-2026-06-07.md)
-10. [KV Snapshots and Speculative Verifier](kv-snapshots-speculative.md)
+2. [Upstream PR Launch Packets - 2026-06-25](upstream-pr-launch-packets-2026-06-25.md)
+3. [LM Worker Cards](worker-cards.md)
+4. [Runtime Failures](runtime-failures.md)
+5. [Cache Lifecycle](cache-lifecycle.md)
+6. [Fallback Policy](fallback-policy.md)
+7. [Model Profile v2 and Quality](model-profile-v2-quality.md)
+8. [Current Paths and Benchmarks](current-paths-and-benchmarks.md)
+9. [External Port Optimization Map](external-port-optimization-map.md)
+10. [TurboQuant Continuation Handoff - 2026-06-07](continuation-handoff-2026-06-07.md)
+11. [KV Snapshots and Speculative Verifier](kv-snapshots-speculative.md)
 
 ## Non-negotiables
 

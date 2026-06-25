@@ -36,11 +36,11 @@ Checked on 2026-06-25.
 
 | Repo | PR | Branch | Head | State | Checks | Local action |
 | --- | --- | --- | --- | --- | --- | --- |
-| `mlx-swift-lm` | [`#301`](https://github.com/ml-explore/mlx-swift-lm/pull/301) Complete VLM processor TODOs | `upstream-pr/vlm-processor-completions` | `301233ad41afcbd5c95abca0bdcfd85026787faf` | Open, approved, merge blocked | `lint` passed, `mac_build_and_test` failed | Wait for GitHub-side rerun/recovery or maintainer feedback. Do not change code unless the failing log identifies a code issue. |
-| `mlx-swift-lm` | [`#303`](https://github.com/ml-explore/mlx-swift-lm/pull/303) Document model compatibility requirements | `upstream-pr/model-compatibility-docs` | `56df900cb0beb07aa4bcc18d5d1b24c928c88082` | Open, ready for review | No checks reported | Review-ready docs-only PR. Maintainers may still decide docs belong elsewhere. |
-| `mlx-swift-lm` | [`#371`](https://github.com/ml-explore/mlx-swift-lm/pull/371) Validate RoPE model configurations | `upstream-pr/rope-config-validation` | `4a05447ba8b8d2c0e430d49657e24db175d8b1bb` | Open, review required | No checks reported | Review-ready narrow replacement for the useful slice of closed `#302`. |
-| `mlx-swift-lm` | [`#372`](https://github.com/ml-explore/mlx-swift-lm/pull/372) Add runtime stop string handling | `upstream-pr/runtime-stop-strings` | `2aeeee6fee40af3557f8d590d7a9d85bb931cc83` | Open, review required | No checks reported | Review-ready single runtime stop-string slice. |
-| `mlx-swift` | [`#430`](https://github.com/ml-explore/mlx-swift/pull/430) Build SwiftPM default Metal library resource | `upstream-pr/swiftpm-metal-library-resource` | `ca2924ff26bf4e45f5bbdf7dca72496220cbd0cf` | Open, review required | No checks reported | Review-ready SwiftPM Metal resource packaging slice. |
+| `mlx-swift-lm` | [`#301`](https://github.com/ml-explore/mlx-swift-lm/pull/301) Complete VLM processor TODOs | `upstream-pr/vlm-processor-completions` | `301233ad41afcbd5c95abca0bdcfd85026787faf` | Open, approved, merge blocked | `lint` passed; `mac_build_and_test` marked failed after the upstream self-hosted macOS runner lost communication following successful build/docs/tests | Wait for maintainer rerun/recovery. Do not change code unless a real test/build failure appears. |
+| `mlx-swift-lm` | [`#303`](https://github.com/ml-explore/mlx-swift-lm/pull/303) Document model compatibility requirements | `upstream-pr/model-compatibility-docs` | `56df900cb0beb07aa4bcc18d5d1b24c928c88082` | Open, ready for review | Workflow `28139307769` is `action_required` with zero jobs | Wait for maintainer workflow approval/review. Maintainers may still decide docs belong elsewhere. |
+| `mlx-swift-lm` | [`#371`](https://github.com/ml-explore/mlx-swift-lm/pull/371) Validate RoPE model configurations | `upstream-pr/rope-config-validation` | `4a05447ba8b8d2c0e430d49657e24db175d8b1bb` | Open, review required | Workflow `28140304842` is `action_required` with zero jobs | Wait for maintainer workflow approval/review. |
+| `mlx-swift-lm` | [`#372`](https://github.com/ml-explore/mlx-swift-lm/pull/372) Add runtime stop string handling | `upstream-pr/runtime-stop-strings` | `2aeeee6fee40af3557f8d590d7a9d85bb931cc83` | Open, review required | Workflow `28151349347` is `action_required` with zero jobs | Wait for maintainer workflow approval/review. |
+| `mlx-swift` | [`#430`](https://github.com/ml-explore/mlx-swift/pull/430) Build SwiftPM default Metal library resource | `upstream-pr/swiftpm-metal-library-resource` | `ca2924ff26bf4e45f5bbdf7dca72496220cbd0cf` | Open, review required | Workflow `28140304642` is `action_required` with zero jobs | Wait for maintainer workflow approval/review. |
 | `mlx` | none by RNT56 | n/a | n/a | n/a | n/a | Do not open a competing quantized SDPA PR while `ml-explore/mlx#3026` is active. |
 
 Closed or archival upstream PRs:
@@ -69,6 +69,10 @@ mlx-swift/upstream-pr/swiftpm-metal-library-resource
 
 These are the only branches that should be discussed as ready upstream PR
 branches right now.
+
+The local future-PR launch packet is
+[Upstream PR Launch Packets - 2026-06-25](upstream-pr-launch-packets-2026-06-25.md).
+It is preparation only and does not authorize opening more PRs.
 
 ### Staging Branches Only
 
@@ -378,7 +382,8 @@ and physical-device validation.
 Do not claim:
 
 - that `#301` is fully mergeable while `mac_build_and_test` is failing;
-- that newly opened PRs have passed upstream CI when no checks are reported;
+- that newly opened PRs have passed upstream CI while their workflows are still
+  `action_required` with zero jobs;
 - that local `mlx/pr/quantized-sdpa-followups` is a standalone upstream PR
   against `main`;
 - that TurboQuant is product-ready before the combined real-model and device
