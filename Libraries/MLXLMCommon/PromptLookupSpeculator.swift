@@ -137,6 +137,8 @@ extension PromptLookupSpeculator {
     /// - Parameters:
     ///   - tokens: the full greedy token sequence (prompt + generated).
     ///   - promptLength: number of leading prompt tokens (generation starts here).
+    ///   - ngram: prompt-lookup window size used to find repeated prefixes.
+    ///   - maxProposalTokens: maximum number of speculative tokens proposed per round.
     public static func simulate(
         tokens: [Int],
         promptLength: Int,

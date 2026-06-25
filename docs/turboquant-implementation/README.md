@@ -22,6 +22,9 @@ The PR and merge train is owned by:
 
 Current status:
 
+- The current local delivery contract for upstream PRs, staging branches,
+  dependency order, and product gates is
+  [Fork Stack Delivery Roadmap - 2026-06-25](fork-stack-delivery-roadmap-2026-06-25.md).
 - The active Pines compatibility pair is non-green. Local TurboQuant gates and
   synthetic app-host smoke have passed in recent runs, but product promotion
   still requires same-report real-model quality/throughput evidence, physical
@@ -92,15 +95,16 @@ compatibility pair and Pines production pin gate recorded in the Pines packet.
 
 ## Required reading
 
-1. [LM Worker Cards](worker-cards.md)
-2. [Runtime Failures](runtime-failures.md)
-3. [Cache Lifecycle](cache-lifecycle.md)
-4. [Fallback Policy](fallback-policy.md)
-5. [Model Profile v2 and Quality](model-profile-v2-quality.md)
-6. [Current Paths and Benchmarks](current-paths-and-benchmarks.md)
-7. [External Port Optimization Map](external-port-optimization-map.md)
-8. [TurboQuant Continuation Handoff - 2026-06-07](continuation-handoff-2026-06-07.md)
-9. [KV Snapshots and Speculative Verifier](kv-snapshots-speculative.md)
+1. [Fork Stack Delivery Roadmap - 2026-06-25](fork-stack-delivery-roadmap-2026-06-25.md)
+2. [LM Worker Cards](worker-cards.md)
+3. [Runtime Failures](runtime-failures.md)
+4. [Cache Lifecycle](cache-lifecycle.md)
+5. [Fallback Policy](fallback-policy.md)
+6. [Model Profile v2 and Quality](model-profile-v2-quality.md)
+7. [Current Paths and Benchmarks](current-paths-and-benchmarks.md)
+8. [External Port Optimization Map](external-port-optimization-map.md)
+9. [TurboQuant Continuation Handoff - 2026-06-07](continuation-handoff-2026-06-07.md)
+10. [KV Snapshots and Speculative Verifier](kv-snapshots-speculative.md)
 
 ## Non-negotiables
 

@@ -26,6 +26,10 @@ TurboQuant work in `mlx-swift-lm` and the paired native `mlx-swift` kernels.
 
 ## Upstream PR Branch Queue - 2026-06-25
 
+The authoritative local delivery contract for the upstream queue, fork-stack
+staging branches, dependency order, validation gates, and product evidence is
+[Fork Stack Delivery Roadmap - 2026-06-25](fork-stack-delivery-roadmap-2026-06-25.md).
+
 - `mlx-swift-lm` upstream maintenance queue:
   - `upstream-pr/vlm-processor-completions` is open as
     `ml-explore/mlx-swift-lm#301`, approved, and waiting on GitHub-side

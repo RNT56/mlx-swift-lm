@@ -4723,6 +4723,10 @@ public func quantizedScaledDotProductAttention(
 ///   - turboQuantFallbackPolicy: Fallback policy for compressed cache conversion and decode
 ///   - turboQuantSeed: Optional deterministic seed for TurboQuant encoding
 ///   - turboQuantValueBits: Optional value-bit override for TurboQuant caches
+///   - turboQuantPrecisionPolicy: Optional key/value precision policy override
+///   - turboQuantValueGroupSize: Optional value group-size override for TurboQuant caches
+///   - turboQuantSparseValuePolicy: Sparse-value policy used during TurboQuant conversion
+///   - turboQuantSparseValueSelection: Sparse-value selection mode used during TurboQuant conversion
 ///   - turboQuantResidentBudgetBytes: Optional resident-byte budget for converted TurboQuant caches
 ///   - spillMemoryWatermarkBytes: Optional live-memory watermark that triggers cache spill
 ///   - kvLayerPolicy: Optional per-layer precision policy for mixed KV conversion
