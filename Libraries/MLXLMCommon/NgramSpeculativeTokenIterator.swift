@@ -161,7 +161,8 @@ public struct NgramSpeculativeTokenIterator: TokenIteratorProtocol {
                 turboQuantSparseValueSelection: resolved.effectiveTurboQuantSparseValueSelection,
                 turboQuantResidentBudgetBytes: resolved.turboQuantPerCacheResidentBudgetBytes,
                 spillMemoryWatermarkBytes: resolved.spillMemoryWatermarkBytes,
-                kvLayerPolicy: resolved.kvLayerPolicy)
+                kvLayerPolicy: resolved.kvLayerPolicy,
+                kvScheme: resolved.kvScheme)
         }
 
         guard canTrimPromptCache(self.cache) else {

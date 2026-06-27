@@ -99,3 +99,10 @@ iOSInjectionProject/
 artifacts/
 .turboquant.env
 scripts/__pycache__/
+
+# Local Python tooling for fixture regeneration (uv-managed)
+.python-version
+.venv/
+pyproject.toml
+uv.lock
+main.py

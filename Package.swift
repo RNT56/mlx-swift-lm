@@ -65,8 +65,11 @@ let package = Package(
     dependencies: [
         .package(
             url: "https://github.com/RNT56/mlx-swift",
-            revision: "6bfa04e2924152c52c56eac5c3420a7cc7e8d720"),
-        .package(url: "https://github.com/swiftlang/swift-syntax.git", "600.0.0" ..< "604.0.0"),
+            revision: "32ce468837fc9db69c3bc75fab62b1053a064365"),
+        // 602.0.0 floor: swift.org publishes signed prebuilt swift-syntax artifacts only for
+        // >= 602 tags on current toolchains; a 600.x/601.x resolution falls back to the full
+        // source compile of swift-syntax.
+        .package(url: "https://github.com/swiftlang/swift-syntax.git", "602.0.0" ..< "604.0.0"),
     ],
     targets: [
         .target(

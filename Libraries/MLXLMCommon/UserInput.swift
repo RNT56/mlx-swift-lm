@@ -56,25 +56,21 @@ public struct UserInput {
         /// Useful for decoded frames held in memory
         case frames([VideoFrame])
 
-        public func loadAVAsset() throws -> AVAsset {
+        @available(
+            *, deprecated,
+            message: "Use MediaProcessing.asProcessedSequence() with the Video directly"
+        )
+        public func asAVAsset() -> AVAsset {
             switch self {
             case .avAsset(let asset):
                 return asset
             case .url(let url):
                 return AVAsset(url: url)
             case .frames:
-                throw UserInputError.arrayError(
-                    "video frames cannot be converted to AVAsset; use MediaProcessing.asProcessedSequence()"
+                fatalError(
+                    "calling asAVAsset() on Video Input with VideoFames provided is unsupported and deprecated - please use MediaProcessing.asProcessedSequence() instead"
                 )
             }
-        }
-
-        @available(
-            *, deprecated,
-            message: "Use MediaProcessing.asProcessedSequence() with the Video directly"
-        )
-        public func asAVAsset() -> AVAsset {
-            (try? loadAVAsset()) ?? AVAsset(url: URL(fileURLWithPath: "/dev/null"))
         }
     }
 
@@ -142,17 +138,47 @@ public struct UserInput {
     }
 
     /// Representation of an audio resource.
-    public enum Audio: Sendable {
+    public enum Audio {
         case data(Data, format: String)
         case url(URL)
+        case array(MLXArray)
+
+        // See also UserInput+Audio
     }
 
     /// Representation of processing to apply to media.
     public struct Processing: Sendable {
         public var resize: CGSize?
 
-        public init(resize: CGSize? = nil) {
+        public var audio = AudioProcessing()
+
+        /// Optional per-call overrides for the image resize budget. When set,
+        /// they replace the model's configured `min_pixels` / `max_pixels` for
+        /// this request; when `nil` the model configuration is used. This lets
+        /// a caller request the resolution a model was tuned for without
+        /// hard-coding pixel counts in the processor.
+        public var minPixels: Int?
+        public var maxPixels: Int?
+
+        public init(resize: CGSize? = nil, minPixels: Int? = nil, maxPixels: Int? = nil) {
             self.resize = resize
+            self.minPixels = minPixels
+            self.maxPixels = maxPixels
+        }
+    }
+
+    /// Representation of audio processing
+    public struct AudioProcessing: Sendable {
+        /// Sample rate
+        public var sampleRate = 48_000.0
+
+        /// Number of channels of audio.  If 1, convert to mono
+        public var channels = 1
+
+        /// audio format
+        public var audioFormat: AudioFormatID = kAudioFormatLinearPCM
+
+        public init() {
         }
     }
 
@@ -164,15 +190,15 @@ public struct UserInput {
                 // no action
                 break
             case .chat(let messages):
-                // rebuild images, videos, and audio
+                // rebuild images & videos
                 self.images = messages.reduce(into: []) { result, message in
                     result.append(contentsOf: message.images)
                 }
                 self.videos = messages.reduce(into: []) { result, message in
                     result.append(contentsOf: message.videos)
                 }
-                self.audio = messages.reduce(into: []) { result, message in
-                    result.append(contentsOf: message.audio)
+                self.audios = messages.reduce(into: []) { result, message in
+                    result.append(contentsOf: message.audios)
                 }
             }
         }
@@ -190,11 +216,11 @@ public struct UserInput {
     /// collect the videos from the chat messages, otherwise these are the stored videos with the ``UserInput``.
     public var videos = [Video]()
 
-    /// The audio associated with the `UserInput`.
+    /// The audios associated with the `UserInput`.
     ///
     /// If the ``prompt-swift.property`` is a ``Prompt-swift.enum/chat(_:)`` this will
-    /// collect the audio from the chat messages, otherwise these are the stored audio with the ``UserInput``.
-    public var audio = [Audio]()
+    /// collect the audios from the chat messages, otherwise these are the stored audios with the ``UserInput``.
+    public var audios = [Audio]()
 
     public var tools: [ToolSpec]?
 
@@ -208,25 +234,27 @@ public struct UserInput {
     ///   - prompt: text prompt
     ///   - images: optional images
     ///   - videos: optional videos
-    ///   - audio: optional audio
+    ///   - audios: optional audios
     ///   - tools: optional tool specifications
     ///   - additionalContext: optional context (model specific)
     /// ### See Also
     /// - ``Prompt-swift.enum/text(_:)``
     /// - ``init(chat:processing:tools:additionalContext:)``
     public init(
-        prompt: String, images: [Image] = [Image](), videos: [Video] = [Video](),
-        audio: [Audio] = [Audio](),
+        prompt: String,
+        images: [Image] = [Image](),
+        videos: [Video] = [Video](),
+        audios: [Audio] = [Audio](),
         tools: [ToolSpec]? = nil,
         additionalContext: [String: any Sendable]? = nil
     ) {
         self.prompt = .chat([
-            .user(prompt, images: images, videos: videos, audio: audio)
+            .user(prompt, images: images, videos: videos, audios: audios)
         ])
         // note: prompt.didSet is not triggered in init
         self.images = images
         self.videos = videos
-        self.audio = audio
+        self.audios = audios
         self.tools = tools
         self.additionalContext = additionalContext
     }
@@ -252,29 +280,32 @@ public struct UserInput {
     /// ]
     /// ```
     ///
-    /// Typically the ``init(chat:processing:tools:additionalContext:)`` should be used instead
-    /// along with a model specific ``MessageGenerator`` (supplied by the ``UserInputProcessor``).
+    /// Typically the ``init(chat:processing:tools:additionalContext:)``
+    /// should be used instead along with a model specific
+    /// ``MessageGenerator`` (supplied by the ``UserInputProcessor``).
     ///
     /// - Parameters:
     ///   - messages: array of dictionaries representing the prompt in a model specific format
     ///   - images: optional images
     ///   - videos: optional videos
-    ///   - audio: optional audio
+    ///   - audios: optional audios
     ///   - tools: optional tool specifications
     ///   - additionalContext: optional context (model specific)
     /// ### See Also
     /// - ``Prompt-swift.enum/text(_:)``
     /// - ``init(chat:processing:tools:additionalContext:)``
     public init(
-        messages: [Message], images: [Image] = [Image](), videos: [Video] = [Video](),
-        audio: [Audio] = [Audio](),
+        messages: [Message],
+        images: [Image] = [Image](),
+        videos: [Video] = [Video](),
+        audios: [Audio] = [Audio](),
         tools: [ToolSpec]? = nil,
         additionalContext: [String: any Sendable]? = nil
     ) {
         self.prompt = .messages(messages)
         self.images = images
         self.videos = videos
-        self.audio = audio
+        self.audios = audios
         self.tools = tools
         self.additionalContext = additionalContext
     }
@@ -317,8 +348,8 @@ public struct UserInput {
         self.videos = chat.reduce(into: []) { result, message in
             result.append(contentsOf: message.videos)
         }
-        self.audio = chat.reduce(into: []) { result, message in
-            result.append(contentsOf: message.audio)
+        self.audios = chat.reduce(into: []) { result, message in
+            result.append(contentsOf: message.audios)
         }
 
         self.processing = processing
@@ -328,13 +359,14 @@ public struct UserInput {
 
     /// Initialize the `UserInput` with a preconfigured ``Prompt-swift.enum``.
     ///
-    /// ``init(chat:processing:tools:additionalContext:)`` is the preferred mechanism.
+    /// ``init(chat:processing:tools:additionalContext:)`` is
+    /// the preferred mechanism.
     ///
     /// - Parameters:
     ///   - prompt: the prompt
     ///   - images: optional images
     ///   - videos: optional videos
-    ///   - audio: optional audio
+    ///   - audios: optional audios
     ///   - tools: optional tool specifications
     ///   - processing: optional processing to be applied to media
     ///   - additionalContext: optional context (model specific)
@@ -345,7 +377,7 @@ public struct UserInput {
         prompt: Prompt,
         images: [Image] = [Image](),
         videos: [Video] = [Video](),
-        audio: [Audio] = [Audio](),
+        audios: [Audio] = [Audio](),
         processing: Processing = .init(),
         tools: [ToolSpec]? = nil, additionalContext: [String: any Sendable]? = nil
     ) {
@@ -355,7 +387,7 @@ public struct UserInput {
         case .text, .messages:
             self.images = images
             self.videos = videos
-            self.audio = audio
+            self.audios = audios
         case .chat(let messages):
             self.images = messages.reduce(into: []) { result, message in
                 result.append(contentsOf: message.images)
@@ -363,8 +395,8 @@ public struct UserInput {
             self.videos = messages.reduce(into: []) { result, message in
                 result.append(contentsOf: message.videos)
             }
-            self.audio = messages.reduce(into: []) { result, message in
-                result.append(contentsOf: message.audio)
+            self.audios = messages.reduce(into: []) { result, message in
+                result.append(contentsOf: message.audios)
             }
         }
         self.processing = processing
@@ -384,6 +416,7 @@ internal enum UserInputError: LocalizedError {
     case notImplemented
     case unableToLoad(URL)
     case arrayError(String)
+    case noAudioData(URL)
 
     var errorDescription: String? {
         switch self {
@@ -393,6 +426,8 @@ internal enum UserInputError: LocalizedError {
             return String(localized: "Unable to load image from URL: \(url.path).")
         case .arrayError(let message):
             return String(localized: "Error processing image array: \(message).")
+        case .noAudioData(let url):
+            return String(localized: "No audio data in file: \(url.path)")
         }
     }
 }

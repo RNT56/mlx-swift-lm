@@ -53,34 +53,39 @@ extension LLMModel {
         )
         var chunksSinceSync = 0
 
-        // Prepare the prompt in chunks if larger than the prefill size.
-        // asyncEval lets the CPU build chunk N+1's graph while the GPU evaluates
-        // chunk N.
-        while y.tokens.size > prefillStepSize {
-            let input = y[.newAxis, ..<prefillStepSize]
-            if let throwingModel = self as? any ThrowingLanguageModel {
-                _ = try throwingModel.callAsFunctionThrowing(
-                    input,
-                    cache: cache.isEmpty ? nil : cache,
-                    state: nil
-                )
-            } else {
-                _ = self(input, cache: cache.isEmpty ? nil : cache, state: nil)
+        try withPreparedCache(cache, lengths: y.sequenceLengths) {
+            // Prepare the prompt in chunks if larger than the prefill size.
+            // asyncEval lets the CPU build chunk N+1's graph while the GPU evaluates
+            // chunk N.
+            var state: LMOutput.State?
+            while y.tokens.size > prefillStepSize {
+                let input = y[.newAxis, ..<prefillStepSize]
+                let output: LMOutput
+                if let throwingModel = self as? any ThrowingLanguageModel {
+                    output = try throwingModel.callAsFunctionThrowing(
+                        input,
+                        cache: cache.isEmpty ? nil : cache,
+                        state: state
+                    )
+                } else {
+                    output = self(input, cache: cache.isEmpty ? nil : cache, state: state)
+                }
+                state = output.state
+                asyncEval(cache)
+                chunksSinceSync += 1
+                if let prefillSyncInterval,
+                    chunksSinceSync % prefillSyncInterval == 0
+                {
+                    turboQuantFlushPrefillCommandBuffer(clearCache: chunksSinceSync > 0)
+                }
+                y = y[prefillStepSize...]
             }
-            asyncEval(cache)
-            chunksSinceSync += 1
-            if let prefillSyncInterval,
-                chunksSinceSync % prefillSyncInterval == 0
-            {
-                turboQuantFlushPrefillCommandBuffer(clearCache: chunksSinceSync > 0)
-            }
-            y = y[prefillStepSize...]
-        }
 
-        // Single sync after the loop to flush any remaining async work.
-        eval(cache)
-        if prefillSyncInterval != nil {
-            Stream.gpu.synchronize()
+            // Single sync after the loop to flush any remaining async work.
+            eval(cache)
+            if prefillSyncInterval != nil {
+                Stream.gpu.synchronize()
+            }
         }
 
         return .tokens(y)
