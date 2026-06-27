@@ -28,6 +28,10 @@ Current status:
 - The current local launch packet for future upstream PRs, including blocked
   branches, validation commands, and copy-ready PR descriptions, is
   [Upstream PR Launch Packets - 2026-06-25](upstream-pr-launch-packets-2026-06-25.md).
+- The focused support roadmap for upstream `ml-explore/mlx#3026` is
+  [MLX #3026 Support Roadmap - 2026-06-26](mlx-3026-support-roadmap-2026-06-26.md).
+  It owns the local no-competing-PR rule, verifier-batch follow-up lane, and
+  dependency order from core MLX to C API, Swift, LM, and Pines evidence.
 - The active Pines compatibility pair is non-green. Local TurboQuant gates and
   synthetic app-host smoke have passed in recent runs, but product promotion
   still requires same-report real-model quality/throughput evidence, physical

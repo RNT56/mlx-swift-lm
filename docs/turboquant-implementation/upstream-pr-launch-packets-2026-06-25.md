@@ -9,12 +9,14 @@ Do not push or open additional upstream PRs right now.
 
 Reasons:
 
-- The current upstream queue is already five open PRs across two repos.
+- The current upstream queue already has multiple maintenance PRs plus the
+  draft SwiftPM Metal explicit-path chain.
 - `mlx-swift-lm#301` is approved but blocked by an upstream self-hosted macOS
   runner communication failure after all job steps succeeded.
-- `mlx-swift-lm#303`, `#371`, `#372`, and `mlx-swift#430` have GitHub Actions
-  runs in `action_required` state with zero jobs. They need maintainer approval
-  or rerun before they can satisfy the upstream "passing tests" expectation.
+- `mlx-swift-lm#303`, `#371`, and `#372` still need maintainer review and/or
+  workflow action.
+- `mlx-swift#430` must stay draft until the explicit path API route is available
+  through `mlx-c#117` and `mlx-swift#416`.
 - The next TurboQuant PRs depend on upstream `ml-explore/mlx#3026`; opening a
   competing or stacked PR against `main` would be noisy and harder to review.
 
@@ -40,19 +42,23 @@ Checked on 2026-06-25.
 | PR | Branch | Current gate | What must happen before merge |
 | --- | --- | --- | --- |
 | `mlx-swift-lm#301` | `upstream-pr/vlm-processor-completions` | Approved; `lint` passed; `mac_build_and_test` failed because the self-hosted macOS runner lost communication after successful build/docs/tests | Maintainer reruns failed macOS job or accepts it as runner infrastructure. No code change unless a real test/build failure appears. |
-| `mlx-swift-lm#303` | `upstream-pr/model-compatibility-docs` | Workflow `28139307769` is `action_required` with zero jobs | Maintainer approves/runs CI, then review. Also confirm maintainers want this docs payload upstream. |
-| `mlx-swift-lm#371` | `upstream-pr/rope-config-validation` | Workflow `28140304842` is `action_required` with zero jobs | Maintainer approves/runs CI, then review. |
-| `mlx-swift-lm#372` | `upstream-pr/runtime-stop-strings` | Workflow `28151349347` is `action_required` with zero jobs | Maintainer approves/runs CI, then review. |
-| `mlx-swift#430` | `upstream-pr/swiftpm-metal-library-resource` | Workflow `28140304642` is `action_required` with zero jobs | Maintainer approves/runs CI, then review. |
+| `mlx-swift-lm#303` | `upstream-pr/model-compatibility-docs` | Open, review required, no checks reported | Maintainer review. Also confirm maintainers want this docs payload upstream. |
+| `mlx-swift-lm#371` | `upstream-pr/rope-config-validation` | Open, review required, no checks reported | Maintainer review. |
+| `mlx-swift-lm#372` | `upstream-pr/runtime-stop-strings` | Open, review required, no checks reported | Maintainer review. |
+| `mlx#3597` | `metallib-path` | Merged as `51b2768da7e1897d3c4258f7ddbb47083d1eef01` | No action; use as accepted MLX foundation. |
+| `mlx-c#117` | `metallib-path` | Draft/open at `71371f2ffd6036b210f782abe4f4cf32d3e6299a`; local fallback branch validates current-main shape | Coordinate readiness or use `RNT56/mlx-c:upstream-pr/metallib-path-c-api` as reference. |
+| `mlx-swift#416` | `metallib-path` | Draft/open at `800f9ae91d81e387a7e1febe5a9ab93ff452c7c3` | Wait for or coordinate after `mlx-c#117`. |
+| `mlx-swift#430` | `upstream-pr/swiftpm-metal-library-resource` | Draft/open at `2b9dda12f9c1a9681e54b38aa718a9437eb1e13e`; local proof branch validates runtime loading | Rebuild final clean branch after `mlx-c#117` and `mlx-swift#416` are upstream-owned/mergeable. |
 
 Maintainer-facing short status:
 
 ```text
-We should not add more PRs to the queue yet. The current small PRs are open and
-scoped, but most need maintainer CI approval, and #301 needs the failed
-self-hosted macOS job rerun. We can keep preparing the dependent TurboQuant
-stack locally, but should wait to publish it until the current queue and the
-upstream quantized SDPA dependency are clearer.
+We should not add more TurboQuant PRs to the queue yet. The current small PRs are
+open and scoped, #301 needs the failed self-hosted macOS job rerun, and the
+SwiftPM Metal packaging PR should stay draft while the explicit metallib path API
+chain finishes. We can keep preparing the dependent TurboQuant stack locally, but
+should wait to publish it until the current queue and the upstream quantized SDPA
+dependency are clearer.
 ```
 
 ## Launch Rule
@@ -75,7 +81,7 @@ Do not open a branch just to reserve a name.
 
 ## Prepared Future Packets
 
-### Packet A: `mlx/upstream-pr/quantized-sdpa-verifier-batches`
+### Packet A0: `mlx/upstream-pr/quantized-sdpa-api-tests`
 
 Status: blocked; do not push.
 
@@ -84,6 +90,52 @@ Upstream dependency:
 ```text
 ml-explore/mlx#3026
 ```
+
+Intended scope if still needed after `mlx#3026` lands:
+
+- minimal public quantized SDPA API shape checks;
+- capability or feature checks for supported and unsupported paths;
+- focused Python/C++ tests;
+- no large Metal kernel or benchmark payload.
+
+Exclude:
+
+- full kernel implementation already covered by `mlx#3026`;
+- Swift/C/LM bindings;
+- product docs and benchmark reports.
+
+Open only when:
+
+- `mlx#3026` lands without sufficient API/test coverage, or maintainers request
+  a small stacked follow-up;
+- the diff against upstream `main` does not include the whole `#3026` stack.
+
+### Packet A1: `mlx/upstream-pr/quantized-sdpa-metal-kernels`
+
+Status: blocked; do not push.
+
+Upstream dependency:
+
+```text
+ml-explore/mlx#3026
+```
+
+Intended scope if maintainers request a split:
+
+- accepted quantized SDPA Metal kernel payload only;
+- focused kernel tests or benchmark smoke needed for review;
+- no C/Swift/LM binding changes.
+
+Open only when:
+
+- maintainers reject or split the kernel portion of `mlx#3026`, or ask for a
+  follow-up after it lands;
+- the branch is rebuilt from current upstream and does not carry stale API
+  commits.
+
+### Packet A2: `mlx/upstream-pr/quantized-sdpa-verifier-batches`
+
+Status: blocked; do not push.
 
 Source branch:
 
@@ -385,6 +437,49 @@ pre-commit run --all-files
 git diff --check
 ```
 
+## SwiftPM Metal Foundation Packet
+
+Status: local proof complete; upstream still draft/open.
+
+Dependency chain:
+
+```text
+mlx#3597 -> mlx-c#117 -> mlx-swift#416 -> mlx-swift#430
+```
+
+Local branches:
+
+```text
+mlx-c/upstream-pr/metallib-path-c-api
+head: 6173b85
+
+mlx-swift/prep/swiftpm-metallib-via-path-api
+head: 57449af
+```
+
+Use `mlx-c/upstream-pr/metallib-path-c-api` only as a fallback/reference branch
+for `mlx-c#117`; do not open a duplicate upstream PR unless maintainers ask.
+Use `mlx-swift/prep/swiftpm-metallib-via-path-api` only as proof that the final
+`mlx-swift#430` design works with `GPU.setMetallibPath`.
+
+Validation passed locally:
+
+```bash
+cd /Users/mt/Programming/Schtack/mlx-forks/.upstream-pr-worktrees/mlx-c-metallib-path-api
+cmake --build build/metallib-path-api
+ctest --test-dir build/metallib-path-api --output-on-failure
+git diff --check upstream/main...HEAD
+
+cd /Users/mt/Programming/Schtack/mlx-forks/.pr-worktrees/mlx-swift-metal-resource-via-path-api
+swift build --target MLX
+swift build --target MLXNN
+swift test --filter SwiftPMMetallibResourceTests
+swift test --filter StreamTests/testDeviceType
+bash -n tools/build-swiftpm-metallib.sh
+SDK_NAME=macosx tools/build-swiftpm-metallib.sh /tmp/mlx-swift-default-macos.metallib
+git diff --check upstream/main...HEAD
+```
+
 ## Current PR Body Polish Queue
 
 These are local notes only. Do not edit upstream PR descriptions unless the user
@@ -423,11 +518,14 @@ processor files, configuration expectations, and runtime support notes.
 
 Risk:
 
-- PR bodies are already clear, but GitHub Actions has not produced jobs.
+- PR bodies are already clear, but current GitHub metadata has no reported
+  checks for these PRs.
 
 Preferred next action:
 
-- wait for maintainer workflow approval;
+- wait for maintainer review or check execution;
+- keep `mlx-swift#430` draft until the explicit metallib path chain is
+  upstream-owned or otherwise accepted;
 - if maintainers request local proof, paste exact local validation logs instead
   of adding code.
 

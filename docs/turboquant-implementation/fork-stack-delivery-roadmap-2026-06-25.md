@@ -24,11 +24,15 @@ Current practical state:
 - Open and scoped upstream PRs exist for the reviewable maintenance slices.
 - Broad draft PRs `ml-explore/mlx-swift-lm#302` and `#304` were retired instead
   of promoted.
+- The former automatic MLX SwiftPM bundle lookup route is closed. `mlx#3767`
+  was superseded by the explicit metallib path API route:
+  `mlx#3597 -> mlx-c#117 -> mlx-swift#416 -> mlx-swift#430`.
 - No RNT56-authored `ml-explore/mlx` PR is open; this is intentional while
   `ml-explore/mlx#3026` owns the core quantized SDPA API/kernel discussion.
-- The downstream TurboQuant product path still needs same-report real-model
-  quality and throughput evidence, physical-device evidence, and a green
-  compatibility-pair proof before product promotion.
+- The downstream TurboQuant product path now has one same-report 16K real-model
+  quality plus throughput artifact for affine K8/V4. It still needs repeated
+  randomized reports, physical-device evidence, and a green compatibility-pair
+  proof before product promotion.
 
 ## Live Upstream PR Board
 
@@ -37,10 +41,13 @@ Checked on 2026-06-25.
 | Repo | PR | Branch | Head | State | Checks | Local action |
 | --- | --- | --- | --- | --- | --- | --- |
 | `mlx-swift-lm` | [`#301`](https://github.com/ml-explore/mlx-swift-lm/pull/301) Complete VLM processor TODOs | `upstream-pr/vlm-processor-completions` | `301233ad41afcbd5c95abca0bdcfd85026787faf` | Open, approved, merge blocked | `lint` passed; `mac_build_and_test` marked failed after the upstream self-hosted macOS runner lost communication following successful build/docs/tests | Wait for maintainer rerun/recovery. Do not change code unless a real test/build failure appears. |
-| `mlx-swift-lm` | [`#303`](https://github.com/ml-explore/mlx-swift-lm/pull/303) Document model compatibility requirements | `upstream-pr/model-compatibility-docs` | `56df900cb0beb07aa4bcc18d5d1b24c928c88082` | Open, ready for review | Workflow `28139307769` is `action_required` with zero jobs | Wait for maintainer workflow approval/review. Maintainers may still decide docs belong elsewhere. |
-| `mlx-swift-lm` | [`#371`](https://github.com/ml-explore/mlx-swift-lm/pull/371) Validate RoPE model configurations | `upstream-pr/rope-config-validation` | `4a05447ba8b8d2c0e430d49657e24db175d8b1bb` | Open, review required | Workflow `28140304842` is `action_required` with zero jobs | Wait for maintainer workflow approval/review. |
-| `mlx-swift-lm` | [`#372`](https://github.com/ml-explore/mlx-swift-lm/pull/372) Add runtime stop string handling | `upstream-pr/runtime-stop-strings` | `2aeeee6fee40af3557f8d590d7a9d85bb931cc83` | Open, review required | Workflow `28151349347` is `action_required` with zero jobs | Wait for maintainer workflow approval/review. |
-| `mlx-swift` | [`#430`](https://github.com/ml-explore/mlx-swift/pull/430) Build SwiftPM default Metal library resource | `upstream-pr/swiftpm-metal-library-resource` | `ca2924ff26bf4e45f5bbdf7dca72496220cbd0cf` | Open, review required | Workflow `28140304642` is `action_required` with zero jobs | Wait for maintainer workflow approval/review. |
+| `mlx-swift-lm` | [`#303`](https://github.com/ml-explore/mlx-swift-lm/pull/303) Document model compatibility requirements | `upstream-pr/model-compatibility-docs` | `56df900cb0beb07aa4bcc18d5d1b24c928c88082` | Open, review required | No checks reported | Wait for maintainer review. Maintainers may still decide docs belong elsewhere. |
+| `mlx-swift-lm` | [`#371`](https://github.com/ml-explore/mlx-swift-lm/pull/371) Validate RoPE model configurations | `upstream-pr/rope-config-validation` | `88a44a36f7a62c763cef508cfb7022bfbc4d61ab` | Open, review required | No checks reported | Wait for maintainer review/check execution. |
+| `mlx-swift-lm` | [`#372`](https://github.com/ml-explore/mlx-swift-lm/pull/372) Add runtime stop string handling | `upstream-pr/runtime-stop-strings` | `dd5accfcfa523a2ee490a52d3c3feabe37109302` | Open, review required | No checks reported | Wait for maintainer review/check execution. |
+| `mlx` | [`#3597`](https://github.com/ml-explore/mlx/pull/3597) Add `metal::set_metallib_path()` | `metallib-path` | merge `51b2768da7e1897d3c4258f7ddbb47083d1eef01` | Merged | Upstream checks passed before merge | Use as the accepted MLX-side foundation for SwiftPM Metal loading. |
+| `mlx-c` | [`#117`](https://github.com/ml-explore/mlx-c/pull/117) Add `mlx_metal_set_metallib_path()` C API | `metallib-path` | `71371f2ffd6036b210f782abe4f4cf32d3e6299a` | Draft/open | No checks reported | Coordinate readiness. Local fallback branch `RNT56/mlx-c:upstream-pr/metallib-path-c-api` at `6173b85` validates the current-main dependency shape. |
+| `mlx-swift` | [`#416`](https://github.com/ml-explore/mlx-swift/pull/416) Add `GPU.setMetallibPath()` | `metallib-path` | `800f9ae91d81e387a7e1febe5a9ab93ff452c7c3` | Draft/open | No checks reported | Wait for or coordinate after `mlx-c#117`; do not mix SwiftPM resource generation into this PR. |
+| `mlx-swift` | [`#430`](https://github.com/ml-explore/mlx-swift/pull/430) Build SwiftPM default Metal library resource | `upstream-pr/swiftpm-metal-library-resource` | `2b9dda12f9c1a9681e54b38aa718a9437eb1e13e` | Draft/open | No checks reported | Keep draft until rebuilt on upstream-owned `#117`/`#416` commits. Local proof branch `prep/swiftpm-metallib-via-path-api` at `57449af` validates runtime loading. |
 | `mlx` | none by RNT56 | n/a | n/a | n/a | n/a | Do not open a competing quantized SDPA PR while `ml-explore/mlx#3026` is active. |
 
 Closed or archival upstream PRs:
@@ -50,6 +57,7 @@ Closed or archival upstream PRs:
 | `mlx-swift-lm` | `#302` / `upstream-pr/model-config-runtime-hardening` | Closed and superseded by narrow `rope-config-validation`. Keep as staging history only. |
 | `mlx-swift-lm` | `#304` / `pr/turboquant-kv-cache` | Closed as too broad for upstream. Keep as staging history only. |
 | `mlx-swift` | `upstream-pr/linalg-norm-kind-nuc` | Already merged upstream as `ml-explore/mlx-swift#411`. Archival only. |
+| `mlx` | `#3767` / `upstream-pr/swiftpm-metallib-bundle-lookup` | Closed on 2026-06-25 as a duplicate of the automatic lookup approach rejected in `#3562`. Do not reopen. |
 
 ## Branch Readiness Classes
 
@@ -64,7 +72,6 @@ mlx-swift-lm/upstream-pr/vlm-processor-completions
 mlx-swift-lm/upstream-pr/model-compatibility-docs
 mlx-swift-lm/upstream-pr/rope-config-validation
 mlx-swift-lm/upstream-pr/runtime-stop-strings
-mlx-swift/upstream-pr/swiftpm-metal-library-resource
 ```
 
 These are the only branches that should be discussed as ready upstream PR
@@ -80,7 +87,11 @@ These branches contain useful work but are not reviewable upstream PR branches:
 
 ```text
 mlx/pr/quantized-sdpa-followups
+mlx/upstream-pr/swiftpm-metallib-bundle-lookup
+mlx-c/upstream-pr/metallib-path-c-api
 mlx-c/codex/mlx-c-quantized-sdpa-parity
+mlx-swift/prep/swiftpm-metallib-via-path-api
+mlx-swift/upstream-pr/swiftpm-metal-library-resource
 mlx-swift/codex/update-mlx-c-quantized-sdpa
 mlx-swift/pr/turboquant-swift-support
 mlx-swift/pr/turboquant-linear-conversion
@@ -127,7 +138,11 @@ Deliver the already-open independent upstream PRs:
 2. `mlx-swift-lm#303`: model compatibility docs.
 3. `mlx-swift-lm#371`: RoPE config validation.
 4. `mlx-swift-lm#372`: runtime stop-string handling.
-5. `mlx-swift#430`: SwiftPM default Metal library resource.
+5. Explicit Metal path chain for SwiftPM resources:
+   - `mlx#3597`: merged C++ `set_metallib_path` foundation.
+   - `mlx-c#117`: draft C wrapper.
+   - `mlx-swift#416`: draft Swift `GPU.setMetallibPath`.
+   - `mlx-swift#430`: draft SwiftPM `default.metallib` resource packaging.
 
 Acceptance for this stage:
 
@@ -135,6 +150,9 @@ Acceptance for this stage:
 - each PR has passing upstream checks or a maintainer-accepted CI exception;
 - each PR remains single-purpose;
 - no TurboQuant fork-only code is folded into these PRs.
+- `mlx-swift#430` remains draft until it uses upstream-owned `mlx-c#117` and
+  `mlx-swift#416` commits/submodule pins, even though the local proof branch
+  validates the design.
 
 ### Stage 2: Core Quantized SDPA Dependency
 
@@ -142,6 +160,12 @@ External dependency:
 
 ```text
 ml-explore/mlx#3026
+```
+
+Focused local support plan:
+
+```text
+mlx-3026-support-roadmap-2026-06-26.md
 ```
 
 Current upstream state:
@@ -291,8 +315,23 @@ cd /Users/mt/Programming/Schtack/mlx-forks/mlx-swift
 git submodule status --recursive
 swift build --target MLX
 swift build --target MLXNN
+bash -n tools/build-swiftpm-metallib.sh
+SDK_NAME=macosx tools/build-swiftpm-metallib.sh /tmp/mlx-swift-default-macos.metallib
 pre-commit run --all-files
 git diff --check
+```
+
+For the local SwiftPM Metal proof branch:
+
+```bash
+cd /Users/mt/Programming/Schtack/mlx-forks/.pr-worktrees/mlx-swift-metal-resource-via-path-api
+swift build --target MLX
+swift build --target MLXNN
+swift test --filter SwiftPMMetallibResourceTests
+swift test --filter StreamTests/testDeviceType
+bash -n tools/build-swiftpm-metallib.sh
+SDK_NAME=macosx tools/build-swiftpm-metallib.sh /tmp/mlx-swift-default-macos.metallib
+git diff --check upstream/main...HEAD
 ```
 
 ### `mlx`
@@ -315,8 +354,8 @@ build tree.
 
 ```bash
 cd /Users/mt/Programming/Schtack/mlx-forks/mlx-c
-cmake --build build
-ctest --test-dir build --output-on-failure
+cmake --build build/metallib-path-api
+ctest --test-dir build/metallib-path-api --output-on-failure
 git diff --check
 ```
 
@@ -324,7 +363,7 @@ Run this only after aligning the `mlx` dependency to the accepted core API.
 
 ### TurboQuant Product Evidence
 
-The first required real-model rerun remains:
+The first combined real-model rerun completed on 2026-06-25:
 
 ```bash
 cd /Users/mt/Programming/Schtack/mlx-forks/mlx-swift-lm
@@ -345,15 +384,18 @@ TQ_QUALITY_PRINT_CACHE_DIAGNOSTICS=1 \
   --diagnostics-output artifacts/turboquant-hybrid-smoke-20260607/diagnostics-16k-g32-fp16-affinek8v4-quality-materialized-conversion-rerun.json
 ```
 
-Pass conditions:
+Observed result:
 
-- quality and throughput are in the same report;
-- affine K8/V4 selects `affineK8V4Native` for throughput;
-- quality selected path includes `affineK8V4Native`;
+- quality and throughput are in the same report at
+  `artifacts/turboquant-hybrid-smoke-20260607/diagnostics-16k-g32-fp16-affinek8v4-quality-materialized-conversion-rerun.json`;
+- affine K8/V4 selects `affineK8V4Native` for all 28 layers in throughput and
+  quality;
 - no raw fallback or decoded fallback is allocated;
-- resident KV compression is greater than `1.0x`;
-- active memory is reported;
-- sparse was not requested-but-inactive;
+- resident KV compression is `2.13x`;
+- FP16 decode is `8.55` tok/s and affine K8/V4 decode is `42.84` tok/s
+  (`5.01x` FP16) in this single ordered sample;
+- quality passes with top-1 `1.000`, KL `1.1265e-7`, p95 max-logit error
+  `1.0859`, and cosine `0.9942`;
 - the report records exact commits and artifact paths.
 
 ## What We Can Say Now
@@ -364,9 +406,9 @@ Safe maintainer-facing status:
 We split the upstream work into narrow PRs. The VLM processor PR is approved
 and waiting on the failing macOS CI job/rerun. The model compatibility docs,
 RoPE validation, runtime stop-string handling, and SwiftPM Metal resource
-packaging PRs are open as separate reviewable changes. We closed the overly
-broad runtime/TurboQuant drafts instead of asking maintainers to review them as
-large mixed patches. For TurboQuant proper, we are waiting on the upstream core
+packaging PRs are open as separate changes. The old automatic MLX SwiftPM
+lookup route is closed; the SwiftPM Metal path now follows the accepted explicit
+metallib path chain. For TurboQuant proper, we are waiting on the upstream core
 quantized SDPA PR before proposing any dependent mlx-c, Swift, or LM slices.
 ```
 
@@ -374,31 +416,35 @@ Safe product-facing status:
 
 ```text
 The fork stack has staging branches for the full TurboQuant path, but product
-promotion is not complete. The next proof is a same-report real-model quality
-and throughput run for affine K8/V4, followed by downstream compatibility-pair
-and physical-device validation.
+promotion is not complete. We have one same-report 16K affine K8/V4
+quality/throughput artifact with the native compressed path selected. The next
+proof is repeated randomized 16K/32K evidence, followed by downstream
+compatibility-pair and physical-device validation.
 ```
 
 Do not claim:
 
 - that `#301` is fully mergeable while `mac_build_and_test` is failing;
-- that newly opened PRs have passed upstream CI while their workflows are still
-  `action_required` with zero jobs;
+- that newly opened PRs have passed upstream CI when no upstream check data is
+  currently reported;
 - that local `mlx/pr/quantized-sdpa-followups` is a standalone upstream PR
   against `main`;
-- that TurboQuant is product-ready before the combined real-model and device
-  evidence exists.
+- that TurboQuant is product-ready before repeated randomized reports,
+  compatibility-pair evidence, and physical-device evidence exist.
 
 ## Next Operator Checklist
 
 1. Watch or request rerun for `mlx-swift-lm#301` if maintainers indicate the
    failing macOS job was infrastructure-side.
-2. Monitor review on `#303`, `#371`, `#372`, and `mlx-swift#430`.
-3. Monitor `ml-explore/mlx#3026`.
-4. When `#3026` lands, rebase `mlx/pr/quantized-sdpa-followups` and decide
+2. Monitor review on `#303`, `#371`, and `#372`.
+3. Coordinate `mlx-c#117`, then `mlx-swift#416`, then rebuild `mlx-swift#430`
+   from upstream-owned commits/submodule pins.
+4. Monitor `ml-explore/mlx#3026`.
+5. When `#3026` lands, rebase `mlx/pr/quantized-sdpa-followups` and decide
    whether `mlx/upstream-pr/quantized-sdpa-verifier-batches` is still needed.
-5. Split `mlx-c`, `mlx-swift`, and `mlx-swift-lm` TurboQuant branches only after
+6. Split `mlx-c`, `mlx-swift`, and `mlx-swift-lm` TurboQuant branches only after
    the lower dependency is accepted or stable enough to test.
-6. Rerun the combined affine K8/V4 real-model quality/throughput gate.
-7. Only after the fork stack is green, update Pines pins and compatibility-pair
+7. Run randomized repeated 16K and 32K affine K8/V4 real-model
+   quality/throughput reports.
+8. Only after the fork stack is green, update Pines pins and compatibility-pair
    evidence through the Pines release-train docs.

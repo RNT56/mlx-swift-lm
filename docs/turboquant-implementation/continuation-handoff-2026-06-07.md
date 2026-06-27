@@ -31,6 +31,8 @@ staging branches, dependency order, validation gates, and product evidence is
 [Fork Stack Delivery Roadmap - 2026-06-25](fork-stack-delivery-roadmap-2026-06-25.md).
 The local preparation packet for future upstream PRs is
 [Upstream PR Launch Packets - 2026-06-25](upstream-pr-launch-packets-2026-06-25.md).
+The focused support plan for active upstream `ml-explore/mlx#3026` is
+[MLX #3026 Support Roadmap - 2026-06-26](mlx-3026-support-roadmap-2026-06-26.md).
 
 - `mlx-swift-lm` upstream maintenance queue:
   - `upstream-pr/vlm-processor-completions` is open as
@@ -48,13 +50,27 @@ The local preparation packet for future upstream PRs is
   - Drafts `#302` and `#304` were closed because they were too broad for
     reviewable upstream PRs.
 - `mlx-swift` upstream maintenance queue:
-  - `upstream-pr/swiftpm-metal-library-resource` is open as
+  - `upstream-pr/swiftpm-metal-library-resource` is open as draft
     `ml-explore/mlx-swift#430`.
+  - The former MLX automatic SwiftPM bundle lookup route is closed:
+    `ml-explore/mlx#3767` duplicated the approach rejected in `#3562` and must
+    not be reopened.
+  - The accepted SwiftPM Metal foundation is the explicit path chain:
+    `mlx#3597` merged C++ `set_metallib_path`,
+    `mlx-c#117` draft C wrapper,
+    `mlx-swift#416` draft `GPU.setMetallibPath`, then draft `mlx-swift#430`.
+  - Local proof branches validate the corrected route without making `#430`
+    upstream-ready yet:
+    `mlx-c/upstream-pr/metallib-path-c-api` at `6173b85` and
+    `mlx-swift/prep/swiftpm-metallib-via-path-api` at `57449af`.
   - `upstream-pr/linalg-norm-kind-nuc` is already merged upstream and is
     archival only.
 - `mlx` quantized SDPA queue:
   - Do not open a competing main-based PR for the current quantized SDPA stack.
     Upstream already has active `ml-explore/mlx#3026` for the core API/kernels.
+  - Keep future `mlx/upstream-pr/quantized-sdpa-api-tests` and
+    `mlx/upstream-pr/quantized-sdpa-metal-kernels` local-only until `#3026`
+    lands or maintainers request a stacked split.
   - Local `pr/quantized-sdpa-followups` is a one-commit follow-up on top of
     `#3026` (`6 files changed, 184 insertions, 11 deletions`) but is still a
     large stale diff when compared to upstream `main`. Rebase it only after
@@ -86,6 +102,34 @@ swift test --filter KVCacheTests
 python3 scripts/turboquant-polarwht-acceptance-gate.py --self-test
 swift build -c release --product TurboQuantInferenceParity
 ```
+
+SwiftPM Metal explicit-path preparation validated on 2026-06-25:
+
+```bash
+cd /Users/mt/Programming/Schtack/mlx-forks/.upstream-pr-worktrees/mlx-c-metallib-path-api
+cmake --build build/metallib-path-api
+ctest --test-dir build/metallib-path-api --output-on-failure
+git diff --check upstream/main...HEAD
+
+cd /Users/mt/Programming/Schtack/mlx-forks/.pr-worktrees/mlx-swift-metal-resource-clean
+swift build --target MLX
+swift build --target MLXNN
+bash -n tools/build-swiftpm-metallib.sh
+SDK_NAME=macosx tools/build-swiftpm-metallib.sh /tmp/mlx-swift-default-macos-pr430.metallib
+git diff --check upstream/main...HEAD
+
+cd /Users/mt/Programming/Schtack/mlx-forks/.pr-worktrees/mlx-swift-metal-resource-via-path-api
+swift build --target MLX
+swift build --target MLXNN
+swift test --filter SwiftPMMetallibResourceTests
+swift test --filter StreamTests/testDeviceType
+bash -n tools/build-swiftpm-metallib.sh
+SDK_NAME=macosx tools/build-swiftpm-metallib.sh /tmp/mlx-swift-default-macos.metallib
+git diff --check upstream/main...HEAD
+```
+
+The `ctest` command above found no tests in the configured `mlx-c` tree. Treat
+that as no CTest coverage, not a failing test.
 
 Native K8/V4 microbenchmark command:
 
@@ -125,7 +169,7 @@ Important rows:
   `1.0859`, and cosine `0.9942`. This artifact predates the newest quality
   path fields, so do not use it to verify `qualitySelectedAttentionPaths`.
 - `diagnostics-16k-g1-affinek8v4-quality-path-fields.json`: early schema smoke
-  from the quality path field work. Rerun now to verify the current JSON fields.
+  from the quality path field work. Superseded by the combined rerun below.
 - `diagnostics-16k-g32-fp16-affinek8v4-materialized-conversion.json`: 16K
   throughput after materialized dynamic conversion. FP16 measured `12.23`
   tok/s and affine K8/V4 measured `44.37` tok/s with
@@ -134,12 +178,21 @@ Important rows:
   `dynamicCacheQuantizationSeconds=2.455`. This is a single ordered sample and
   did not run quality in the same report, so it is not a promotion result.
 - `diagnostics-16k-g32-fp16-affinek8v4-quality-materialized-conversion.jsonl`:
-  zero-byte failed attempt. Rerun this exact combined gate first.
+  zero-byte failed attempt. Superseded by the rerun artifact below.
+- `diagnostics-16k-g32-fp16-affinek8v4-quality-materialized-conversion-rerun.json`:
+  combined 16K quality plus 32-token throughput report from 2026-06-25. FP16
+  measured `8.55` decode tok/s; affine K8/V4 measured `42.84` decode tok/s
+  (`5.01x` FP16), selected `affineK8V4Native` on all 28 layers, reported
+  `residentKVCompressionRatio=2.13`, allocated no raw or decoded fallback, and
+  passed quality with top-1 `1.000`, KL `1.1265e-7`, p95 max-logit error
+  `1.0859`, and cosine `0.9942`. This is usable single-run product evidence,
+  but still not a product-readiness result without repeated randomized runs and
+  physical-device/compatibility-pair evidence.
 
-## First Rerun
+## Completed 16K Rerun
 
-Rerun a combined 16K quality plus 32-token throughput report now that conversion
-materialization and quality path diagnostics are in place:
+The combined 16K quality plus 32-token throughput report completed on
+2026-06-25:
 
 ```bash
 swift build -c release --product TurboQuantInferenceParity
@@ -159,24 +212,26 @@ TQ_QUALITY_PRINT_CACHE_DIAGNOSTICS=1 \
   --diagnostics-output artifacts/turboquant-hybrid-smoke-20260607/diagnostics-16k-g32-fp16-affinek8v4-quality-materialized-conversion-rerun.json
 ```
 
-Expected pass conditions for this rerun:
+Observed pass conditions:
 
 - `throughput[].label=="affineK8V4"` has
-  `selectedAttentionPaths=["affineK8V4Native"]`.
+  `selectedAttentionPaths=["affineK8V4Native"]` and
+  `codecCounts.affineK8V4Native=28`.
 - `throughput[].promotionGate.qualitySelectedAttentionPaths` includes
   `affineK8V4Native`.
-- `throughput[].residentKVCompressionRatio > 1.0`.
-- `throughput[].promotionBlockReasons` has no native-path, raw-fallback, or
-  quality-path blockers. A speed floor blocker is acceptable only if the run is
-  noisy and should trigger repeated randomized runs.
+- `throughput[].residentKVCompressionRatio == 2.1333333333333333`.
+- `throughput[].promotionBlockReasons` is empty and
+  `promotionEligible == true`.
+- raw fallback and decoded fallback are both false.
 - `quality[].label=="affineK8V4"` includes `selectedAttentionPaths` and
-  `codecCounts`.
+  `codecCounts`, and `passed == true`.
 - `promptPrefillTiming.dynamicCacheQuantizationCalls == 1` for affine K8/V4 and
   generation dynamic quantization is zero.
 
 ## Next Development Work
 
-1. Rerun the combined 16K gate above. The previous attempt wrote an empty JSONL.
+1. Keep `mlx-swift#430` draft until `mlx-c#117` and `mlx-swift#416` are
+   available through upstream-owned commits/submodule pins.
 2. Run randomized repeated 16K and 32K affine K8/V4 reports:
 
 ```bash
@@ -207,9 +262,10 @@ Expected pass conditions for this rerun:
 
 - Do not claim `0.98x` FP16 for this branch. Upstream's visible pinned README
   K8+V4 row is about `0.72x` FP16.
-- Do not claim the single 16K `44.37` tok/s affine row as a product result. It
-  is useful evidence that materialized conversion removed first-decode hidden
-  work, but it lacks a same-report quality gate and repeated randomized samples.
+- Do not claim the single 16K `42.84` tok/s combined quality/throughput rerun as
+  product-ready. It is useful evidence that affine K8/V4 selects the native path
+  and passes quality in one report, but it still lacks repeated randomized
+  samples and physical-device/compatibility-pair validation.
 - Do not promote full PolarWHT K/V or hybrid K8+PolarWHT-V. They remain
   diagnostic until native path, quality, resident memory, fallback, and
   same-machine upstream comparison gates all pass.
