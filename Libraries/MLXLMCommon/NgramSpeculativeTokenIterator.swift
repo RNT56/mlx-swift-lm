@@ -42,6 +42,27 @@ public struct NgramSpeculativeTokenIterator: TokenIteratorProtocol {
     private let maxProposalTokens: Int
     private let adaptiveK: Bool
     private let cheapProposalTokens: Int
+    private let quantizeVerifyLengths: Bool
+
+    /// Verify-width quantization (opt-in). The native compressed SDPA route
+    /// specializes on q_seq via a function constant, so every distinct verify
+    /// width (draft + 1) compiles its own pipeline on first appearance, and a
+    /// measured qL=8 register-spill regression exists at 32K on head_dim 128.
+    /// Truncating the draft to the nearest allowed width bounds the pipeline
+    /// set to verify q_seq in {2, 4} (plus 1 for plain decode) and keeps
+    /// verify below the spill width. Correctness-neutral: a prefix of a draft
+    /// is still a valid draft and the greedy argmax verify corrects any
+    /// width, so output stays byte-identical.
+    static let allowedDraftWidths = [3, 1]  // verify q_seq 4, 2
+    static func quantizedDraftWidth(_ n: Int, enabled: Bool) -> Int {
+        guard enabled else { return n }
+        for allowed in allowedDraftWidths where n >= allowed { return allowed }
+        return 0
+    }
+
+    private func quantizedDraftWidth(_ n: Int) -> Int {
+        Self.quantizedDraftWidth(n, enabled: quantizeVerifyLengths)
+    }
 
     /// Per-round proposal width. With adaptive-k off, the fixed `maxProposalTokens`.
     /// With it on: explore at full width during EMA warmup, then scale the width by
@@ -125,11 +146,17 @@ public struct NgramSpeculativeTokenIterator: TokenIteratorProtocol {
         // unchanged, so output stays byte-identical. A zero-kernel baseline that
         // §5a / §1-batched-qmv must beat. Default off (validated path untouched).
         adaptiveK: Bool = false,
-        cheapProposalTokens: Int = 2
+        cheapProposalTokens: Int = 2,
+        // Verify-width quantization: bound the set of q_seq-specialized verify
+        // pipelines to {2, 4} and stay below the measured qL=8 spill width on
+        // the compressed route. Byte-identical output (prefix-truncation
+        // only). Default off (validated path untouched).
+        quantizeVerifyLengths: Bool = false
     ) throws {
         self.model = model
         self.y = input.text
         self.enablePrefetch = enablePrefetch
+        self.quantizeVerifyLengths = quantizeVerifyLengths
         self.adaptiveK = adaptiveK
         self.cheapProposalTokens = Swift.max(1, Swift.min(cheapProposalTokens, maxProposalTokens))
         let runtime = try resolvedGenerationParameters(for: model, parameters: parameters)
@@ -262,6 +289,7 @@ public struct NgramSpeculativeTokenIterator: TokenIteratorProtocol {
             let budget = Swift.min(currentProposalCap(), Swift.max(0, remaining - 1))
             if !proposed.isEmpty && budget > 0 {
                 draft = Array(proposed.prefix(budget))
+                draft = Array(draft.prefix(quantizedDraftWidth(draft.count)))
             }
         }
 
@@ -330,7 +358,9 @@ public struct NgramSpeculativeTokenIterator: TokenIteratorProtocol {
         let proposed = speculator.propose()
         let budget = Swift.min(currentProposalCap(), Swift.max(0, remaining - 1))
         guard !proposed.isEmpty, budget > 0 else { return nil }
-        let draft = Array(proposed.prefix(budget))
+        var draft = Array(proposed.prefix(budget))
+        draft = Array(draft.prefix(quantizedDraftWidth(draft.count)))
+        guard !draft.isEmpty else { return nil }
         let verifyTokens = concatenated([seed, MLXArray(draft.map { Int32($0) })])
         guard let result = forward(verifyTokens) else { return nil }
         modelForwards += 1
@@ -376,7 +406,10 @@ public struct NgramSpeculativeTokenIterator: TokenIteratorProtocol {
                 // AFTER the bonus — drop the proposal's first token (the predicted bonus).
                 let proposed = speculator.propose().dropFirst()
                 let budget = Swift.min(maxProposalTokens, Swift.max(0, remainingAfterCur - 1))
-                if !proposed.isEmpty, budget > 0 { nextDraft = Array(proposed.prefix(budget)) }
+                if !proposed.isEmpty, budget > 0 {
+                    nextDraft = Array(proposed.prefix(budget))
+                    nextDraft = Array(nextDraft.prefix(quantizedDraftWidth(nextDraft.count)))
+                }
             }
             if !nextDraft.isEmpty {
                 let verifyTokens = concatenated([nextSeedLazy, MLXArray(nextDraft.map { Int32($0) })])
