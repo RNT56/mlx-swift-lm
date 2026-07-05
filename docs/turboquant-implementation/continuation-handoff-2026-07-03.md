@@ -609,3 +609,86 @@ artifacts/affine-hostside-20260705/, memory guard active: 9830MB relaxed +
 - Concurrent-session note: JIT-tier work (TurboQuant.swift, jit.h,
   custom_kernel.cpp, fast.cpp tq_* hunks, CoopW/H16 parity tests) was
   in flight during this session and remains uncommitted/untouched.
+
+## 2026-07-05 (later): tgmem diet + coopw + clean campaign
+
+Kernel regression/selection microbench only — NOT promotable (no same-report real-model quality gate). Full report + all raw data: `artifacts/turboquant-tgmem-diet-20260705/`.
+
+1. **T2.2 tgmem diet — LANDED (uncommitted), occupancy improved.** `_h16` variants in TurboQuant.swift + jit.h(:5636 fused copy) + fast.cpp (C++ `tq_gqa_block_partials_kernel_h16` added for symmetry, NOT native-wired). partial/tile_scores staged half + tile_has_weight bitset-folded (atomic_fetch_or accepted by target MSL). Occupancy re-probe (TQ_PIPELINE_PROBE): `static_tgmem` 24576→**14400 B** for both H16-strided and H16-coop, clears 16384 cliff → 2 TGs/core (max_threads_per_tg 1024). Baseline-discrepancy blocker moot: 14400 clears under both 22528-declared and 24576-measured. Ship gate: H16-strided **1.101×** over A (PASS, thin) + cosine 4/4 in-gate → **ships kernel-selection gate, marginal**.
+2. **`_coopw` (T2.4 stage-2) — LANDED (uncommitted), repeats-2 parity clean.** Clamped four `r<4u`→`r<repeat_count` in the FUSED source (jit.h:5636, NOT sparse :3660); `...QuadDecodeActive` widened to 2<=repeats<=4; distinct `_coopw` kernel (variant-cache safe). **Review caught+fixed an H16-coop uninit-tgmem bug**: LANES=4 gated off when `useH16 && repeats<4` at both dispatch sites (H16 source keeps unclamped r<4u). Parity: repeats=2 clean PASS (cos 1.0, max-abs 4.9e-4); repeats=3 PASS vs majority-mode ref. repeats=4 confirmed still routes byte-frozen `_coop`. Tests: CoopW 3/3, Router 7/7, Validation 11/11, ProfileTests 46/46.
+3. **Campaign — control reproduced CLEAN.** `swift test` still blocked by unrelated WiredMemoryTests compile fail → both Phase 0 gates + Phase 2 ran vs release binary (sha `791313fe…`, no rebuild). 7 arms × 3 interleaved rounds @131072, ~19 min, all engagement-trace-verified, zero fallback. **C4 positive control fired clean: 1.579× over A AND min(C4)=76.47 > max(A)=54.10 (no overlap)** — the exact prior void mode did NOT recur; campaign valid. Per-arm: C4 PASS; H16-strided **ships 1.101×** (thin); H16-coop speed **1.170×** but **parity leg UNVERIFIABLE here (native-compressed catch-22) → NOT shipped**; W128-coop **ships 1.281×**; W2(`_coopw`) exploratory **1.729×**, reported not promoted.
+4. **Lever board.** Coop footprint now VALIDATED: coop family (C4/H16c/W128) is the strongest ≥131K lever measured (1.28–1.58×). **H16-strided SHIPPED** the selection gate (marginal, needs 2nd-machine corroboration). **H16-coop NOT shipped** — speed clears, parity leg blocked on-machine. `_coopw` widens coop to repeats 2/3 (Qwen3.5-2B default turbo4v2 runs GQA at repeats that can now engage coop instead of falling to strided). C++ native route untouched → all wins are **Swift-route only**.
+5. **Fires next per results.** (a) H16-coop parity on a box where `nativeCompressedAttention` probes false (or a capability-override test hook) — the one thing gating H16-coop ship. (b) Track the **repeats=3 strided-reference non-determinism** (3 distinct byte patterns / 10 identical-input runs, pre-existing merge/reduce path) under its own task — NOT a `_coopw` regression. (c) STILL UNRESOLVED: rebase-risk needs a GPU-counter read (no occupancy-counter probe exists yet — the tgmem re-probe is static, not a live counter). (d) A-series harness still **zero data** (device-only). (e) 16K combined-affine artifact still **owed** (unrelated affine ladder track).
+6. **Tree / artifacts / next.** mlx-swift @ `tq/layout-v5-default-device-tests` 11181a5 (dirty: TurboQuant.swift, TurboQuantBenchmark/main.swift, submodule ptr, +untracked CoopW/H16 parity tests); submodule Cmlx/mlx @ `tq/phase0-host-probe-uniforms-diet` 21cf82d (dirty: custom_kernel.cpp[G5], jit.h, fast.cpp); mlx-swift-lm clean. NO commits, no destructive git; T2.4 stage-1 + G5 pre-existing dirty preserved. One unrelated pre-existing fail (`testTurboQuantAttentionRejectsNonCanonicalStorageBeforeLaunch`) → task_e87eda5d. Artifacts: `artifacts/turboquant-tgmem-diet-20260705/{verdict,phase0-gate-verdict,repo-state,quiet-log,session-report}.md`, `pipe-probe/`, `primary-131072-json/` (21), `traces/` (21). Next: `cd mlx-swift && swift test --filter TurboQuantH16ParityTests && swift test --filter TurboQuantCoopWParityTests`.
+
+## 2026-07-05/06: W2 graduation + the 16K combined affine artifact
+
+Two independent tracks; NEITHER promotes a TurboQuant path to product. Full report: `artifacts/turboquant-w2-graduation-20260705/{w2-graduation-verdict,session-report}.md` + `mlx-swift-lm/artifacts/turboquant-affine-16k-20260705/`.
+
+1. **W2 (`_coopw` repeats-2 coop) — NOT GRADUATED, keyed on gate (ii).** Preflights first: positive control C4-vs-A4 @131072 **+56.9% clean-separated** (prior void-overlap mode did NOT recur → campaign valid); determinism pre-check byte-identical on the repeats-2 reference (campaign not void; the literal `cosine==1.0` wording is on a quant-fidelity-vs-raw-SDPA field, not a kernel-parity field → surfaced as ambiguity). Gates: (i) speed **+41.8% @131072 / +44.9% @32768** clean PASS; (iv) no-fallback PASS; (ii) parity **FAIL — cosine ~0.99895 < 0.9999 on all 7 runs**, but ARM A (strided) shows the SAME cosine → coop adds ZERO error; the shortfall is turbo4v2's intrinsic ~5-bit fidelity vs raw FP16. binary sha `791313fe…` unchanged (no rebuild). turbo8 structurally excluded (PolarWHT packing 1–4 bit only). **GEOMETRY: certifies the `_coopw` OPERATOR at headDim=256/repeats-2 only — a synthetic hybrid matching NO documented real Qwen3.5-2B config (256 vs bench's declared repeats=4; roadmap says 128/r2; Qwen35 default 32/8=r4). NOT evidence W2 is representative of shipping Qwen3.5-2B coop coverage.**
+2. **16K combined affine K8/V4 — PRODUCED; discharges the 2026-06-07 zero-byte debt with current-commit evidence.** `mlx-swift-lm/artifacts/turboquant-affine-16k-20260705/diagnostics-16k-g32-fp16-affinek8v4-combined.json` (47,929 B, parses, schemaVersion 3). Qwen3-0.6B-8bit @16K/gen32: affine **1.686×** FP16 (64.44 vs 38.23 tok/s), residentKVCompression **2.133×** (53.1%), quality cosine 0.99424 top1 1.0 **passed**, native path selected in BOTH throughput (28/28) and quality, no raw/decoded fallback, promotionEligible=true, peak/steady mem recorded both configs. GAPS: single-sample (repeats=1, NOT the ≥15-iter protocol); JSON `repoCommits.mlx-swift`=`"unknown"` (filled manually); no same-machine upstream, no device evidence; binary reflects mlx-swift's dirty package-edit tree. Debt CLOSED; product promotion NOT (nonclaims still cap it).
+3. **Lever board.** SHIPPED: H16-strided selection gate 1.101× (marginal, needs 2nd-machine corroboration); W128-coop 1.281×; coop family C4/H16c/W128 1.28–1.58× @≥131K. EXPLORATORY (validated multiplier, not promoted): `_coopw` W2 **1.729×** @131072 / **+44.9%** @32768; affine K8/V4 **1.686×** @16K (Qwen3-0.6B, single-sample). BLOCKED: H16-coop (speed 1.170× clears, parity leg UNVERIFIABLE on native-compressed machine); turbo8 online-fused (structural PolarWHT 8-bit incompat); PolarWHT parity (unaddressed).
+4. **Frontier.** (a) H16-coop AND W2 gate-(ii) parity both blocked by the same native-compressed catch-22 → need a box where `nativeCompressedAttention` probes false, or a capability-override test hook. (b) repeats=3 strided-reference nondeterminism (3 distinct sha / 10 runs) tracked separately — OUT OF SCOPE here, do not run/cite. (c) rebase-risk still needs a live GPU-counter read (tgmem re-probe is static, no occupancy counter exists). (d) **A-series on-device harness still ZERO data — remains the gate for ALL product/device claims.** (e) real-geometry W2/affine rerun (headDim=128/resolve repeats) to make any coop-coverage claim model-representative.
+5. **Tree / next.** mlx-swift @ `tq/layout-v5-default-device-tests` 11181a5 (dirty: TurboQuant.swift, TurboQuantBenchmark/main.swift, submodule ptr, +untracked CoopW/H16 parity tests); submodule Cmlx/mlx @ 21cf82d9 (dirty custom_kernel.cpp/jit.h/fast.cpp); mlx-swift-lm @ 15d6951 (only the pre-existing dirty handoff doc); mlx-c 893882b clean. NO commits, no destructive git, no kernel edits, no rebuild — both binaries reflect the pre-existing dirty package-edit tree. Next: `cd mlx-swift && swift test --filter TurboQuantCoopWParityTests` once `WiredMemoryTests` compile fail is unblocked; then H16-coop/W2 parity on a native-off box; A-series device run.
+
+## 2026-07-06: W2 re-graduation at real geometry
+
+Re-ran the W2 (`_coopw` coop) graduation to fix the TWO defects of the 2026-07-05 attempt:
+(a) it now grades **kernel-vs-kernel parity** (coop leg vs strided leg of the same binary), NOT
+the ambiguous quant-fidelity-vs-raw-SDPA field; (b) it runs at **real Qwen3.5-2B geometry
+hd128 / gqa2 (QH4/KVH2) / repeats-2**, not the synthetic headDim=256 hybrid. Measurement-only:
+binary sha `791313fe…b69e` unchanged pre/post (no rebuild), submodule @21cf82d9, all 6 wiring
+markers matched. Control + determinism gated FIRST. Full doc:
+`artifacts/turboquant-w2-regrad-20260706/regrad-verdict.md`.
+
+1. **Verdict vs corrected gates.** Positive control C4-vs-A4 PASS at both contexts (32768
+   **+41%**, 131072 **+28%**, ≥+15% → campaign VALID, not void). **32768: W2 GRADUATES** —
+   determinism 10/10 byte-identical (md5 ea20c44e…); kernel-vs-kernel parity **bit-exact
+   (cosine 1.0000000000, max_abs 0.0)**; engagement trace shows coop leg dispatches `_coopw`,
+   strided does not; no fallback; W2 vs A speed **1.19×**. **131072: parity/determinism
+   BLOCKED** — at BT=512/activeBlockCount=256 BOTH legs are nondeterministic (one 128-wide head
+   span diverges ~40–60% of identical fixed-seed reps; 2 inf-crashes). Per standing contingency
+   the gate is STOPPED+BLOCKED, not faked or silently rerouted to BT=256.
+2. **Certified for Qwen3.5-2B coop coverage:** the `_coopw` operator is now graduated at
+   **real gqa2 hd128 @32768** — bit-exact to strided + 1.19× faster + no fallback. This is the
+   first coop certification at a documented real Qwen3.5-2B config (07-05 only had synthetic
+   hd256). The **131072 (primary-context) coop-coverage claim remains BLOCKED** on the
+   block-partial race, so coop is NOT re-graduated at the primary context this cycle.
+3. **Lever board.** W2 coop moves from EXPLORATORY → **GRADUATED @32768 real geometry (1.19×,
+   bit-exact)**; **BLOCKED @131072** (mechanism nondeterminism, not a coop defect — strided
+   fails identically). Control C4/A4 healthy at both contexts. turbo8 still structurally
+   excluded on online-fused (PolarWHT 1–4 bit only). Everything else unchanged from 07-05.
+4. **Frontier (unchanged except #1):** (a) H16-coop parity still native-compressed-catch-22
+   blocked; W2 32768 leg now UNblocks via kernel-vs-kernel dump but 131072 leg re-blocked by
+   the new race. (b) repeats-3 strided nondeterminism still out of scope. (c) rebase GPU-counter
+   read still needed. (d) A-series on-device harness still ZERO data — gates all product/device
+   claims. **NEW:** (e) the BT=512/large-active-block-count block-partial race (inf + head-span
+   divergence) is a genuine correctness bug for both legs @131072 — filed under existing pending
+   task_9e5d4e1c (v6-family block-partials); repro in `parity/BLOCKER-131072.md`. No kernel edit.
+5. **Tree / artifacts / next.** mlx-swift @ `tq/layout-v5-default-device-tests` (dirty:
+   TurboQuant.swift, TurboQuantBenchmark/main.swift, submodule ptr @21cf82d9, +untracked
+   CoopW/H16 parity tests) — pre-existing set, unchanged; no commits, no rebuild, no kernel edit.
+   Artifacts: `artifacts/turboquant-w2-regrad-20260706/{regrad-verdict.md, parity/parity_32768.txt,
+   parity/BLOCKER-131072.md, determinism/, primary-131072-turbo4v2/ (16 runs),
+   secondary-32768-turbo4v2/ (12 runs), logs/}`. Next: fix the BT=512 block-partial race
+   (task_9e5d4e1c) to unblock the 131072 coop parity; then A-series device run.
+
+## 2026-07-06 (later): v6 block-partials race fix
+
+Fixes the BT=512/131072 block-partials race that BLOCKED W2's 131072 leg (prior section, task_9e5d4e1c). Measurement-only; no commits. Full report + raw data: `artifacts/turboquant-v6-race-fix-20260706/`.
+
+1. **Root cause.** Threadgroup-RAW hazard in the v6 block-partials merge: the write-loop overwrites `partial[score_base+lane]` with exp-weights while a *second* simdgroup is still reading `partial[score_base]` (the published reduced max) into thread-local `tile_maxes[repeat]` — no barrier between the read and the first overwrite. BT=512 (256 active blocks) spans enough simdgroups to schedule the two groups concurrently → fires 40–60%/dispatch; BT=256 keeps them serialized so it never fires here. Signature: exactly one 128-wide GQA-repeat head span (the score_base row) diverging + occasional inf.
+2. **The fix.** Barrier-hoist (v7 template): a `threadgroup_barrier` between the reduced-max read-loop and the exp-weight write-loop, in Tier 1 (strided/coopw) + Tier 2 (H16), in BOTH copies — `mlx-swift/Source/MLX/TurboQuant.swift` and the JIT twin `.../backend/metal/kernels/turbo_quant_attention_jit.h`. All 5 kernels renamed `_rf1` (Swift symbols+strings, JIT constants, `fast.cpp` regs `gqa_kernel`@2768 / `tq_gqa_block_partials_kernel_h16`@2829); both dispatch sites retired to `_rf1`, old names→0. **Review: APPROVED** (two-simdgroup hand-walk confirms the barrier closes the exact RAW edge; Swift/JIT bodies byte-identical). Scope note: diff also lands H16-diet family, coopw repeats-2..4 widening, native TQ_COOP kill-switch, TQ_PIPELINE_PROBE — native-coop route ships UNTESTED by this campaign.
+3. **Verification gates.**
+
+| Gate | Result |
+|------|--------|
+| a-0 pre-fix repro fired? | YES — strided 7/10 match, 3/10 diverge (not vacuous) |
+| a: 50-run determinism ×3 legs | 150/150, 0 diverge, 0 crash (strided/coopw md5 `9e04558a`; coop4 `fc27fda9`) |
+| G3: BT=256 byte-parity pre/post | PASS — strided+coopw md5-identical (barrier adds 0 numerical change) |
+| b: W2 131072 parity (strided+coopw) | PASS — cos 0.9999999855, max_abs 4.883e-04 vs same-geometry BT=256 ref |
+| c: speed cost (interleaved n=18) | median fixed/prefix **1.07×** (no regression; ≥0.97) |
+| **W2 131072 legs unblocked?** | **YES — both ARM A + W2 pass parity+determinism** |
+
+4. **Retroactive meaning.** The 07-06 "repeats-3 strided-reference nondeterminism" and the 131072 BOTH-legs-diverge BLOCKER are the SAME race — now explained and closed. The 07-05 "H16-coop parity UNVERIFIABLE" catch-22 is a *native-compressed probe* issue, NOT this race — still open. RE-CHECK: any 131072/BT=512 parity/determinism taken with pre-fix `791313fe` is suspect, regrade on `f93bed5d`. The 32768 graduation never raced — do NOT re-run it.
+5. **Tree / next.** mlx-swift dirty @ `tq/layout-v5-default-device-tests` 11181a5; submodule Cmlx/mlx @21cf82d9 dirty; fixed binary `f93bed5d…`, pre-fix `791313fe…` archived under `prefix-binary/`. No commits. **task_9e5d4e1c is SUPERSEDED** (W2 131072 unblocked). Follow-up chip owed: Tier 3 sparse kernels (jit.h `turbo_quant_sparse_gqa_block_*` @3660/4266/5291) share the hazard class, deferred/off-path (sparse-V inactive) — latent nonclaim gating any future sparse-V promotion. Next: commit the `_rf1` fix; then A-series device run.
