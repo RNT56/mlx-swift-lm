@@ -454,57 +454,120 @@ artifacts/external-intel-20260705/   (full evidence reports)
 ## 2026-07-04: v7 re-verdict on the live decode path
 
 **1. Why "v7 FALSIFIED (rerun)" was unsafe.** The prior falsifier timed the
-standalone `qk`/`av` diagnostic kernels (`qkMS`+`avMS`), NOT the live
-`fusedAttentionGQABlockPartials{,Coop,V7}` path production decode dispatches.
-Neither the coop `LANES_PER_TOKEN` template key nor any `_v7` variant exists for
-those QK/AV kernels, so coop and v7 were structurally unable to engage in what
-was timed. The tell: its **positive control failed** — v6-coop never beat
-v6-strided, contradicting the replicated wave0 +48.8% coop win. A campaign whose
-control does not fire cannot separate "no benefit" from "never ran," so its
-falsification is void. Fix: force the live path (`MLX_TURBOQUANT_NATIVE_ATTENTION=0`
-+ `--path online-fused`), add a per-run `TQ_KERNEL_TRACE=1` engagement recorder,
-and re-derive the coop control BEFORE evaluating v7 (pre-committed stop rule).
+standalone `qk`/`av` diagnostic kernels, NOT the live
+`fusedAttentionGQABlockPartials{,Coop,V7}` path production decode dispatches — no
+coop `LANES_PER_TOKEN` key or `_v7` variant exists there, so both interventions
+were structurally unable to engage in what was timed. The tell: its **positive
+control failed** (v6-coop never beat v6-strided, vs the replicated wave0 +48.8%).
+A campaign whose control doesn't fire can't separate "no benefit" from "never
+ran," so its verdict is void. Fix: force the live path
+(`MLX_TURBOQUANT_NATIVE_ATTENTION=0` + `--path online-fused`), add per-run
+`TQ_KERNEL_TRACE=1` engagement proof, re-derive the coop control BEFORE v7.
 
-**2. POSITIVE CONTROL — REPRODUCED.** 131072, wave0 methodology, interleaved,
-n=3/arm: median A(v6-strided)=51.81, median C(v6-coop)=84.64 → **C/A=1.63×**
-(gate ≥1.15 PASS), non-overlap min(C) 84.23 > max(A) 54.74. G1 PASS decisively.
-The coalescing-bottleneck model stands; no roofline/ghost-sweep re-validation
-is required for coop. Prior falsifier verdicts (both rounds) are **void**.
+**2. POSITIVE CONTROL — REPRODUCED.** 131072, wave0 method, interleaved, n=3/arm:
+median A(strided)=51.81, C(coop)=84.64 → **C/A=1.63×** (≥1.15 PASS), non-overlap
+min(C)84.23>max(A)54.74. G1 PASS. Coalescing-bottleneck model stands; no
+roofline/ghost-sweep re-validation needed for coop. Prior falsifiers (both) VOID.
 
-**3. V7 VERDICT — FALSIFIED** (criteria apply because control reproduced).
-Primary G2 @131072, 4 rotated rounds, n=4/arm, 25it/5wu/300ms:
-
-| arm | median M | min | max |
-|---|---|---|---|
-| A v6-strided | 36.12 | 35.20 | 41.50 |
-| B v7-strided | 37.60 | 36.55 | 45.80 |
-| C v6-coop | 48.54 | 47.13 | 49.20 |
-
-G2: C/A=1.34× PASS, min(C)47.13>max(A)41.50 PASS. V7 criterion:
-median_B 37.60 **<** median_C 48.54 → **v7 FALSIFIED** (unambiguous). B/A=1.04×
-(barely beats plain strided, ranges overlap), B/C=0.77× (recovers ~77% of coop).
-32768 corroborates (C>B>A, B/C=0.79); 8192 neg-ctrl trace shows coop absent
-(gate `ctx≥32768` correct). Engagement: one `blockParallel:` line/run, arm-exact,
-zero cross-contamination across 22 runs; cosine separates coop's reassociation.
+**3. V7 VERDICT — FALSIFIED** (criteria apply, control reproduced). Primary G2
+@131072, 4 rotated rounds, n=4/arm, 25it/5wu/300ms: medians A(v6-strided)=36.12
+[35.20–41.50], B(v7-strided)=37.60 [36.55–45.80], C(v6-coop)=48.54 [47.13–49.20].
+G2: C/A=1.34× PASS, min(C)47.13>max(A)41.50 PASS. V7 criterion: median_B 37.60
+**<** median_C 48.54 → **FALSIFIED** (unambiguous). B/A=1.04× (barely beats plain
+strided, ranges overlap), B/C=0.77× (recovers ~77% of coop). 32768 corroborates
+(C>B>A, B/C=0.79); 8192 neg-ctrl trace shows coop absent (gate `ctx≥32768`
+correct). Engagement: one arm-exact `blockParallel:` line/run, zero
+cross-contamination across 22 runs; cosine separates coop's reassociation.
 
 **4. Roadmap.** Do NOT invest further in layout-v7 tile-transpose as a coop
-alternative — it does not close the gap and barely beats plain strided. The
-coalescing model is NOT invalidated (coop reproduced); only the v7 *implementation*
-is. Coop is the validated coalescing lever at `repeats==4`; next real question is
-the `repeats==4` gate vs the `repeats==2` shipping model (Qwen3.5-2B) — separate
-investigation, not a v7 continuation. No product claim follows either way.
+alternative — it doesn't close the gap. The coalescing model is NOT invalidated
+(coop reproduced); only the v7 *implementation* is. Coop is the validated
+coalescing lever at `repeats==4`; the next real question is that gate vs the
+`repeats==2` shipping model (Qwen3.5-2B) — a separate investigation, not a v7
+continuation. No product claim follows either way.
 
-**5. Tree / artifacts (nothing committed by this pass).** The campaign's
-uncommitted stack was subsequently committed: campaign source (`32ce468` + diff
-`ab40ae6d…`) is now **mlx-swift @ `f9323fc`** (branch `tq/layout-v5-default-device-tests`),
-working tree **clean**, Cmlx @ `cdf5aa0…`, `env|grep TQ_` empty. Binary sha
-`7ba31d3…` (LC_UUID varies per link). Re-verdict artifacts:
-`artifacts/turboquant-v7-20260703/reverdict/` (`definitive-verdict.md`,
+**5. Tree / artifacts (nothing committed this pass).** Campaign's uncommitted
+stack is now committed: source (`32ce468`+diff `ab40ae6d…`) = **mlx-swift @
+`f9323fc`** (`tq/layout-v5-default-device-tests`), tree **clean**, Cmlx
+`cdf5aa0…`, `env|grep TQ_` empty, binary `7ba31d3…` (LC_UUID varies/link).
+Re-verdict: `artifacts/turboquant-v7-20260703/reverdict/` (`definitive-verdict.md`,
 `snapshot.txt`, `verdict-livefused-SOURCE.md`, `primary-131072-json/`, `traces/`);
-source trail `artifacts/turboquant-v7-livefused-20260703/`. Next:
-```bash
-cd mlx-swift && git rev-parse HEAD   # f9323fc…, status clean
-swift build -c release --product TurboQuantBenchmark
-swift test --filter TurboQuantLayoutV7ParityTests    # 12/12
-```
-Do NOT relaunch a layout-v7 speed campaign.
+source trail `artifacts/turboquant-v7-livefused-20260703/`. Next: `git rev-parse
+HEAD` (f9323fc, clean) → `swift build -c release --product TurboQuantBenchmark` →
+`swift test --filter TurboQuantLayoutV7ParityTests` (12/12). Do NOT relaunch a
+layout-v7 speed campaign.
+
+
+## 2026-07-05: coop widening (T2.4) + occupancy probe (G5)
+
+**1. T2.4 Stage 1 - LANDED + APPROVED, NOT SHIPPABLE. Stage 2 INEXPRESSIBLE.**
+Positive-control first: G1 C4 control did **NOT** cleanly reproduce the coop win.
+G1 @131072, decodeP50, n=3/arm: A(v6-strided) median 45.96 [33.45-56.09],
+C4(v6-coop) median 80.88 [35.39-85.08]. Ratio 1.76x clears >=1.15x on the median
+**but ranges OVERLAP** (min C4 35.39 < max A 56.09) - reverdict kill test
+`min(C)>max(A)` FAILS (background-agent load ~5.6, distros interpenetrate;
+engagement clean). **W128 hd128 arm (the only arm testing the widening) + G2
+NEVER LAUNCHED** (harness couldn't sleep ~40min). => Stage-1 ship criteria
+(>=+15% control non-overlapping; >=+10% W arm w/ cosine parity) **UNMET**: code
+lands, evidence gate open, no hd128 speed claim. Edits
+(uncommitted on `f9323fc`, no kernel-source change): fast.cpp gate widened
+`hd_ok=(128||256)` + `TQ_COOP=0` fail-closed kill switch (repeats==4 unchanged);
+TurboQuant.swift:163 **narrowed** `%4==0`->`{128,256}`, no shipped config
+regresses. Package-edit RE-VERIFIED live (QwenProof rebuilt, coop marker=1).
+**Stage 2 `_coopw` (repeats=2): NOT ATTEMPTED - INEXPRESSIBLE**, zero grep hits in
+source/binary; W2 uncertifiable.
+
+**2. G5 occupancy - DONE. tgmem-limited -> fires T2.2 diet, NOT T2.1 rebase.**
+Hot GQA block-partials kernel @131K, both arms identical: static_tgmem=**24576 B
+(24KB)**, max_threads_per_tg=1024, exec_width=32 (coop did not change tgmem vs
+v6). 24KB in 22-24.5KB band + >=512 threads -> ~1 TG/core -> **tgmem-limited ->
+T2.2 diet next** (target <=16KB for 2 TG/core, +10-25% @131K if latency-bound).
+Caveats: (a) **re-probe after the diet** - if static_tgmem doesn't
+drop, compiler already DCE'd it -> hygiene-only, no speed claim; (b) **NOT a T2.1
+green-light** - staticThreadgroupMemoryLength is necessary-not-sufficient; true
+resident-simdgroup count (T2.1 go/no-go + T2.2 "simdgroups ~double" kill) needs a
+GPU-counter read not built this session. **Fire T2.2; rebase-risk flag UNRESOLVED.**
+
+**3. Lever board - coop coverage NET-ZERO validated gain.** Validated footprint
+unchanged = exactly hd256/repeats4/>=32K (opt-in/default-off). Stage 1 gates-in
+hd128/repeats4 **in code only** (W128 never benchmarked -> UNVERIFIED). Shipping
+Qwen3.5-2B (**repeats=2**) still cannot engage coop (needs the nonexistent `_coopw`).
+
+**4. Tree / artifacts / next.** Nothing committed. mlx-swift @`f9323fc`
+(`tq/layout-v5-default-device-tests`): `M Source/MLX/TurboQuant.swift`, `m
+Source/Cmlx/mlx`; submodule (`tq/phase0-host-probe-uniforms-diet`): `M
+mlx/fast.cpp` (T2.4) + `M .../custom_kernel.cpp` (G5). Artifacts:
+`artifacts/turboquant-coop-widening-20260705/` (`session-report.md`,
+`occupancy-probe.md`, G1 `primary-131072-json/`+`traces/`, `run_g2_w128.sh`
+**prepared/unlaunched**, `verdict.md` DRAFT). Next: (1) rerun G1 + launch
+`run_g2_w128.sh` on an **idle rig** (load voided the non-overlap check) - clean
+control unlocks the W128 score. (2) C++ hd128 real-model effect NOT bench-observable
+(`--path native-mlx` = forced fallback) -> separate mlx-swift-lm/on-device run w/
+kernel_kind diag. (3) T2.2: build diet -> re-probe G5 <=16KB first. (4) P0-d: zero A-series/on-device evidence.
+
+## Update 2026-07-05 (session 2): stack committed+pushed; P0-3 battery verdicts
+
+Everything previously uncommitted is now committed and pushed (mlx submodule
+tq/phase0-host-probe-uniforms-diet, mlx-swift + gitlink, mlx-swift-lm + pin
+bumps; standalone mlx/mlx-c backlogs pushed — the unpushed-pin package-edit
+root cause is fixed). P0-3 falsifier battery ran on Qwen3-0.6B-8bit @16K
+(artifacts/affine-hostside-20260705/):
+
+- **H1 REFUTED at this sensitivity**: MLX_MAX_OPS_PER_BUFFER 40 vs 400 moved
+  neither config beyond drift (2 interleaved rounds, 25 randomized repeats).
+- **Block-cap VALIDATED + LANDED**: 256 beat the 512/1024 ladder in 4/4
+  paired rounds at 32K/131K; default changed in select_sdpa_blocks
+  (mlx 66d2750c), engagement-verified vs forced-256 within the 3.85% floor.
+- **NEW ANOMALY (top open falsifier)**: the parity tool's fp16 config decodes
+  at ~11.5 tok/s at 16K on Qwen3-0.6B = 0.18-0.21x of affineK8V4 (60-74
+  tok/s, native path engaged, 28 dispatches) across all 4 rounds — ~8x below
+  the bandwidth ceiling. Either the fp16 config falls off the fused path
+  (mask dtype / dispatch fallback = mislabeled baseline, VeloxQuant lesson)
+  or the plain cache pays a per-token full-plane copy (H2-on-fp16). Healthy
+  fp16 (72.71 tok/s, Qwen3.5-2B) predates the late-June upstream merges — a
+  regression window exists. NEXT: TQ_KERNEL_TRACE the fp16 arm, check mask
+  dtype, then bisect. Until resolved, NO ratio claims from this tool's fp16
+  baseline on 0.6B.
+- Gotcha: TurboQuantInferenceParity ignores --output (tables live in the
+  battery logs); fix or use the documented report flag before the next run.
+- Also landed: opt-in speculative verify-width quantization (26a042e).
