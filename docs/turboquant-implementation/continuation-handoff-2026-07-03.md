@@ -450,3 +450,61 @@ SliceUpdate donation hazard, both falsifiable with zero-code env A/Bs. Read:
 mlx-swift-lm/docs/turboquant-implementation/external-intel-synthesis-2026-07-05.md
 artifacts/external-intel-20260705/   (full evidence reports)
 ```
+
+## 2026-07-04: v7 re-verdict on the live decode path
+
+**1. Why "v7 FALSIFIED (rerun)" was unsafe.** The prior falsifier timed the
+standalone `qk`/`av` diagnostic kernels (`qkMS`+`avMS`), NOT the live
+`fusedAttentionGQABlockPartials{,Coop,V7}` path production decode dispatches.
+Neither the coop `LANES_PER_TOKEN` template key nor any `_v7` variant exists for
+those QK/AV kernels, so coop and v7 were structurally unable to engage in what
+was timed. The tell: its **positive control failed** — v6-coop never beat
+v6-strided, contradicting the replicated wave0 +48.8% coop win. A campaign whose
+control does not fire cannot separate "no benefit" from "never ran," so its
+falsification is void. Fix: force the live path (`MLX_TURBOQUANT_NATIVE_ATTENTION=0`
++ `--path online-fused`), add a per-run `TQ_KERNEL_TRACE=1` engagement recorder,
+and re-derive the coop control BEFORE evaluating v7 (pre-committed stop rule).
+
+**2. POSITIVE CONTROL — REPRODUCED.** 131072, wave0 methodology, interleaved,
+n=3/arm: median A(v6-strided)=51.81, median C(v6-coop)=84.64 → **C/A=1.63×**
+(gate ≥1.15 PASS), non-overlap min(C) 84.23 > max(A) 54.74. G1 PASS decisively.
+The coalescing-bottleneck model stands; no roofline/ghost-sweep re-validation
+is required for coop. Prior falsifier verdicts (both rounds) are **void**.
+
+**3. V7 VERDICT — FALSIFIED** (criteria apply because control reproduced).
+Primary G2 @131072, 4 rotated rounds, n=4/arm, 25it/5wu/300ms:
+
+| arm | median M | min | max |
+|---|---|---|---|
+| A v6-strided | 36.12 | 35.20 | 41.50 |
+| B v7-strided | 37.60 | 36.55 | 45.80 |
+| C v6-coop | 48.54 | 47.13 | 49.20 |
+
+G2: C/A=1.34× PASS, min(C)47.13>max(A)41.50 PASS. V7 criterion:
+median_B 37.60 **<** median_C 48.54 → **v7 FALSIFIED** (unambiguous). B/A=1.04×
+(barely beats plain strided, ranges overlap), B/C=0.77× (recovers ~77% of coop).
+32768 corroborates (C>B>A, B/C=0.79); 8192 neg-ctrl trace shows coop absent
+(gate `ctx≥32768` correct). Engagement: one `blockParallel:` line/run, arm-exact,
+zero cross-contamination across 22 runs; cosine separates coop's reassociation.
+
+**4. Roadmap.** Do NOT invest further in layout-v7 tile-transpose as a coop
+alternative — it does not close the gap and barely beats plain strided. The
+coalescing model is NOT invalidated (coop reproduced); only the v7 *implementation*
+is. Coop is the validated coalescing lever at `repeats==4`; next real question is
+the `repeats==4` gate vs the `repeats==2` shipping model (Qwen3.5-2B) — separate
+investigation, not a v7 continuation. No product claim follows either way.
+
+**5. Tree / artifacts (nothing committed by this pass).** The campaign's
+uncommitted stack was subsequently committed: campaign source (`32ce468` + diff
+`ab40ae6d…`) is now **mlx-swift @ `f9323fc`** (branch `tq/layout-v5-default-device-tests`),
+working tree **clean**, Cmlx @ `cdf5aa0…`, `env|grep TQ_` empty. Binary sha
+`7ba31d3…` (LC_UUID varies per link). Re-verdict artifacts:
+`artifacts/turboquant-v7-20260703/reverdict/` (`definitive-verdict.md`,
+`snapshot.txt`, `verdict-livefused-SOURCE.md`, `primary-131072-json/`, `traces/`);
+source trail `artifacts/turboquant-v7-livefused-20260703/`. Next:
+```bash
+cd mlx-swift && git rev-parse HEAD   # f9323fc…, status clean
+swift build -c release --product TurboQuantBenchmark
+swift test --filter TurboQuantLayoutV7ParityTests    # 12/12
+```
+Do NOT relaunch a layout-v7 speed campaign.
