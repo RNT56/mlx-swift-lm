@@ -424,6 +424,26 @@ private func runQmmScaling(
     }
 }
 
+/// Benchmark memory guard (same contract as TurboQuantInferenceParity):
+/// TQ_METAL_MEMORY_LIMIT_MB (default 60% of physical RAM, relaxed) and
+/// TQ_METAL_CACHE_LIMIT_MB (default 1024); -1 disables. Applied identically
+/// to every arm so A/B comparisons stay fair; values echoed to stderr.
+func applyBenchmarkMemoryGuard() {
+    let env = ProcessInfo.processInfo.environment
+    func megabytes(_ name: String, default def: Int) -> Int {
+        env[name].flatMap { Int($0) } ?? def
+    }
+    let physicalMB = Int(ProcessInfo.processInfo.physicalMemory / (1024 * 1024))
+    let memoryMB = megabytes("TQ_METAL_MEMORY_LIMIT_MB", default: physicalMB * 60 / 100)
+    let cacheMB = megabytes("TQ_METAL_CACHE_LIMIT_MB", default: 1024)
+    if memoryMB >= 0 { GPU.set(memoryLimit: memoryMB * 1024 * 1024, relaxed: true) }
+    if cacheMB >= 0 { GPU.set(cacheLimit: cacheMB * 1024 * 1024) }
+    FileHandle.standardError.write(
+        Data(
+            "memory guard: metal memoryLimit=\(memoryMB >= 0 ? "\(memoryMB)MB (relaxed)" : "off") cacheLimit=\(cacheMB >= 0 ? "\(cacheMB)MB" : "off") physical=\(physicalMB)MB\n"
+                .utf8))
+}
+
 @main
 struct TurboQuantNativeVxBenchmarkCLI {
     static func main() throws {
@@ -431,6 +451,7 @@ struct TurboQuantNativeVxBenchmarkCLI {
             printUsage()
             return
         }
+        applyBenchmarkMemoryGuard()
         if CommandLine.arguments.contains("--qmm-scaling") {
             guard Device.defaultDevice().deviceType == .gpu else {
                 throw NSError(domain: "qmm-scaling", code: 3)

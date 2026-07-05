@@ -416,6 +416,29 @@ private struct QualityAttemptEvent: Encodable {
     }
 }
 
+/// Benchmark memory guard. Long-context batteries wire enough unified GPU
+/// memory (KV planes + MLX buffer cache held across 25-sample loops) to
+/// freeze the whole machine on small-RAM hosts (observed on 18 GB). Caps are
+/// applied identically to every config/arm, so A/B comparisons stay fair,
+/// and the applied values are echoed to stderr so artifacts record them.
+/// TQ_METAL_MEMORY_LIMIT_MB (default 60% of physical RAM, relaxed) and
+/// TQ_METAL_CACHE_LIMIT_MB (default 1024). Set -1 to disable a guard.
+func applyBenchmarkMemoryGuard() {
+    let env = ProcessInfo.processInfo.environment
+    func megabytes(_ name: String, default def: Int) -> Int {
+        env[name].flatMap { Int($0) } ?? def
+    }
+    let physicalMB = Int(ProcessInfo.processInfo.physicalMemory / (1024 * 1024))
+    let memoryMB = megabytes("TQ_METAL_MEMORY_LIMIT_MB", default: physicalMB * 60 / 100)
+    let cacheMB = megabytes("TQ_METAL_CACHE_LIMIT_MB", default: 1024)
+    if memoryMB >= 0 { GPU.set(memoryLimit: memoryMB * 1024 * 1024, relaxed: true) }
+    if cacheMB >= 0 { GPU.set(cacheLimit: cacheMB * 1024 * 1024) }
+    FileHandle.standardError.write(
+        Data(
+            "memory guard: metal memoryLimit=\(memoryMB >= 0 ? "\(memoryMB)MB (relaxed)" : "off") cacheLimit=\(cacheMB >= 0 ? "\(cacheMB)MB" : "off") physical=\(physicalMB)MB\n"
+                .utf8))
+}
+
 @main
 struct TurboQuantInferenceParityCLI {
     static func main() async throws {
@@ -424,6 +447,7 @@ struct TurboQuantInferenceParityCLI {
             printUsage()
             return
         }
+        applyBenchmarkMemoryGuard()
         if CommandLine.arguments.contains("--list-configs") {
             for label in InferenceParityBenchmark.defaultConfigLabels {
                 print(label)
