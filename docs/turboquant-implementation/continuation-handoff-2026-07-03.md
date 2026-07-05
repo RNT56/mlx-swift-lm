@@ -571,3 +571,41 @@ root cause is fixed). P0-3 falsifier battery ran on Qwen3-0.6B-8bit @16K
 - Gotcha: TurboQuantInferenceParity ignores --output (tables live in the
   battery logs); fix or use the documented report flag before the next run.
 - Also landed: opt-in speculative verify-width quantization (26a042e).
+
+## Update 2026-07-05 (session 3): H2 refuted; fp16 collapse explained; deficit isolated
+
+Falsifier state after direct instrumentation (all guarded runs in
+artifacts/affine-hostside-20260705/, memory guard active: 9830MB relaxed +
+1024MB cache on the 16GB M2 Pro):
+
+- **H2 REFUTED on both paths** via TQ_COPY_PROBE=1 (new env-gated
+  SliceUpdate donation counter, mlx 21cf82d9): 16K/Qwen3-0.6B decode+prefill
+  fp16 5600/5600 donated, affineK8V4 16352/16352 donated, 0 bytes copied.
+  The 3A-a-class donation hazard does not fire in current code.
+- **The fp16 collapse was a memory-pressure benchmark confound**, not a
+  regression: with the benchmark memory guard (436895f) the same tool/args
+  give fp16 36.79 tok/s vs the battery's 11.5-15.7. The battery's
+  "affine 5.5x faster than fp16" rows are INVALID for ratio claims (the
+  fp16 arm was paging; its 2.13x-larger KV pressured a 16GB host). The
+  h1-*-r*.log files remain valid ONLY for the A-vs-B ops/buffer comparison
+  (both arms equally confounded). H1 remains refuted.
+- **Guarded ratios @16K, 3 randomized repeats, native path engaged:**
+  Qwen3.5-2B-4bit: fp16 72.64 (reproduces the 06-07 72.71), affine 48.67 =
+  0.670x — the 2B-class deficit is REAL. Qwen3-0.6B-8bit: fp16 36.79,
+  affine 63.61 = 1.73x — on small models KV dominates weights well below
+  16K and compression is a SPEED win, not just memory.
+- **Suspect list now uniquely narrowed:** not the SDPA kernel (isolated
+  1.12x @32K), not buffer commit cadence (H1), not donation copies (H2) →
+  the remaining asymmetry is the affine append ladder's extra graph
+  nodes/dispatches per layer per token (2 quantize + 6 slice_update + 6
+  views vs fp16's 2 slice_updates). **P1-1 fused quantize-append is the
+  uniquely-fingered next lever** for the 2B-class <=32K gap.
+- Policy insight: dynamic admission could flip to compressed-for-SPEED on
+  small (0.6B-class) models at >=16K, not only under RAM pressure —
+  needs its own combined quality+throughput gate before any wiring.
+- Correction to session 2's note: TurboQuantInferenceParity does not
+  ignore --output; the report flag is --diagnostics-output <path>
+  (guarded-2b-16k.json written this way).
+- Concurrent-session note: JIT-tier work (TurboQuant.swift, jit.h,
+  custom_kernel.cpp, fast.cpp tq_* hunks, CoopW/H16 parity tests) was
+  in flight during this session and remains uncommitted/untouched.
