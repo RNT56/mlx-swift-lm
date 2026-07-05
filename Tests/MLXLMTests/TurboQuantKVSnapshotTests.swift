@@ -413,6 +413,42 @@ extension MLXRuntimeSwiftTests {
         #expect(dtypeTarget.runtimeSnapshot().logicalLength == 0)
     }
 
+    /// T1.4 stage 1: the K scale plane was dieted from 3 scales/group to 2 (norm, residual_norm);
+    /// the third slot was write-only (always 0.0) and never read. Snapshots written before the
+    /// diet still carry a last-dim-3 key scale plane. Schema-range validation alone would accept
+    /// this (schemaVersion 4 <= currentSchemaVersion 5), so the decisive gate is the explicit
+    /// `turboQuantRequireKeyScalesPerGroup` shape check in the restore path — confirm it rejects
+    /// a stale 3-scale key plane instead of silently misreading it.
+    @Test func importRejectsStaleThreeScaleKeyPlaneBeforeUse() throws {
+        guard TurboQuantKernelAvailability.current.supportsMetalPolarQJLAttention else {
+            return
+        }
+        let cache = TurboQuantKVCache(backend: .metalPolarQJL)
+        _ = try cache.updateCompressed(
+            keys: MLXArray.ones([1, 2, 2, 64], dtype: .float32),
+            values: MLXArray.ones([1, 2, 2, 64], dtype: .float32)
+        )
+        let payload = try cache.exportSnapshot(
+            identity: Self.identity(),
+            conversationID: UUID()
+        )
+
+        var staleKeyScales = payload
+        let keyScales = try #require(payload.compressedArrays["key.scales"])
+        #expect(keyScales.dim(4) == 2, "current encoder must already produce the dieted 2-scale K plane")
+        let staleScales = concatenated(
+            [keyScales, MLXArray.zeros([keyScales.dim(0), keyScales.dim(1), keyScales.dim(2), keyScales.dim(3), 1], dtype: keyScales.dtype)],
+            axis: 4
+        )
+        Self.replaceArray(in: &staleKeyScales, name: "key.scales", with: staleScales)
+
+        let target = TurboQuantKVCache(backend: .metalPolarQJL)
+        #expect(throws: TurboQuantRuntimeFailure.self) {
+            try target.importSnapshot(staleKeyScales, expectedIdentity: Self.identity())
+        }
+        #expect(target.runtimeSnapshot().logicalLength == 0)
+    }
+
     @Test func exportRejectsUncommittedOrEmptyState() {
         let cache = TurboQuantKVCache(backend: .metalPolarQJL)
 

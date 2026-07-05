@@ -1848,6 +1848,20 @@ private func turboQuantRequireSnapshotRankOrCompact(
     }
 }
 
+/// T1.4 stage 1: the K scale plane was dieted from 3 scales/group to 2 (norm, residual_norm);
+/// the third slot was write-only (always 0.0) and never read. Snapshots taken before the diet
+/// still carry a last-dim-3 key scale plane and must be rejected here rather than misread, since
+/// schema-range validation alone does not catch this (schemaVersion 4 remains <= currentSchemaVersion).
+private func turboQuantRequireKeyScalesPerGroup(_ keyScales: MLXArray) throws {
+    guard keyScales.ndim == 5, keyScales.dim(4) == 2 else {
+        throw TurboQuantRuntimeFailure.cacheLayoutInvalid(
+            "TurboQuant snapshot key scale plane has an unsupported layout"
+                + " (expected 2 scales per group after the K scale-plane diet;"
+                + " got shape \(keyScales.shape)). Recreate the snapshot with the current build."
+        )
+    }
+}
+
 private func turboQuantSnapshotImportedCodes(
     manifest: TurboQuantKVSnapshotManifest,
     ordered: [MLXArray],
@@ -1886,6 +1900,7 @@ private func turboQuantSnapshotImportedCodes(
         rank: 5
     )
     try turboQuantRequireSnapshotRank(keyScales, name: "key.scales", rank: 5)
+    try turboQuantRequireKeyScalesPerGroup(keyScales)
     if valueIsPlaceholder {
         try turboQuantRequireSnapshotRankOrCompact(
             valuePacked,
@@ -2260,6 +2275,15 @@ public final class TurboQuantKVCache: QuantizedKVCache, TurboQuantCompressedKVCa
                     valueHeadDimension: valueHeadDimension,
                     groupSize: groupSize
                 )
+                // T1.4 stage 1: scalesPerGroup omitted here defaults to 2 (the dieted K scale
+                // plane) regardless of newValue[4]'s actual last dim. This setter is non-throwing
+                // (a `state` property setter), so a stale 3-scale snapshot restored through this
+                // path is not rejected here; it fails closed at first compressed-attention use
+                // instead, where mlx-swift's `validateTurboQuantAttentionCode` throws "compressed
+                // attention scales per group ... does not match expected" (see
+                // TurboQuantValidation.swift). The primary, throwing restore path
+                // (`turboQuantSnapshotImportedCodes`) guards this explicitly via
+                // `turboQuantRequireKeyScalesPerGroup`.
                 compressedKeys = TurboQuantAttentionCode(
                     layout: keyLayout,
                     preset: preset,
@@ -6407,6 +6431,15 @@ public final class RotatingTurboQuantKVCache: BaseKVCache, QuantizedKVCacheProto
                     valueHeadDimension: valueHeadDimension,
                     groupSize: groupSize
                 )
+                // T1.4 stage 1: scalesPerGroup omitted here defaults to 2 (the dieted K scale
+                // plane) regardless of newValue[4]'s actual last dim. This setter is non-throwing
+                // (a `state` property setter), so a stale 3-scale snapshot restored through this
+                // path is not rejected here; it fails closed at first compressed-attention use
+                // instead, where mlx-swift's `validateTurboQuantAttentionCode` throws "compressed
+                // attention scales per group ... does not match expected" (see
+                // TurboQuantValidation.swift). The primary, throwing restore path
+                // (`turboQuantSnapshotImportedCodes`) guards this explicitly via
+                // `turboQuantRequireKeyScalesPerGroup`.
                 compressedKeys = TurboQuantAttentionCode(
                     layout: keyLayout,
                     preset: preset,

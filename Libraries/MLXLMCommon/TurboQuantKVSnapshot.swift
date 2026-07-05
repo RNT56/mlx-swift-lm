@@ -55,7 +55,7 @@ public struct TurboQuantKVSnapshotArrayDescriptor: Hashable, Codable, Sendable {
 }
 
 public struct TurboQuantKVSnapshotManifest: Hashable, Codable, Sendable {
-    public static let currentSchemaVersion = 4
+    public static let currentSchemaVersion = 5
 
     public var schemaVersion: Int
     public var snapshotID: UUID

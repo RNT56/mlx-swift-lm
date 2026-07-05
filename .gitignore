@@ -106,3 +106,4 @@ scripts/__pycache__/
 pyproject.toml
 uv.lock
 main.py
+.build-ios/
