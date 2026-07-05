@@ -478,6 +478,14 @@ public struct TurboQuantAttentionDiagnostics: Equatable, Codable, Sendable {
     public var polarWHTKeyPayloadAllocated: Bool = false
     public var polarWHTValueBytes: Int = 0
     public var polarWHTValuePayloadAllocated: Bool = false
+    /// Count of rows appended through the fused quantize-append (P1-1) kernel.
+    /// Nil when the fused path is not applicable (e.g. non-affine caches).
+    public var fusedAppendCount: Int? = nil
+    /// Count of rows that fell back to the unfused ladder while the fused flag
+    /// was enabled because a guard did not hold.
+    public var fusedAppendFallbackCount: Int? = nil
+    /// First guard that blocked the fused path while it was enabled, if any.
+    public var fusedAppendFallbackReason: String? = nil
 }
 
 public struct TurboQuantKVCacheDiagnostics: Equatable, Codable, Sendable {

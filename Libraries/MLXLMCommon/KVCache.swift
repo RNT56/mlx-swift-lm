@@ -1469,6 +1469,18 @@ public final class AffineK8V4KVCache: BaseKVCache, NativeAffineK8V4KVCacheProtoc
     private var lastAttentionPath: TurboQuantAttentionPath
     private var lastAttentionFailureReason: String?
 
+    /// Opt-in fused quantize-append (P1-1). Default off; read once at init from
+    /// `TURBOQUANT_FUSED_QUANTIZE_APPEND`. With the flag unset the append path is
+    /// byte-identical to the historical ladder.
+    private let useFusedQuantizeAppend: Bool
+    /// Rows appended through the fused kernel this cache instance.
+    private var fusedAppendCount = 0
+    /// Rows that fell back to the unfused ladder while the flag was enabled.
+    private var fusedAppendFallbackCount = 0
+    /// First guard that blocked the fused path while it was enabled (first
+    /// occurrence wins; never overwritten once set).
+    private var fusedAppendFallbackReason: String?
+
     public private(set) var keyGroupSize: Int
     public private(set) var keyBits: Int
     public private(set) var valueGroupSize: Int
@@ -1505,7 +1517,8 @@ public final class AffineK8V4KVCache: BaseKVCache, NativeAffineK8V4KVCacheProtoc
         sparseValueRuntimeMode: TurboQuantRuntimeMode = .capacityTurboQuant,
         layerIndex: Int? = nil,
         boundaryProtectedLayerCount: Int = 0,
-        boundaryProtectionReason: String? = nil
+        boundaryProtectionReason: String? = nil,
+        fusedQuantizeAppend: Bool? = nil
     ) {
         precondition(keyBits == TurboQuantKVCodec.affineK8V4KeyBits, "Affine K8/Vx requires 8-bit keys")
         precondition(
@@ -1528,6 +1541,10 @@ public final class AffineK8V4KVCache: BaseKVCache, NativeAffineK8V4KVCacheProtoc
         self.layerIndex = layerIndex
         self.boundaryProtectedLayerCount = max(0, boundaryProtectedLayerCount)
         self.boundaryProtectionReason = boundaryProtectionReason
+        // Explicit override wins (tests); otherwise the process env toggle.
+        self.useFusedQuantizeAppend =
+            fusedQuantizeAppend
+            ?? TurboQuantRuntimeControl.enabled("TURBOQUANT_FUSED_QUANTIZE_APPEND")
         self.lastAttentionPath = (
             valueBits == TurboQuantKVCodec.affineK8V4ValueBits ? .affineK8V4Native
                 : residualsPerGroup > 0 ? .affineK8VxResidual : .affineK8VxNative
@@ -1730,6 +1747,93 @@ public final class AffineK8V4KVCache: BaseKVCache, NativeAffineK8V4KVCacheProtoc
         return ((requiredLength + step - 1) / step) * step
     }
 
+    /// (bits, groupSize) combinations the native fused kernel specializes for.
+    private static let fusedKeyGroupSizes: Set<Int> = [64, 128]
+    private static let fusedValueGroupSizes: Set<Int> = [32, 64, 128]
+
+    /// Attempts the native fused quantize-append (P1-1) for a single in-place
+    /// write of `steps` rows at `seqOffset`. Returns `nil` on success (after
+    /// reassigning the storage tuples and advancing `fusedAppendCount`), or a
+    /// short stable string naming the first guard that blocked the fused path.
+    /// The caller must have verified storage exists and the write fits; this
+    /// method re-checks cheaply and fails closed. On success the incoming
+    /// `keyBiases`/`valueBiases` are guaranteed present by the guards.
+    private func tryFusedQuantizeAppend(
+        keys: MLXArray,
+        values: MLXArray,
+        steps: Int,
+        seqOffset: Int
+    ) -> String? {
+        guard turboQuantNativeQuantizeAppendKVAvailable() else { return "nativeUnavailable" }
+        guard Device.defaultDevice().deviceType == .gpu else { return "notGPU" }
+        guard residualsPerGroup == 0 else { return "residualsEnabled" }
+        guard keyBits == 8, Self.fusedKeyGroupSizes.contains(keyGroupSize) else {
+            return "unsupportedKeyConfig"
+        }
+        guard valueBits == 4, Self.fusedValueGroupSizes.contains(valueGroupSize) else {
+            return "unsupportedValueConfig"
+        }
+        guard steps >= 1, steps <= 8 else { return "stepsOutOfRange" }
+        guard keys.ndim == 4, values.ndim == 4 else { return "unexpectedRank" }
+        guard keys.dim(-2) == steps, values.dim(-2) == steps else { return "stepShapeMismatch" }
+        let keyDim = keys.dim(-1)
+        let valueDim = values.dim(-1)
+        guard keyDim % keyGroupSize == 0, valueDim % valueGroupSize == 0 else {
+            return "groupSizeNotDivisible"
+        }
+        guard self.keys != nil, self.values != nil else { return "missingStorage" }
+        guard self.keys!.2 != nil, self.values!.2 != nil else { return "missingBiasesPlane" }
+        let capacityRows = self.keys!.0.dim(-2)
+        guard seqOffset >= 0, seqOffset + steps <= capacityRows else {
+            return "writeExceedsCapacity"
+        }
+
+        // Move the six storage planes out of `self` so that, at the op boundary,
+        // each plane is held by exactly one Swift binding (the call argument).
+        // The 3A-a lesson: a lingering second reference forces MLX to realloc the
+        // full-capacity buffer per token instead of donating it in place. Taking
+        // the tuples and nil-ing the stored optionals drops our references.
+        let takenKeys = self.keys!
+        let takenValues = self.values!
+        self.keys = nil
+        self.values = nil
+
+        let out:
+            (
+                kCodes: MLXArray, kScales: MLXArray, kBiases: MLXArray,
+                vCodes: MLXArray, vScales: MLXArray, vBiases: MLXArray
+            )
+        do {
+            out = try MLXFast.quantizeAppendKV(
+                keysNew: keys,
+                valuesNew: values,
+                kCodes: takenKeys.0,
+                kScales: takenKeys.1,
+                kBiases: takenKeys.2!,
+                vCodes: takenValues.0,
+                vScales: takenValues.1,
+                vBiases: takenValues.2!,
+                seqOffset: seqOffset,
+                steps: steps,
+                keyGroupSize: keyGroupSize,
+                keyBits: keyBits,
+                valueGroupSize: valueGroupSize,
+                valueBits: valueBits)
+        } catch {
+            // The native op validates synchronously at construction, so a throw
+            // means the planes were never mutated. Restore the storage we took
+            // and fall back to the unchanged ladder. Fail closed, observable.
+            self.keys = takenKeys
+            self.values = takenValues
+            return "nativeAppendThrew"
+        }
+
+        self.keys = (out.kCodes, out.kScales, out.kBiases)
+        self.values = (out.vCodes, out.vScales, out.vBiases)
+        fusedAppendCount += steps
+        return nil
+    }
+
     private func ensureStorage(
         batch: Int,
         kvHeads: Int,
@@ -1840,9 +1944,6 @@ public final class AffineK8V4KVCache: BaseKVCache, NativeAffineK8V4KVCacheProtoc
             )
         }
         rawFallbackCache = nil
-        let keyUpdate = quantizedTuple(keys, groupSize: keyGroupSize, bits: keyBits)
-        let valueUpdate = quantizedTuple(values, groupSize: valueGroupSize, bits: valueBits)
-        let residualUpdate = residualTuple(values, quantizedValues: valueUpdate)
 
         if capacity.map({ activeLength + steps <= $0 }) ?? true {
             ensureStorage(
@@ -1857,32 +1958,67 @@ public final class AffineK8V4KVCache: BaseKVCache, NativeAffineK8V4KVCacheProtoc
                 fatalError("AffineK8VxKVCache storage was not initialized")
             }
             let range = activeLength ..< (activeLength + steps)
-            self.keys!.0[.ellipsis, range, 0...] = keyUpdate.0
-            self.keys!.1[.ellipsis, range, 0...] = keyUpdate.1
-            if let keyBiases = keyUpdate.2 {
-                self.keys!.2![.ellipsis, range, 0...] = keyBiases
-            }
-            self.values!.0[.ellipsis, range, 0...] = valueUpdate.0
-            self.values!.1[.ellipsis, range, 0...] = valueUpdate.1
-            if let valueBiases = valueUpdate.2 {
-                self.values!.2![.ellipsis, range, 0...] = valueBiases
-            }
-            if let residualUpdate {
-                if valueResiduals == nil {
-                    valueResiduals = initResiduals(
-                        shape: [batch, kvHeads, tupleLength(self.values!)],
-                        groupCount: valueDim / valueGroupSize,
-                        dtype: values.dtype
-                    )
+            // P1-1 fused quantize-append: fold the two quantize + six slice-update
+            // writes into one native kernel. Opt-in; every guard failure is
+            // observable and falls through to the unchanged ladder below.
+            var fusedHandled = false
+            if useFusedQuantizeAppend {
+                if let reason = tryFusedQuantizeAppend(
+                    keys: keys,
+                    values: values,
+                    steps: steps,
+                    seqOffset: activeLength
+                ) {
+                    fusedAppendFallbackCount += 1
+                    if fusedAppendFallbackReason == nil {
+                        fusedAppendFallbackReason = reason
+                    }
+                    // tryFusedQuantizeAppend fails closed and leaves storage
+                    // either untouched or already restored; re-check below.
+                    guard self.keys != nil, self.values != nil else {
+                        fatalError("AffineK8VxKVCache storage was cleared by fused fallback")
+                    }
+                } else {
+                    fusedHandled = true
                 }
-                valueResiduals!.laneIndices[.ellipsis, range, 0...] = residualUpdate.laneIndices
-                valueResiduals!.values[.ellipsis, range, 0...] = residualUpdate.values
+            }
+            if !fusedHandled {
+                // Constructed only on the ladder path: the fused kernel quantizes
+                // internally, so building these nodes on fused success would keep
+                // the host-side op-construction cost the fused path exists to remove.
+                let keyUpdate = quantizedTuple(keys, groupSize: keyGroupSize, bits: keyBits)
+                let valueUpdate = quantizedTuple(values, groupSize: valueGroupSize, bits: valueBits)
+                let residualUpdate = residualTuple(values, quantizedValues: valueUpdate)
+                self.keys!.0[.ellipsis, range, 0...] = keyUpdate.0
+                self.keys!.1[.ellipsis, range, 0...] = keyUpdate.1
+                if let keyBiases = keyUpdate.2 {
+                    self.keys!.2![.ellipsis, range, 0...] = keyBiases
+                }
+                self.values!.0[.ellipsis, range, 0...] = valueUpdate.0
+                self.values!.1[.ellipsis, range, 0...] = valueUpdate.1
+                if let valueBiases = valueUpdate.2 {
+                    self.values!.2![.ellipsis, range, 0...] = valueBiases
+                }
+                if let residualUpdate {
+                    if valueResiduals == nil {
+                        valueResiduals = initResiduals(
+                            shape: [batch, kvHeads, tupleLength(self.values!)],
+                            groupCount: valueDim / valueGroupSize,
+                            dtype: values.dtype
+                        )
+                    }
+                    valueResiduals!.laneIndices[.ellipsis, range, 0...] = residualUpdate.laneIndices
+                    valueResiduals!.values[.ellipsis, range, 0...] = residualUpdate.values
+                }
             }
             activeLength += steps
         } else {
             // Capacity overflow is not the normal long-context benchmark path: it only
             // happens after the admitted window is exceeded. Preserve the configured
             // prefix and latest tail while keeping the hot update semantics correct.
+            let keyUpdate = quantizedTuple(keys, groupSize: keyGroupSize, bits: keyBits)
+            let valueUpdate = quantizedTuple(values, groupSize: valueGroupSize, bits: valueBits)
+            let residualUpdate = residualTuple(values, quantizedValues: valueUpdate)
             let currentKeys = getQuantizedState()?.0
             let currentValues = getQuantizedState()?.1
             let currentResiduals = getValueResidualTuple()
@@ -2062,7 +2198,7 @@ public final class AffineK8V4KVCache: BaseKVCache, NativeAffineK8V4KVCacheProtoc
                 capacity: keys.map(tupleLength) ?? activeLength
             )
             : .empty
-        return TurboQuantAttentionDiagnostics(
+        var diagnostics = TurboQuantAttentionDiagnostics(
             layerIndex: layerIndex,
             metalAttentionAvailable: availability.supportsMetalPolarQJLAttention,
             activeAttentionPath: lastAttentionPath,
@@ -2092,6 +2228,11 @@ public final class AffineK8V4KVCache: BaseKVCache, NativeAffineK8V4KVCacheProtoc
             keyGroupSize: keyGroupSize,
             valueGroupSize: valueGroupSize
         )
+        diagnostics.fusedAppendCount = useFusedQuantizeAppend ? fusedAppendCount : nil
+        diagnostics.fusedAppendFallbackCount =
+            useFusedQuantizeAppend ? fusedAppendFallbackCount : nil
+        diagnostics.fusedAppendFallbackReason = fusedAppendFallbackReason
+        return diagnostics
     }
 
     public func runtimeSnapshot() -> TurboQuantCacheRuntimeSnapshot {
@@ -2178,7 +2319,8 @@ public final class AffineK8V4KVCache: BaseKVCache, NativeAffineK8V4KVCacheProtoc
             sparseValueRuntimeMode: sparseValueRuntimeMode,
             layerIndex: layerIndex,
             boundaryProtectedLayerCount: boundaryProtectedLayerCount,
-            boundaryProtectionReason: boundaryProtectionReason
+            boundaryProtectionReason: boundaryProtectionReason,
+            fusedQuantizeAppend: useFusedQuantizeAppend
         )
         let s = state
         if !s.isEmpty {
