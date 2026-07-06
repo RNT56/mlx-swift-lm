@@ -223,6 +223,12 @@ struct QwenProofReport: Codable {
     var profileCoverage: [QwenProofProfileCoverage]
     var results: [QwenProofResult]
     var summary: QwenProofSummary
+    /// Provenance guardrails: this proof times synthetic (deterministic sinusoid)
+    /// attention shapes with no checkpoint loaded, so it is not real-model and not
+    /// production-certified. Emitted so consumers cannot mistake it for real-model
+    /// evidence. Defaulted so the synthesized memberwise init is unchanged.
+    var synthetic = true
+    var realModel = false
 }
 
 enum QwenProofAttentionPath: String, CaseIterable {
@@ -752,7 +758,7 @@ func dtypeName(_ dtype: DType) -> String {
 func certificationStatus(for gateScope: QwenProofGateScope) -> String {
     switch gateScope {
     case .production:
-        return "production-gated"
+        return "synthetic-microbench-not-production-certified"
     case .largeContextExperiment:
         return "experiment-only-not-production-certified"
     }
@@ -2189,6 +2195,8 @@ let report = QwenProofReport(
         strictPassed: strictPassed
     )
 )
+FileHandle.standardError.write(Data(
+    "SYNTHETIC KERNEL MICROBENCH — NOT real-model, NOT promotable (sinusoid K/V/Q, no checkpoint loaded)\n".utf8))
 let encoder = JSONEncoder()
 encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
 let data = try encoder.encode(report)

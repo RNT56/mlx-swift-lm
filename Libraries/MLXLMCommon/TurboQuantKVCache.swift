@@ -486,6 +486,12 @@ public struct TurboQuantAttentionDiagnostics: Equatable, Codable, Sendable {
     public var fusedAppendFallbackCount: Int? = nil
     /// First guard that blocked the fused path while it was enabled, if any.
     public var fusedAppendFallbackReason: String? = nil
+    /// Native (mlx-swift) dispatched-kernel counts captured across a timed decode
+    /// loop via `TurboQuantKernelDispatchTelemetry`. Proves which TurboQuant kernel
+    /// family actually ran (segmented/blockParallel vs throughput single-pass vs
+    /// coop). Nil when telemetry was not captured for this run. Defaulted so it is
+    /// auto-Codable and does not break existing call sites.
+    public var swiftDispatchedKernels: [String: Int]? = nil
 }
 
 public struct TurboQuantKVCacheDiagnostics: Equatable, Codable, Sendable {

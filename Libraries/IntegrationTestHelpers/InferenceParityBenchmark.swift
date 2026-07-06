@@ -143,6 +143,18 @@ public enum InferenceParityBenchmark {
         public let memoryStart: Memory.Snapshot
         public let memoryEnd: Memory.Snapshot
         public let peakActiveMemoryBytes: Int
+        /// Native (mlx-swift) dispatched-kernel counts captured across the timed
+        /// decode loop via `TurboQuantKernelDispatchTelemetry`. Proves which
+        /// TurboQuant kernel family actually ran (segmented/blockParallel compressed
+        /// vs throughput single-pass vs coop) so promotion cannot pass on a silent
+        /// throughput-bypass. Empty when telemetry was not captured.
+        public let dispatchedKernelCounts: [String: Int]
+        /// Fraction of distinct token ids over the generated sequence. A collapsed
+        /// (degenerate) decode approaches 0. Defaults to 1 when not measured.
+        public let distinctTokenRatio: Double
+        /// Longest run of identical consecutive token ids in the generated sequence.
+        /// A repetition-collapsed decode has a large run. Defaults to 0 when not measured.
+        public let maxTokenRunLength: Int
 
         public init(
             context: Int,
@@ -166,7 +178,10 @@ public enum InferenceParityBenchmark {
             estimatedConfigKVBytes: Int?,
             memoryStart: Memory.Snapshot,
             memoryEnd: Memory.Snapshot,
-            peakActiveMemoryBytes: Int
+            peakActiveMemoryBytes: Int,
+            dispatchedKernelCounts: [String: Int] = [:],
+            distinctTokenRatio: Double = 1,
+            maxTokenRunLength: Int = 0
         ) {
             self.context = context
             self.label = label
@@ -190,6 +205,9 @@ public enum InferenceParityBenchmark {
             self.memoryStart = memoryStart
             self.memoryEnd = memoryEnd
             self.peakActiveMemoryBytes = peakActiveMemoryBytes
+            self.dispatchedKernelCounts = dispatchedKernelCounts
+            self.distinctTokenRatio = distinctTokenRatio
+            self.maxTokenRunLength = maxTokenRunLength
         }
 
         public var estimatedMemoryReductionRatio: Double? {
@@ -324,6 +342,10 @@ public enum InferenceParityBenchmark {
         public let steadyActiveMemoryRatioToFP16: Double?
         public let peakActiveMemoryRatioToFP16: Double?
         public let fallbackReasons: [String]
+        /// Whether a `TQ_COOP=1` request actually engaged the coop kernel, and if not
+        /// why (native path taken / strided on the Swift path / inert below 32768).
+        /// Informational — does not by itself gate promotion. Nil when coop not requested.
+        public let coopEngagement: String?
     }
 
     public static func promotionGate(
@@ -465,7 +487,79 @@ public enum InferenceParityBenchmark {
         if measurement.sparseRequestedButInactive {
             blockReasons.append("Sparse-V requested but inactive")
         }
+        // No-silent-baseline engagement gate. A requested compressed turboQuant scheme
+        // MUST run a compressed decode kernel, not the throughput single-pass bypass.
+        // There are TWO legitimate compressed kernels: the native C++ kernel
+        // (activeAttentionPath == .nativeMLXCompressed, the default on Apple GPUs) and
+        // the Swift segmented path (only when MLX_TURBOQUANT_NATIVE_ATTENTION=0, where
+        // coop lives). Only a baseline/throughput bypass is illegitimate — and that is
+        // already blocked above via decodedFallbackPathActive/rawFallbackAllocated; this
+        // is the belt-and-suspenders check that also catches a throughput token.
+        let isCompressedTurboQuant =
+            config?.strategy == .turboQuant || config?.strategy == .adaptiveTurboQuant
+            || config?.strategy == .hybridTurboQuant
+        var coopEngagement: String? = nil
+        if isCompressedTurboQuant, !isAffineCompressedConfig {
+            let dispatched = measurement.dispatchedKernelCounts
+            let swiftSegmentedDispatched = dispatched.contains {
+                ($0.key.hasPrefix("segmented:") || $0.key.hasPrefix("blockParallel:")) && $0.value > 0
+            }
+            let nativeCompressedSelected = diagnostics.contains {
+                $0.activeAttentionPath == .nativeMLXCompressed
+            }
+            let compressedEngaged = swiftSegmentedDispatched || nativeCompressedSelected
+            let ranThroughput =
+                dispatched.contains { $0.key.contains("fused_decode") && $0.value > 0 }
+            if !compressedEngaged {
+                blockReasons.append(
+                    ranThroughput
+                        ? "requested compressed scheme ran throughput-mode single-pass (no compressed segmented kernel dispatched)"
+                        : "compressed decode kernel never dispatched (no segmented/blockParallel kernel recorded)"
+                )
+            }
+            // Coop engagement. Coop is an optional speed optimization on the Swift path,
+            // NOT a promotion requirement (the path is promotable on the native or
+            // strided kernel). Only a coop REGRESSION on the Swift path — strided ran
+            // where coop was requested + eligible — is a hard block. On the default
+            // native path coop is inert by design; record that so a native/strided
+            // result is never misattributed to coop, but do not block.
+            let coopRequested = ProcessInfo.processInfo.environment["TQ_COOP"] == "1"
+            if coopRequested && measurement.context >= 32_768 {
+                let coopDispatched = dispatched.contains { $0.key.contains("coop") && $0.value > 0 }
+                if coopDispatched {
+                    coopEngagement = "engaged (coop kernel dispatched)"
+                } else if swiftSegmentedDispatched {
+                    coopEngagement = "requested but strided ran on the Swift path"
+                    blockReasons.append(
+                        "TQ_COOP=1 and coop-eligible (context>=32768) but coop kernel did not dispatch (strided ran on the Swift path)"
+                    )
+                } else if nativeCompressedSelected {
+                    coopEngagement =
+                        "requested but native MLX attention path taken; coop only runs with MLX_TURBOQUANT_NATIVE_ATTENTION=0"
+                }
+            } else if coopRequested {
+                coopEngagement = "requested but inert (context<32768)"
+            }
+        }
         if isPromotableCandidate {
+            // Assertion 3 (entropy): a compressed candidate whose greedy decode
+            // collapsed into a near-single-token or long-repeat sequence is not a
+            // valid quality signal, regardless of tok/s.
+            if measurement.distinctTokenRatio < 0.1 || measurement.maxTokenRunLength > 32 {
+                blockReasons.append("generated text degenerate (entropy/repetition collapse)")
+            }
+            // Assertion 1 (compressed calls): when generation timing is on, a
+            // compressed candidate that recorded zero compressed attention calls
+            // never actually ran the compressed decode. Gated on timing != nil so
+            // it does not false-positive when timing is disabled.
+            if isCompressedTurboQuant,
+                let timing = measurement.generationTiming,
+                timing.compressedAttentionCalls == 0
+            {
+                blockReasons.append(
+                    "compressed decode kernel never dispatched (compressedAttentionCalls==0)"
+                )
+            }
             if let memoryReduction = measurement.estimatedMemoryReductionRatio {
                 if memoryReduction <= 1 {
                     blockReasons.append("resident KV compression ratio is not above 1.0x")
@@ -569,7 +663,8 @@ public enum InferenceParityBenchmark {
             speedRatioToAffineK8V4: speedRatioToAffineK8V4,
             steadyActiveMemoryRatioToFP16: steadyActiveMemoryRatioToFP16,
             peakActiveMemoryRatioToFP16: peakActiveMemoryRatioToFP16,
-            fallbackReasons: fallbackReasons
+            fallbackReasons: fallbackReasons,
+            coopEngagement: coopEngagement
         )
     }
 
@@ -1100,6 +1195,13 @@ public enum InferenceParityBenchmark {
             label: "turbo4v2",
             strategy: .turboQuant,
             preset: .turbo4v2,
+            precisionPolicy: denseTurboPolicy(preset: .turbo4v2)
+        ),
+        CacheConfig(
+            label: "turbo4v2Capacity",
+            strategy: .turboQuant,
+            preset: .turbo4v2,
+            runtimeMode: .capacityTurboQuant,
             precisionPolicy: denseTurboPolicy(preset: .turbo4v2)
         ),
         CacheConfig(
@@ -2188,18 +2290,44 @@ public enum InferenceParityBenchmark {
             if collectTurboQuantTiming {
                 TurboQuantTiming.reset()
             }
+            // Reset the always-on native dispatch counters immediately before the
+            // timed decode loop so the post-loop snapshot is exactly the kernels this
+            // run dispatched. This region MUST stay serial (a single synchronous
+            // `while iterator.next()` loop) — the counter delta is process-global, so
+            // a concurrent measureOne would contaminate the attribution.
+            TurboQuantKernelDispatchTelemetry.reset()
             let generationStart = Date.timeIntervalSinceReferenceDate
             var generated = 0
-            while iterator.next() != nil {
+            var generatedTokenIds: [Int] = []
+            while let tokenId = iterator.next() {
                 generated += 1
+                generatedTokenIds.append(tokenId)
             }
             let generationLoopEnd = Date.timeIntervalSinceReferenceDate
+            let dispatchedKernels = TurboQuantKernelDispatchTelemetry.snapshot()
             let synchronizationStart = generationLoopEnd
             Stream().synchronize()
             let synchronizationEnd = Date.timeIntervalSinceReferenceDate
             let generationTiming =
                 collectTurboQuantTiming ? TurboQuantTiming.snapshot() : nil
             let memoryEnd = Memory.snapshot()
+            // Assertion 3 support: sequence-degeneracy signals (entropy / repetition
+            // collapse). Cheap host-side pass over the captured ids.
+            let distinctTokenRatio =
+                Double(Set(generatedTokenIds).count)
+                / Double(Swift.max(1, generatedTokenIds.count))
+            var maxTokenRunLength = 0
+            var currentRunLength = 0
+            var previousTokenId: Int? = nil
+            for tokenId in generatedTokenIds {
+                if tokenId == previousTokenId {
+                    currentRunLength += 1
+                } else {
+                    currentRunLength = 1
+                    previousTokenId = tokenId
+                }
+                maxTokenRunLength = Swift.max(maxTokenRunLength, currentRunLength)
+            }
 
             guard generated > 0 else {
                 throw IntegrationTestFailure(
@@ -2240,7 +2368,10 @@ public enum InferenceParityBenchmark {
                 estimatedConfigKVBytes: kvEstimate?.configKVBytes,
                 memoryStart: memoryStart,
                 memoryEnd: memoryEnd,
-                peakActiveMemoryBytes: max(memoryEnd.peakMemory, memoryEnd.activeMemory)
+                peakActiveMemoryBytes: max(memoryEnd.peakMemory, memoryEnd.activeMemory),
+                dispatchedKernelCounts: dispatchedKernels,
+                distinctTokenRatio: distinctTokenRatio,
+                maxTokenRunLength: maxTokenRunLength
             )
         }
     }
@@ -2491,7 +2622,9 @@ public enum InferenceParityBenchmark {
         return nil
     }
 
-    private static func configuredParameters(
+    // Exposed at internal visibility (was `private`) so engagement/runtime-mode
+    // tests can assert the config -> GenerateParameters mapping directly.
+    static func configuredParameters(
         contextLength: Int,
         generateTokens: Int,
         config: CacheConfig
@@ -2530,6 +2663,13 @@ public enum InferenceParityBenchmark {
         }
         if let runtimeMode = config.runtimeMode {
             params.turboQuantRuntimeMode = runtimeMode
+        } else if config.strategy == .turboQuant || config.strategy == .hybridTurboQuant {
+            // Compressed turboQuant schemes must exercise the segmented compressed-decode
+            // path, not the throughput single-pass bypass. nil runtimeMode -> .auto ->
+            // (throughputFits on a Mac) -> ThroughputTurboQuantKVCache (baseline + rawFallback),
+            // so the compressed segmented kernel (where coop lives) never dispatches. Pin
+            // capacity so the path-under-test actually runs.
+            params.turboQuantRuntimeMode = .capacityTurboQuant
         }
         if let quantizedKVStart = config.quantizedKVStart {
             params.quantizedKVStart = quantizedKVStart

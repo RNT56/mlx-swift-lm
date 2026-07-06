@@ -483,6 +483,10 @@ public struct TurboQuantBenchResult: Codable, Sendable {
     public var plainKVBytes: Int
     /// plain ÷ compressed. > 1 ⟹ compressed smaller (the context-unlock metric).
     public var memoryReductionRatio: Double
+    /// Provenance guardrails: this row comes from a synthetic attention-shape sweep
+    /// (no checkpoint loaded), so it is not real-model and not promotable.
+    public var synthetic: Bool
+    public var realModel: Bool
 
     public init(
         label: String,
@@ -563,7 +567,9 @@ public struct TurboQuantBenchResult: Codable, Sendable {
         compressedValueBytes: Int? = nil,
         decodedActiveKVBytes: Int = 0,
         plainKVBytes: Int,
-        memoryReductionRatio: Double
+        memoryReductionRatio: Double,
+        synthetic: Bool = true,
+        realModel: Bool = false
     ) {
         self.label = label
         self.anchorLabel = anchorLabel
@@ -644,6 +650,8 @@ public struct TurboQuantBenchResult: Codable, Sendable {
         self.decodedActiveKVBytes = max(0, decodedActiveKVBytes)
         self.plainKVBytes = plainKVBytes
         self.memoryReductionRatio = memoryReductionRatio
+        self.synthetic = synthetic
+        self.realModel = realModel
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -726,6 +734,8 @@ public struct TurboQuantBenchResult: Codable, Sendable {
         case decodedActiveKVBytes
         case plainKVBytes
         case memoryReductionRatio
+        case synthetic
+        case realModel
     }
 
     public init(from decoder: Decoder) throws {
@@ -952,7 +962,9 @@ public struct TurboQuantBenchResult: Codable, Sendable {
                 forKey: .decodedActiveKVBytes
             ) ?? 0,
             plainKVBytes: try container.decode(Int.self, forKey: .plainKVBytes),
-            memoryReductionRatio: try container.decode(Double.self, forKey: .memoryReductionRatio)
+            memoryReductionRatio: try container.decode(Double.self, forKey: .memoryReductionRatio),
+            synthetic: try container.decodeIfPresent(Bool.self, forKey: .synthetic) ?? true,
+            realModel: try container.decodeIfPresent(Bool.self, forKey: .realModel) ?? false
         )
     }
 

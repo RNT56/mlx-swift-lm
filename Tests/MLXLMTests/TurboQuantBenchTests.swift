@@ -30,6 +30,8 @@ extension MLXRuntimeSwiftTests {
     @Suite struct TurboQuantBenchSuite {
 
         @Test func turboQuantAttentionContextSweep() throws {
+            FileHandle.standardError.write(Data(
+                "SYNTHETIC KERNEL MICROBENCH — NOT real-model, NOT promotable (sinusoid K/V/Q, no checkpoint loaded)\n".utf8))
             let runFullMatrix = ProcessInfo.processInfo.environment["TQ_BENCH"] == "1"
 
             let profile = try #require(
