@@ -524,7 +524,13 @@ public enum InferenceParityBenchmark {
             // native path coop is inert by design; record that so a native/strided
             // result is never misattributed to coop, but do not block.
             let coopRequested = ProcessInfo.processInfo.environment["TQ_COOP"] == "1"
-            if coopRequested && measurement.context >= 32_768 {
+            // Mirror the kernel gate's TQ_COOP_MIN_CONTEXT test override (mlx-swift
+            // turboQuantCooperativeQuadDecodeActive) so this check and the informational
+            // coopEngagement label agree with where coop can actually engage.
+            let coopMinContext =
+                ProcessInfo.processInfo.environment["TQ_COOP_MIN_CONTEXT"].flatMap { Int($0) }
+                ?? 32_768
+            if coopRequested && measurement.context >= coopMinContext {
                 let coopDispatched = dispatched.contains { $0.key.contains("coop") && $0.value > 0 }
                 if coopDispatched {
                     coopEngagement = "engaged (coop kernel dispatched)"
@@ -538,7 +544,7 @@ public enum InferenceParityBenchmark {
                         "requested but native MLX attention path taken; coop only runs with MLX_TURBOQUANT_NATIVE_ATTENTION=0"
                 }
             } else if coopRequested {
-                coopEngagement = "requested but inert (context<32768)"
+                coopEngagement = "requested but inert (context<\(coopMinContext))"
             }
         }
         if isPromotableCandidate {

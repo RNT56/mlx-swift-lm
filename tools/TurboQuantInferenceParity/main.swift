@@ -935,6 +935,11 @@ struct TurboQuantInferenceParityCLI {
             var valueGroupSize: Int?
             var residualCorrectionActive: Bool
             var nativeKernelKinds: [Int]
+            // TEST-ONLY observability: Swift segmented/block-parallel dispatched-kernel
+            // counts (captured around the timed decode loop). Proves whether the coop
+            // kernel (`..._coop..`/`..._coopw..`) actually ran. The Measurement already
+            // carries this; surface it in the report JSON for the coop A/B measurement.
+            var swiftDispatchedKernels: [String: Int]?
             var sparseSkippedTokens: Int
             var sparseTotalTokens: Int
             var sparseRecentTokenCount: Int
@@ -979,6 +984,8 @@ struct TurboQuantInferenceParityCLI {
             var peakActiveMemoryBytes: Int?
             var codecCounts: [String: Int]?
             var nativeKernelKinds: [Int]?
+            // TEST-ONLY observability: see ThroughputCell.swiftDispatchedKernels.
+            var swiftDispatchedKernels: [String: Int]?
             var sparseSkipRatio: Double?
             var sparseRequestedLayerCount: Int?
             var sparseActiveLayerCount: Int?
@@ -1206,6 +1213,8 @@ struct TurboQuantInferenceParityCLI {
                     valueGroupSize: measurement.valueGroupSize,
                     residualCorrectionActive: measurement.residualCorrectionActive,
                     nativeKernelKinds: measurement.nativeKernelKinds,
+                    swiftDispatchedKernels: measurement.dispatchedKernelCounts.isEmpty
+                        ? nil : measurement.dispatchedKernelCounts,
                     sparseSkippedTokens: measurement.sparseSkippedTokens,
                     sparseTotalTokens: measurement.sparseTotalTokens,
                     sparseRecentTokenCount: measurement.sparseRecentTokenCount,
@@ -1258,6 +1267,9 @@ struct TurboQuantInferenceParityCLI {
                     peakActiveMemoryBytes: measurement?.peakActiveMemoryBytes,
                     codecCounts: measurement?.codecCounts,
                     nativeKernelKinds: measurement?.nativeKernelKinds,
+                    swiftDispatchedKernels: (measurement?.dispatchedKernelCounts).flatMap {
+                        $0.isEmpty ? nil : $0
+                    },
                     sparseSkipRatio: measurement?.sparseSkipRatio,
                     sparseRequestedLayerCount: measurement?.sparseRequestedLayerCount,
                     sparseActiveLayerCount: measurement?.sparseActiveLayerCount,
