@@ -744,3 +744,27 @@ A "promote coop for Apple Silicon Mac on M2 Pro results" request triggered a rea
 **Finding A — coop is on a NON-DEFAULT path.** `TurboQuantKVCache.swift:3419-3430`: `supportsNative = optimizationPolicy != .conservative && nativeCompressedAttention && queries.dim(2) <= 8`. At decode (qLen=1) with native MLX attention ON (the default, `MLX_TURBOQUANT_NATIVE_ATTENTION=1`), compressed decode routes to the native C++ kernel (`nativeMLXCompressed`, kernelKind 3). The Swift segmented/coop path only runs with native attention explicitly DISABLED. So coop is triply-removed from production: Qwen3.5 affine-routed away from polarQJL, AND even on polarQJL models the default native path bypasses the Swift coop kernel. Real-model coop dispatch could NOT be captured (32K compressed prefill killed at ~60 min on this M2 Pro; needs `MLX_TURBOQUANT_NATIVE_ATTENTION=0` + a faster host / >60-min window).
 
 **Finding B — compressed decode is real-model-catastrophic at real contexts.** Qwen3-0.6B-8bit `turbo4v2Capacity` native @16K = **0.19 tok/s** (~70× slower than fp16's 13.28), peak 7.99 GB (vs fp16 4.97 GB); 32K compressed prefill did not complete in 60 min. Synthetic microbenches never showed this. This is the real-model reality the fixed harness now surfaces — the compressed path is not viable at these contexts on this host. Filed as a follow-up to investigate the capacity-mode compressed slowness/memory.
+
+> **CORRECTION 2026-07-10: Finding B's 0.19 tok/s is REFUTED — measurement artifact.** The 0.19
+> run used `--generate-tokens 4` + `--turboquant-timing`: with 4 decode tokens the one-time
+> post-prefill transient (dynamic conversion/materialization + timing instrumentation) dominates
+> the average. Same model/context/path re-measured with gen=64 and no timing flag:
+> **5.91 tok/s** (route16k-NATIVE, `artifacts/coop-realmodel-ab-20260706/`). Native compressed
+> @16K ≈ 0.3× fp16 — slow (the long-known PolarQJL speed picture), NOT 70×-catastrophic, NOT
+> non-viable. Methodology rule added to the list: decode-throughput claims need enough generated
+> tokens to amortize the post-prefill transient (gen>=32; gen=4 numbers are startup transients).
+
+### 2026-07-10: real-model coop @16K + routing verdict (campaign round 1)
+
+Overnight campaign (driver in `artifacts/coop-realmodel-ab-20260706/run_campaign.sh`, progress log ibid.) completed 3 runs before progressive machine degradation timed out the tail (see below). All three verified from primary JSONs; same model (Qwen3-0.6B-8bit), same context 16384, gen=64, engagement proven per run via `swiftDispatchedKernels`:
+
+| route | kernel | decode tok/s |
+|---|---|---|
+| Swift path, strided (`ab16k-r1-OFF`) | `..._rf1` ×1792 | 4.668 |
+| Swift path, coop (`ab16k-r1-ON`) | `coopw_..._rf1` ×1792 | 5.188 |
+| Native default (`route16k-NATIVE`) | native kind 3, no Swift kernels | 5.911 |
+
+1. **The coop win GROWS with context: +4.4% @8K → +11.1% @16K** (single round; direction/magnitude match the coalescing model). Coop is a genuinely good kernel on real weights.
+2. **The default native routing is CORRECT — no misrouting.** Native beats even coop'd Swift by +13.9% (and Swift-strided by +26.6%) at the same context. The Swift path is simply slower overall; shipping it (even with coop) would be a regression. The port-coalescing-to-native idea is only worth pursuing if the NATIVE kernel itself has uncoalesced-load headroom — unknown, needs a kernel-anatomy look, and the ceiling is modest (native is still ~0.3× fp16 @16K on this path).
+3. **Timeout cascade (machine-state artifact, not data):** after the first 3 runs (~2h), every subsequent run timed out — including an 8K native run (31 min; 8K Swift runs took ~10 min on a cool machine on 07-06). ~8h of continuous GPU load = progressive thermal/background degradation. Owed re-runs in small cooled batches: 16K round 2, native@8K, 4B `_coop` variant, bit-exactness leg, 32K pair.
+4. Scaffolding committed earlier same arc: mlx-swift `ba810dc` (TQ_COOP_MIN_CONTEXT) → mlx-swift-lm `116ccda` (swiftDispatchedKernels in report JSON + gate override consistency).
