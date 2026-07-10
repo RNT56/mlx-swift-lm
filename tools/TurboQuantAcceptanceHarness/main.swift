@@ -176,6 +176,12 @@ private struct SpecGateRow: Codable {
     var firstMismatch: Int
     var acceptanceRate: Double
     var tokensPerForward: Double
+    // Raw engagement counters from the speculative iterator (promotion rule:
+    // engagement must be provable from the artifact, not derived fields alone).
+    var speculativeRounds: Int
+    var acceptedDraftTokens: Int
+    var totalDraftTokens: Int
+    var modelForwards: Int
     var plain: ArmStats
     var spec: ArmStats
     var speedupSamples: [Double]
@@ -350,7 +356,10 @@ struct TurboQuantAcceptanceHarness {
                         let dt = Date.timeIntervalSinceReferenceDate - t0
                         return (toks, dt > 0 ? Double(toks.count) / dt : 0)
                     }
-                    func runSpec() throws -> (toks: [Int], tps: Double, acc: Double, fwd: Int) {
+                    func runSpec() throws -> (
+                        toks: [Int], tps: Double, acc: Double, fwd: Int,
+                        rounds: Int, accepted: Int, total: Int
+                    ) {
                         var it = try NgramSpeculativeTokenIterator(
                             input: LMInput(text: LMInput.Text(tokens: MLXArray(ids))),
                             model: ctx.model, parameters: greedyParams(),
@@ -362,7 +371,11 @@ struct TurboQuantAcceptanceHarness {
                         for _ in 0 ..< maxTokens { guard let t = it.next() else { break }; toks.append(t) }
                         Stream().synchronize()
                         let dt = Date.timeIntervalSinceReferenceDate - t0
-                        return (toks, dt > 0 ? Double(toks.count) / dt : 0, it.acceptanceRate, it.modelForwards)
+                        return (
+                            toks, dt > 0 ? Double(toks.count) / dt : 0, it.acceptanceRate,
+                            it.modelForwards, it.speculativeRounds, it.acceptedDraftTokens,
+                            it.totalDraftTokens
+                        )
                     }
 
                     var plainTps: [Double] = []
@@ -373,13 +386,20 @@ struct TurboQuantAcceptanceHarness {
                     var refSpec: [Int] = []
                     var lastAcc = 0.0
                     var lastFwd = 0
+                    var lastRounds = 0
+                    var lastAccepted = 0
+                    var lastTotal = 0
                     var peak = 0
                     for trial in 0 ..< abRepeats {
                         thermals.append(thermalStateString())
                         // Alternate which arm runs first to cancel first-position thermal/order bias.
                         let plainFirst = (trial % 2 == 0)
                         let p: (toks: [Int], tps: Double)
-                        let s: (toks: [Int], tps: Double, acc: Double, fwd: Int)
+                        let s:
+                            (
+                                toks: [Int], tps: Double, acc: Double, fwd: Int,
+                                rounds: Int, accepted: Int, total: Int
+                            )
                         if plainFirst {
                             p = try runPlain(); s = try runSpec()
                         } else {
@@ -390,6 +410,9 @@ struct TurboQuantAcceptanceHarness {
                         speedups.append(p.tps > 0 ? s.tps / p.tps : 0)
                         lastAcc = s.acc
                         lastFwd = s.fwd
+                        lastRounds = s.rounds
+                        lastAccepted = s.accepted
+                        lastTotal = s.total
                         if refPlain.isEmpty { refPlain = p.toks; refSpec = s.toks }
                         peak = Swift.max(peak, mlxActivePeakBytes().peak)
                     }
@@ -406,6 +429,10 @@ struct TurboQuantAcceptanceHarness {
                             byteIdentical: refPlain == refSpec, firstMismatch: firstMismatch,
                             acceptanceRate: lastAcc,
                             tokensPerForward: lastFwd > 0 ? Double(refSpec.count) / Double(lastFwd) : 0,
+                            speculativeRounds: lastRounds,
+                            acceptedDraftTokens: lastAccepted,
+                            totalDraftTokens: lastTotal,
+                            modelForwards: lastFwd,
                             plain: ArmStats(
                                 name: "plain", tokensPerSecSamples: plainTps,
                                 medianTokensPerSec: median(plainTps), ci95Lo: plainCI.lo, ci95Hi: plainCI.hi),
