@@ -1386,7 +1386,11 @@ extension MLXRuntimeSwiftTests {
         @Test func testResidualAffineK8VxAttentionRouteRecordsResidualPath() throws {
             try Device.withDefaultDevice(.cpu) {
                 setenv("MLX_TURBOQUANT_DISABLE_K8V4_NATIVE", "1", 1)
-                defer { unsetenv("MLX_TURBOQUANT_DISABLE_K8V4_NATIVE") }
+                turboQuantResetAffineK8V4NativeKillSwitchForTesting()
+                defer {
+                    unsetenv("MLX_TURBOQUANT_DISABLE_K8V4_NATIVE")
+                    turboQuantResetAffineK8V4NativeKillSwitchForTesting()
+                }
                 let cache = AffineK8V4KVCache(valueBits: 2, residualsPerGroup: 1)
                 let keys = MLXArray.ones([1, 1, 4, 64], dtype: .float32) * 0.1
                 let values = MLXArray((0 ..< 256).map { Float($0) / 128 }, [1, 1, 4, 64])

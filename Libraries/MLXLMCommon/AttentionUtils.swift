@@ -1897,7 +1897,8 @@ public func attentionWithKVStateThrowing(
                             keyBits: mixedCache.keyBits,
                             valueGroupSize: mixedCache.valueGroupSize,
                             valueBits: mixedCache.valueBits,
-                            sparseVThreshold: sparseVThreshold
+                            sparseVThreshold: sparseVThreshold,
+                            precheckedNativeSupported: nativeSupported
                         )
                     }
                 let nativePath: TurboQuantAttentionPath = (

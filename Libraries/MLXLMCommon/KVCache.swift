@@ -4481,6 +4481,42 @@ public func affineInt4NativeScaledDotProductAttention(
     )
 }
 
+/// Cached MLX_TURBOQUANT_DISABLE_K8V4_NATIVE kill switch. Reading the full
+/// environment dictionary bridges it on every attention call — measured at
+/// ~12 env bridges per decode token on the affine path (F4, affine-occupancy
+/// diagnosis 2026-07-10). The switch is process-lifetime in production; tests
+/// that toggle it at runtime must call
+/// `turboQuantResetAffineK8V4NativeKillSwitchForTesting()` after setenv/unsetenv.
+private final class TurboQuantAffineK8V4NativeKillSwitchCache: @unchecked Sendable {
+    static let shared = TurboQuantAffineK8V4NativeKillSwitchCache()
+    private let lock = NSLock()
+    private var cached: Bool
+
+    private init() {
+        cached = Self.read()
+    }
+
+    private static func read() -> Bool {
+        ProcessInfo.processInfo.environment["MLX_TURBOQUANT_DISABLE_K8V4_NATIVE"] == "1"
+    }
+
+    var disabled: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return cached
+    }
+
+    func resetForTesting() {
+        lock.lock()
+        cached = Self.read()
+        lock.unlock()
+    }
+}
+
+public func turboQuantResetAffineK8V4NativeKillSwitchForTesting() {
+    TurboQuantAffineK8V4NativeKillSwitchCache.shared.resetForTesting()
+}
+
 public func supportsNativeAffineK8V4ScaledDotProductAttention(
     queries: MLXArray,
     quantizedKeys: (MLXArray, MLXArray, MLXArray?),
@@ -4493,7 +4529,7 @@ public func supportsNativeAffineK8V4ScaledDotProductAttention(
     valueBits: Int = TurboQuantKVCodec.affineK8V4ValueBits
 ) -> Bool {
     let mask = normalizedQuantizedAttentionMask(mask)
-    if ProcessInfo.processInfo.environment["MLX_TURBOQUANT_DISABLE_K8V4_NATIVE"] == "1" {
+    if TurboQuantAffineK8V4NativeKillSwitchCache.shared.disabled {
         return false
     }
     guard Device.defaultDevice().deviceType == .gpu else {
@@ -4589,7 +4625,8 @@ public func mixedAffineK8V4ScaledDotProductAttention(
     keyBits: Int = TurboQuantKVCodec.affineK8V4KeyBits,
     valueGroupSize: Int = TurboQuantKVCodec.affineK8V4ValueGroupSize,
     valueBits: Int = TurboQuantKVCodec.affineK8V4ValueBits,
-    sparseVThreshold: Float? = nil
+    sparseVThreshold: Float? = nil,
+    precheckedNativeSupported: Bool? = nil
 ) throws -> MLXArray {
     let nativeMask = normalizedQuantizedAttentionMask(mask)
     let resolvedSparseVThreshold = sparseVThreshold.flatMap { $0 > 0 ? $0 : nil }
@@ -4603,18 +4640,25 @@ public func mixedAffineK8V4ScaledDotProductAttention(
             return false
         }
     }()
-    if sparseNativeSupported,
-        supportsNativeAffineK8V4ScaledDotProductAttention(
-        queries: queries,
-        quantizedKeys: quantizedKeys,
-        quantizedValues: quantizedValues,
-        mask: nativeMask,
-        sinks: sinks,
-        keyGroupSize: keyGroupSize,
-        keyBits: keyBits,
-        valueGroupSize: valueGroupSize,
-        valueBits: valueBits
-    ), let keyBiases = quantizedKeys.2, let valueBiases = quantizedValues.2 {
+    // F4 (affine-occupancy diagnosis 2026-07-10): the ~35-guard validation ran
+    // TWICE per attention call (once at the AttentionUtils call site, once
+    // here). Call sites that already validated pass the result through;
+    // standalone callers keep the full fail-closed check.
+    let nativeSupported =
+        precheckedNativeSupported
+        ?? supportsNativeAffineK8V4ScaledDotProductAttention(
+            queries: queries,
+            quantizedKeys: quantizedKeys,
+            quantizedValues: quantizedValues,
+            mask: nativeMask,
+            sinks: sinks,
+            keyGroupSize: keyGroupSize,
+            keyBits: keyBits,
+            valueGroupSize: valueGroupSize,
+            valueBits: valueBits
+        )
+    if sparseNativeSupported, nativeSupported,
+        let keyBiases = quantizedKeys.2, let valueBiases = quantizedValues.2 {
         if let resolvedSparseVThreshold {
             return try MLXFast.mixedQuantizedScaledDotProductAttention(
                 queries: queries,
