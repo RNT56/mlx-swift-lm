@@ -95,11 +95,13 @@ SHIPPING_EOS="${N7_SHIPPING_EOS:-248044}"
 SHIPPING_TAG="${N7_SHIPPING_TAG:-qwen3.5-2b-4bit}"
 
 # --- Bench parameters -----------------------------------------------------
-# Contexts span the crossover. 16K is the load-bearing promotion context. 32768
-# on a 16 GB Mac is expected to be memory-wall-confounded for Qwen3-4B FP16 KV
-# (N1); include it but read its number with the memory ceiling in mind. Drop it
-# via N7_LONG_TARGETS on a memory-constrained host.
-LONG_TARGETS="${N7_LONG_TARGETS:-8192,16384,32768}"
+# Contexts span the crossover. 16K is the load-bearing promotion context.
+# SAFETY (2026-07-12): default caps at 16384 — a 32768 fp16-KV arm on Qwen3-4B
+# hard-froze and rebooted a 16 GB host before the harness gained the memory
+# guard (now ported in). Only add 32768 via N7_LONG_TARGETS on hosts with
+# >= 32 GB unified memory; its number is memory-wall-confounded on 16 GB anyway
+# (N1).
+LONG_TARGETS="${N7_LONG_TARGETS:-8192,16384}"
 MAX_TOKENS="${N7_MAX_TOKENS:-256}"     # >= 64 so rounds accumulate (spec needs runway)
 NGRAM="${N7_NGRAM:-3}"
 MAX_PROPOSAL="${N7_MAX_PROPOSAL:-4}"

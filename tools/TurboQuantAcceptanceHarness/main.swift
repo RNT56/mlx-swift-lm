@@ -264,9 +264,33 @@ private func argInts(_ name: String, default def: [Int]) -> [Int] {
     return v.isEmpty ? def : v
 }
 
+/// Benchmark memory guard, ported from TurboQuantInferenceParity. Without it a
+/// long-context fp16-KV battery (e.g. Qwen3-4B at 32K prompts, 6 A/B repeats)
+/// wires enough unified GPU memory to freeze and reboot a 16 GB host — observed
+/// 2026-07-12. Caps apply identically to both arms so A/B comparisons stay fair;
+/// values echoed to stderr so artifacts record them. TQ_METAL_MEMORY_LIMIT_MB
+/// (default 60% of physical RAM, relaxed) and TQ_METAL_CACHE_LIMIT_MB (default
+/// 1024). Set -1 to disable a guard.
+func applyBenchmarkMemoryGuard() {
+    let env = ProcessInfo.processInfo.environment
+    func megabytes(_ name: String, default def: Int) -> Int {
+        env[name].flatMap { Int($0) } ?? def
+    }
+    let physicalMB = Int(ProcessInfo.processInfo.physicalMemory / (1024 * 1024))
+    let memoryMB = megabytes("TQ_METAL_MEMORY_LIMIT_MB", default: physicalMB * 60 / 100)
+    let cacheMB = megabytes("TQ_METAL_CACHE_LIMIT_MB", default: 1024)
+    if memoryMB >= 0 { GPU.set(memoryLimit: memoryMB * 1024 * 1024, relaxed: true) }
+    if cacheMB >= 0 { GPU.set(cacheLimit: cacheMB * 1024 * 1024) }
+    FileHandle.standardError.write(
+        Data(
+            "memory guard: metal memoryLimit=\(memoryMB >= 0 ? "\(memoryMB)MB (relaxed)" : "off") cacheLimit=\(cacheMB >= 0 ? "\(cacheMB)MB" : "off") physical=\(physicalMB)MB\n"
+                .utf8))
+}
+
 @main
 struct TurboQuantAcceptanceHarness {
     static func main() async throws {
+        applyBenchmarkMemoryGuard()
         if CommandLine.arguments.contains("--help") {
             print(
                 """
