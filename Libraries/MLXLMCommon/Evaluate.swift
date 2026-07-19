@@ -330,7 +330,11 @@ public struct GenerateParameters: Sendable {
         selfSpeculationMode: SelfSpeculationMode = .off,
         selfSpeculationNgram: Int = 3,
         selfSpeculationMaxProposalTokens: Int = 4,
-        selfSpeculationPrefetch: Bool = true,
+        // Default false: the P4 promotion campaign (2026-07-12, artifacts/
+        // n7-promotion-20260711/) found prefetch level-to-worse vs plain
+        // synchronous speculation with wider CIs; sync spec is what opt-in
+        // promptLookup users should get unless they explicitly ask for prefetch.
+        selfSpeculationPrefetch: Bool = false,
         selfSpeculationMinPromptTokens: Int = 8192
     ) {
         self.maxTokens = maxTokens

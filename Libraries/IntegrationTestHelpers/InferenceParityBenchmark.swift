@@ -384,6 +384,15 @@ public enum InferenceParityBenchmark {
         let polarWHTHybridPromotionEnabled =
             ProcessInfo.processInfo.environment["TURBOQUANT_ENABLE_POLARWHT_HYBRID_PROMOTION"]
             == "1"
+        // 2026-07-19 decision (campaign P3 caveat): turbo4v2 failed the quality
+        // tail bar on all 10 arms (p95 max-abs logit error 9.2-10.9 vs 2.0;
+        // top1=1.0, KL ~0.025 — greedy-stable, tail-distorted; codec property,
+        // not coop). Memory-reach only; unpromotable until a tail fix or a
+        // deliberate greedy-only bar re-scope.
+        let isTurbo4V2Config = config?.label.hasPrefix("turbo4v2") == true
+        let turbo4V2PromotionEnabled =
+            ProcessInfo.processInfo.environment["TURBOQUANT_ENABLE_TURBO4V2_PROMOTION"]
+            == "1"
         let isFullPolarWHTDiagnosticConfig =
             config?.label == "polarWHTV3" || config?.label == "polarWHTReferenceV3"
         let isHybridReferenceDiagnosticConfig = config?.label == "hybridK8PolarWHTV3Reference"
@@ -455,6 +464,11 @@ public enum InferenceParityBenchmark {
         if isHybridK8PolarWHTConfig && !polarWHTHybridPromotionEnabled {
             blockReasons.append(
                 "hybrid K8+PolarWHT-V is experimental; upstream published K8+V4 speed uses affine V, set TURBOQUANT_ENABLE_POLARWHT_HYBRID_PROMOTION=1 only for deliberate promotion runs"
+            )
+        }
+        if isTurbo4V2Config && !turbo4V2PromotionEnabled {
+            blockReasons.append(
+                "turbo4v2 is memory-reach only: quality tail exceeds the bar (p95 max-abs logit error 9.2-10.9 vs 2.0 on all 2026-07-10 arms; top1 stable); set TURBOQUANT_ENABLE_TURBO4V2_PROMOTION=1 only for a deliberate promotion run after a tail fix or bar re-scope"
             )
         }
         if config?.turboQuantBackend == .polarWHTReference {

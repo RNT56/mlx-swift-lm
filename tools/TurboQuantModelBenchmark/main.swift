@@ -440,6 +440,11 @@ func mlxDType(_ name: String) -> DType {
 }
 
 func gitCommit(_ relativePath: String) -> String {
+    #if !os(macOS)
+    // Process (NSTask) is unavailable on iOS; provenance capture is a
+    // macOS-host concern and the tool never runs on device.
+    return "unknown"
+    #else
     let process = Process()
     process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
     process.arguments = ["git", "-C", relativePath, "rev-parse", "HEAD"]
@@ -457,6 +462,7 @@ func gitCommit(_ relativePath: String) -> String {
     } catch {
         return "unknown"
     }
+    #endif
 }
 
 extension String {

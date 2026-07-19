@@ -196,7 +196,20 @@ private struct DiagnosticsOptions {
     var memoryProfileSource: String
 }
 
+private func firstResolvedGitCommit(_ relativePaths: [String]) -> String {
+    for path in relativePaths {
+        let commit = gitCommit(path)
+        if commit != "unknown" { return commit }
+    }
+    return "unknown"
+}
+
 private func gitCommit(_ relativePath: String) -> String {
+    #if !os(macOS)
+    // Process (NSTask) is unavailable on iOS; provenance capture is a
+    // macOS-host concern and the tool never runs on device.
+    return "unknown"
+    #else
     let process = Process()
     process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
     process.arguments = ["git", "-C", relativePath, "rev-parse", "HEAD"]
@@ -214,6 +227,7 @@ private func gitCommit(_ relativePath: String) -> String {
     } catch {
         return "unknown"
     }
+    #endif
 }
 
 private extension String {
@@ -1099,7 +1113,15 @@ struct TurboQuantInferenceParityCLI {
             generatedAt: ISO8601DateFormatter().string(from: Date()),
             repoCommits: [
                 "mlx-swift-lm": gitCommit("."),
-                "mlx-swift": gitCommit(".build/checkouts/mlx-swift"),
+                // Packages/ is the `swift package edit` override location and takes
+                // precedence over the pinned checkout when both exist.
+                "mlx-swift": firstResolvedGitCommit([
+                    "Packages/mlx-swift", ".build/checkouts/mlx-swift",
+                ]),
+                "mlx-submodule": firstResolvedGitCommit([
+                    "Packages/mlx-swift/Source/Cmlx/mlx",
+                    ".build/checkouts/mlx-swift/Source/Cmlx/mlx",
+                ]),
             ],
             run: RunMetadata(
                 commandLine: CommandLine.arguments,

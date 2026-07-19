@@ -28,6 +28,19 @@ if ! pmset -g batt | grep -q "AC Power"; then
   exit 3
 fi
 
+# Host-load guard (2026-07-19): a three-debts session ran into loadavg ~39
+# (Unity shader compilers + rustc) and produced drift-contaminated arms — the
+# fp16 negative control moved as much as the candidate. Timings on a loaded
+# host are invalid. Override threshold with TQ_BENCH_MAX_LOAD.
+NCPU=$(sysctl -n hw.ncpu)
+MAX_LOAD=${TQ_BENCH_MAX_LOAD:-$((NCPU / 2))}
+LOAD1=$(sysctl -n vm.loadavg | awk '{print $2}')
+if awk -v l="$LOAD1" -v m="$MAX_LOAD" 'BEGIN { exit !(l > m) }'; then
+  echo "REFUSED: 1-min loadavg $LOAD1 > $MAX_LOAD (host busy; benchmarks invalid)" | tee -a "$LOG" >&2
+  exit 5
+fi
+echo "BENCH LOAD  start=$LOAD1 (max $MAX_LOAD, ncpu $NCPU)" >> "$LOG"
+
 START_TS=$(date "+%Y-%m-%d %H:%M:%S")
 echo "BENCH START $START_TS :: $*" >> "$LOG"
 
