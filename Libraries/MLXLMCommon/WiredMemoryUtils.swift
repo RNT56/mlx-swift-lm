@@ -108,11 +108,16 @@ public enum WiredMemoryUtils {
                 kvGroupSize: parameters.kvGroupSize,
                 quantizedKVStart: parameters.quantizedKVStart,
                 kvCacheStrategy: parameters.kvCacheStrategy,
+                kvCodec: parameters.kvCodec,
                 turboQuantPreset: parameters.turboQuantPreset,
                 turboQuantBackend: parameters.turboQuantBackend,
                 turboQuantOptimizationPolicy: parameters.turboQuantOptimizationPolicy,
+                turboQuantFallbackPolicy: parameters.turboQuantFallbackPolicy,
                 turboQuantSeed: parameters.turboQuantSeed,
-                turboQuantValueBits: parameters.turboQuantValueBits
+                turboQuantValueBits: parameters.turboQuantValueBits,
+                turboQuantPrecisionPolicy: parameters.effectiveTurboQuantPrecisionPolicy,
+                turboQuantValueGroupSize: parameters.turboQuantValueGroupSize,
+                kvLayerPolicy: parameters.kvLayerPolicy
             )
             eval(result.logits)
         case .logits(let result):
@@ -122,11 +127,16 @@ public enum WiredMemoryUtils {
                 kvGroupSize: parameters.kvGroupSize,
                 quantizedKVStart: parameters.quantizedKVStart,
                 kvCacheStrategy: parameters.kvCacheStrategy,
+                kvCodec: parameters.kvCodec,
                 turboQuantPreset: parameters.turboQuantPreset,
                 turboQuantBackend: parameters.turboQuantBackend,
                 turboQuantOptimizationPolicy: parameters.turboQuantOptimizationPolicy,
+                turboQuantFallbackPolicy: parameters.turboQuantFallbackPolicy,
                 turboQuantSeed: parameters.turboQuantSeed,
-                turboQuantValueBits: parameters.turboQuantValueBits
+                turboQuantValueBits: parameters.turboQuantValueBits,
+                turboQuantPrecisionPolicy: parameters.effectiveTurboQuantPrecisionPolicy,
+                turboQuantValueGroupSize: parameters.turboQuantValueGroupSize,
+                kvLayerPolicy: parameters.kvLayerPolicy
             )
             eval(result.logits)
         }

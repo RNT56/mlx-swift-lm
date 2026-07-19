@@ -576,12 +576,14 @@ private enum Language {
                 config.layerTypes
                 ?? Array(repeating: "full_attention", count: config.numHiddenLayers)
 
-            return layerTypes.map { layerType in
+            return layerTypes.enumerated().map { layerIndex, layerType in
                 if layerType == "sliding_attention", let slidingWindow = config.slidingWindow {
                     return makeAttentionKVCache(
-                        parameters: parameters, maxKVSize: slidingWindow, keep: 0)
+                        parameters: parameters, maxKVSize: slidingWindow, keep: 0,
+                        layerIndex: layerIndex, layerCount: layerTypes.count)
                 } else {
-                    return makeAttentionKVCache(parameters: parameters)
+                    return makeAttentionKVCache(
+                        parameters: parameters, layerIndex: layerIndex, layerCount: layerTypes.count)
                 }
             }
         }
@@ -742,7 +744,24 @@ public class Mistral3VLM: Module, VLMModel, KVCacheDimensionProvider {
             imageSizes: imageSizes
         )
 
-        let logits = languageModel(inputIds, cache: cache, inputsEmbeds: embeddings)
+        var tokens = inputIds
+        if tokens.ndim == 1 { tokens = tokens.expandedDimensions(axis: 0) }
+        let prefillStepSize = windowSize ?? 512
+        let totalPositions = embeddings.dim(1)
+        var processed = 0
+        while totalPositions - processed > 1 {
+            let chunkLength = min(prefillStepSize, totalPositions - processed - 1)
+            let range = processed ..< (processed + chunkLength)
+            _ = languageModel(
+                tokens[0..., range], cache: cache,
+                inputsEmbeds: embeddings[0..., range, 0...])
+            asyncEval(cache)
+            processed += chunkLength
+        }
+        eval(cache)
+        let logits = languageModel(
+            tokens[0..., processed...], cache: cache,
+            inputsEmbeds: embeddings[0..., processed..., 0...])
         return .logits(.init(logits: logits))
     }
 

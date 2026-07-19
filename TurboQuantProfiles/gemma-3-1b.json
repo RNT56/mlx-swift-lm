@@ -1,5 +1,5 @@
 {
-  "schema_version": 2,
+  "schema_version": 4,
   "id": "gemma-3-1b",
   "exact_model_ids": [],
   "model_patterns": [
@@ -56,10 +56,10 @@
   "supported_value_head_dimensions": [
     256
   ],
-  "recommended_scheme": "turbo4v2",
+  "recommended_scheme": "turbo8",
   "fallback_scheme": "turbo3_5",
-  "key_bits": 3.5,
-  "value_bits": 4,
+  "key_bits": 8,
+  "value_bits": 8,
   "group_size": 64,
   "safe_mask_modes": [
     "none",
@@ -74,10 +74,10 @@
   "safe_context_length": 32768,
   "quality_profile": "balanced",
   "backend": "metalPolarQJL",
-  "optimization_policy": "preferThroughput",
+  "optimization_policy": "auto",
   "requires_metal_self_test": true,
   "requires_fused_attention_self_test": false,
-  "status": "experimental",
+  "status": "guarded",
   "source": "profile-audit-2026-05-23",
   "confidence": 0.75,
   "measured": {},
@@ -85,6 +85,7 @@
     "Uses ordinary MLX model weights; TurboQuant applies only to runtime KV-cache state.",
     "Measured quality and throughput fields are intentionally empty until reproduced on target hardware.",
     "Runtime shape checks and Metal self-tests remain authoritative.",
-    "Gemma 2/3/3n/4 profiles are config-backed experimental profiles; measured quality and throughput validation is still pending."
+    "Gemma 2/3/3n/4 profiles are config-backed experimental profiles; measured quality and throughput validation is still pending.",
+    "Physical A17 Pro evidence showed the 1B Gemma 3 text profile is quality and latency sensitive under 4-bit compressed attention; use turbo8 with exact initial prefill and raw-free decode while lower-bit modes remain guarded."
   ]
 }

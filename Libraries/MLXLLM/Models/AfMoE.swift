@@ -338,7 +338,7 @@ class AfMoEMoE: Module, UnaryLayer {
 
         // Apply experts
         var y = experts(x, inds)
-        y = (y * selectedScores[.ellipsis, .newAxis]).sum(axis: -2).asType(y.dtype)
+        y = weightedExpertSum(y, selectedScores).asType(y.dtype)
 
         // Add shared expert output
         if let sharedExperts = sharedExperts {
@@ -559,11 +559,21 @@ public class AfMoEModel: Module, LLMModel, KVCacheDimensionProvider {
 
     public func newCache(parameters: GenerateParameters?) -> [KVCache] {
         // Create cache based on layer type (rotating for sliding attention, simple for full attention)
-        layerUsesSliding.map { usesSliding in
+        layerUsesSliding.enumerated().map { index, usesSliding in
             if usesSliding {
-                makeAttentionKVCache(parameters: parameters, maxKVSize: slidingWindow, keep: 0)
+                makeAttentionKVCache(
+                    parameters: parameters,
+                    maxKVSize: slidingWindow,
+                    keep: 0,
+                    layerIndex: index,
+                    layerCount: layerUsesSliding.count
+                )
             } else {
-                makeAttentionKVCache(parameters: parameters)
+                makeAttentionKVCache(
+                    parameters: parameters,
+                    layerIndex: index,
+                    layerCount: layerUsesSliding.count
+                )
             }
         }
     }

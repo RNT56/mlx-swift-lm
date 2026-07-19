@@ -8,9 +8,9 @@ import MLX
 /// configuration while mapping to the concrete MLX-Swift cache backends.
 public enum TurboQuantScheme: String, Codable, Sendable, CaseIterable {
     case disabled
+    case turbo8
     case turbo4v2
     case turbo3_5
-    case turbo3
     case turbo2_5
 
     public init?(normalizing value: String) {
@@ -24,13 +24,16 @@ public enum TurboQuantScheme: String, Codable, Sendable, CaseIterable {
         switch normalized {
         case "none", "off", "disabled", "false":
             self = .disabled
+        case "turbo8", "turbo_8":
+            self = .turbo8
         case "turbo4", "turbo4v2", "turbo_4_v2":
             self = .turbo4v2
         case "turbo3_5", "turbo35", "turbo_3_5":
             self = .turbo3_5
-        case "turbo3", "turbo_3":
-            self = .turbo3
-        case "turbo2_5", "turbo25", "turbo_2_5":
+        // Legacy alias: `turbo3` advertised 3.0 key bits but always executed the
+        // turbo2_5 (2.5-bit) codec. Removed as a distinct case; the string still
+        // decodes to its real, honest scheme so persisted configs keep parsing.
+        case "turbo3", "turbo_3", "turbo2_5", "turbo25", "turbo_2_5":
             self = .turbo2_5
         default:
             return nil
@@ -60,11 +63,13 @@ public enum TurboQuantScheme: String, Codable, Sendable, CaseIterable {
 
     public var preset: TurboQuantPreset {
         switch self {
+        case .turbo8:
+            .turbo8
         case .disabled, .turbo4v2:
             .turbo4v2
         case .turbo3_5:
             .turbo3_5
-        case .turbo3, .turbo2_5:
+        case .turbo2_5:
             .turbo2_5
         }
     }
@@ -73,19 +78,47 @@ public enum TurboQuantScheme: String, Codable, Sendable, CaseIterable {
         switch self {
         case .disabled:
             nil
+        case .turbo8:
+            8
         case .turbo4v2, .turbo3_5:
             4
-        case .turbo3, .turbo2_5:
+        case .turbo2_5:
             2
+        }
+    }
+
+    public var defaultKeyBits: Double? {
+        switch self {
+        case .disabled:
+            nil
+        case .turbo8:
+            8
+        case .turbo4v2:
+            4
+        case .turbo3_5:
+            3.5
+        case .turbo2_5:
+            2.5
         }
     }
 
     public var defaultOptimizationPolicy: TurboQuantOptimizationPolicy {
         switch self {
-        case .disabled, .turbo4v2, .turbo3_5:
+        case .disabled, .turbo8:
             .auto
-        case .turbo3, .turbo2_5:
+        case .turbo4v2, .turbo3_5:
+            .conservative
+        case .turbo2_5:
             .preferMemory
+        }
+    }
+
+    public var requiresGuardedQualityValidation: Bool {
+        switch self {
+        case .disabled, .turbo8:
+            false
+        case .turbo4v2, .turbo3_5, .turbo2_5:
+            true
         }
     }
 }
@@ -106,8 +139,84 @@ public enum TurboQuantQualityProfile: String, Codable, Sendable, CaseIterable {
 
 public enum TurboQuantProfileStatus: String, Codable, Sendable, CaseIterable {
     case experimental
+    case guarded
     case validated
+    case verified
+    case certified
     case deprecated
+
+    public var isActive: Bool {
+        self != .deprecated
+    }
+
+    public var isDeviceEvidenceBacked: Bool {
+        switch self {
+        case .verified, .certified:
+            true
+        case .experimental, .guarded, .validated, .deprecated:
+            false
+        }
+    }
+
+    public var requiresGuardedFallbackDisclosure: Bool {
+        self == .guarded
+    }
+}
+
+public enum TurboQuantPrecisionSupportStatus: String, Codable, Sendable, CaseIterable {
+    case preferred
+    case guarded
+    case unsupported
+}
+
+public struct TurboQuantPrecisionCandidate: Codable, Equatable, Sendable {
+    public var scheme: TurboQuantScheme
+    public var keyBits: Double
+    public var valueBits: Int
+    public var optimizationPolicy: TurboQuantOptimizationPolicy
+    public var fallbackPolicy: TurboQuantFallbackPolicy
+    public var status: TurboQuantPrecisionSupportStatus
+    public var reason: String
+
+    public init(
+        scheme: TurboQuantScheme,
+        keyBits: Double,
+        valueBits: Int,
+        optimizationPolicy: TurboQuantOptimizationPolicy,
+        fallbackPolicy: TurboQuantFallbackPolicy,
+        status: TurboQuantPrecisionSupportStatus,
+        reason: String
+    ) {
+        self.scheme = scheme
+        self.keyBits = keyBits
+        self.valueBits = valueBits
+        self.optimizationPolicy = optimizationPolicy
+        self.fallbackPolicy = fallbackPolicy
+        self.status = status
+        self.reason = reason
+    }
+}
+
+public struct TurboQuantAffineK8VxPrecisionCandidate: Codable, Equatable, Sendable {
+    public var valueBits: Int
+    public var keyBits: Double
+    public var boundaryCachePrecision: TurboQuantBoundaryCachePrecision
+    public var status: TurboQuantPrecisionSupportStatus
+    public var reason: String
+
+    public init(
+        valueBits: Int,
+        keyBits: Double = 8,
+        boundaryCachePrecision: TurboQuantBoundaryCachePrecision = .affineK8V4,
+        status: TurboQuantPrecisionSupportStatus,
+        reason: String
+    ) {
+        self.valueBits = valueBits
+        self.keyBits = keyBits
+        self.boundaryCachePrecision = boundaryCachePrecision
+        self.status = status
+        self.reason = reason
+    }
 }
 
 public enum TurboQuantModelModality: String, Codable, Sendable, CaseIterable {
@@ -351,6 +460,9 @@ public struct TurboQuantProfileTurboQuantManifest: Codable, Equatable, Sendable 
     public var keyPreset: TurboQuantScheme
     public var valueBits: Int
     public var groupSize: Int
+    public var runtimeMode: TurboQuantRuntimeMode
+    public var precisionPolicy: TurboQuantKVPrecisionPolicy?
+    public var kvLayerPolicy: KVLayerPolicy?
     public var preferredPaths: [TurboQuantAttentionPath]
     public var fallbackPolicy: TurboQuantFallbackPolicy
 
@@ -359,6 +471,9 @@ public struct TurboQuantProfileTurboQuantManifest: Codable, Equatable, Sendable 
         keyPreset: TurboQuantScheme,
         valueBits: Int,
         groupSize: Int,
+        runtimeMode: TurboQuantRuntimeMode = .auto,
+        precisionPolicy: TurboQuantKVPrecisionPolicy? = nil,
+        kvLayerPolicy: KVLayerPolicy? = nil,
         preferredPaths: [TurboQuantAttentionPath] = [
             .onlineFused,
             .tiledOnlineFused,
@@ -372,8 +487,96 @@ public struct TurboQuantProfileTurboQuantManifest: Codable, Equatable, Sendable 
         self.keyPreset = keyPreset
         self.valueBits = valueBits
         self.groupSize = groupSize
+        self.runtimeMode = runtimeMode
+        self.precisionPolicy = precisionPolicy
+        self.kvLayerPolicy = kvLayerPolicy
         self.preferredPaths = preferredPaths
         self.fallbackPolicy = fallbackPolicy
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case layoutVersion
+        case keyPreset
+        case valueBits
+        case groupSize
+        case runtimeMode
+        case precisionPolicy
+        case kvLayerPolicy
+        case preferredPaths
+        case fallbackPolicy
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        let keyPreset = try container.decode(TurboQuantScheme.self, forKey: .keyPreset)
+        let valueBits = try container.decode(Int.self, forKey: .valueBits)
+        self.init(
+            layoutVersion: try container.decodeIfPresent(Int.self, forKey: .layoutVersion)
+                ?? TurboQuantAttentionLayout.currentVersion,
+            keyPreset: keyPreset,
+            valueBits: valueBits,
+            groupSize: try container.decodeIfPresent(Int.self, forKey: .groupSize) ?? 64,
+            runtimeMode: try container.decodeIfPresent(
+                TurboQuantRuntimeMode.self,
+                forKey: .runtimeMode
+            ) ?? .auto,
+            precisionPolicy: try container.decodeIfPresent(
+                TurboQuantKVPrecisionPolicy.self,
+                forKey: .precisionPolicy
+            ) ?? TurboQuantKVPrecisionPolicy.legacy(
+                preset: keyPreset.preset,
+                valueBits: valueBits
+            ),
+            kvLayerPolicy: try container.decodeIfPresent(
+                KVLayerPolicy.self,
+                forKey: .kvLayerPolicy
+            ),
+            preferredPaths: try container.decodeIfPresent(
+                [TurboQuantAttentionPath].self,
+                forKey: .preferredPaths
+            ) ?? [
+                .onlineFused,
+                .tiledOnlineFused,
+                .twoStageCompressed,
+                .mlxPackedFallback,
+                .baseline,
+            ],
+            fallbackPolicy: try container.decodeIfPresent(
+                TurboQuantFallbackPolicy.self,
+                forKey: .fallbackPolicy
+            ) ?? .compressedDecodeAllowed
+        )
+    }
+}
+
+public enum TurboQuantAffineInt4SelectionStatus: String, Codable, Sendable, CaseIterable {
+    case preferred
+    case guarded
+    case unsupported
+}
+
+public struct TurboQuantProfileAffineInt4Manifest: Codable, Equatable, Sendable {
+    public var bits: Int
+    public var groupSize: Int
+    public var selectionStatus: TurboQuantAffineInt4SelectionStatus
+    public var evidenceIds: [String]
+    public var attentionScale: Float?
+    public var fallbackCodec: TurboQuantKVCodec
+
+    public init(
+        bits: Int = TurboQuantKVCodec.affineInt4Bits,
+        groupSize: Int = TurboQuantKVCodec.affineInt4DefaultGroupSize,
+        selectionStatus: TurboQuantAffineInt4SelectionStatus = .unsupported,
+        evidenceIds: [String] = [],
+        attentionScale: Float? = nil,
+        fallbackCodec: TurboQuantKVCodec = .polarQJL
+    ) {
+        self.bits = bits
+        self.groupSize = groupSize
+        self.selectionStatus = selectionStatus
+        self.evidenceIds = evidenceIds
+        self.attentionScale = attentionScale
+        self.fallbackCodec = fallbackCodec
     }
 }
 
@@ -623,7 +826,15 @@ public struct TurboQuantModelDescriptor: Equatable, Sendable {
 }
 
 public struct TurboQuantProfile: Codable, Equatable, Identifiable, Sendable {
-    public static let currentSchemaVersion = 2
+    public static let currentSchemaVersion = 4
+    public static let guardedAffineK8V3ProtectedEdgeLayers = 5
+    public static let guardedAffineK8VxLegacyProtectedEdgeLayers = 2
+
+    public static func defaultAffineK8VxProtectedEdgeLayers(valueBits: Int) -> Int {
+        valueBits == 3
+            ? guardedAffineK8V3ProtectedEdgeLayers
+            : guardedAffineK8VxLegacyProtectedEdgeLayers
+    }
 
     public var schemaVersion: Int
     public var id: String
@@ -665,12 +876,14 @@ public struct TurboQuantProfile: Codable, Equatable, Identifiable, Sendable {
     public var confidence: Double?
     public var measured: TurboQuantProfileMeasurements
     public var modelFingerprint: TurboQuantModelFingerprint?
+    public var kvCodec: TurboQuantKVCodec
     public var turboQuant: TurboQuantProfileTurboQuantManifest
+    public var affineInt4: TurboQuantProfileAffineInt4Manifest?
     public var measuredOutcomes: [TurboQuantMeasuredOutcome]
     public var notes: [String]
 
     public init(
-        schemaVersion: Int = 2,
+        schemaVersion: Int = TurboQuantProfile.currentSchemaVersion,
         id: String,
         exactModelIDs: [String] = [],
         modelPatterns: [String],
@@ -710,7 +923,9 @@ public struct TurboQuantProfile: Codable, Equatable, Identifiable, Sendable {
         confidence: Double? = nil,
         measured: TurboQuantProfileMeasurements = TurboQuantProfileMeasurements(),
         modelFingerprint: TurboQuantModelFingerprint? = nil,
+        kvCodec: TurboQuantKVCodec = .polarQJL,
         turboQuant: TurboQuantProfileTurboQuantManifest? = nil,
+        affineInt4: TurboQuantProfileAffineInt4Manifest? = nil,
         measuredOutcomes: [TurboQuantMeasuredOutcome] = [],
         notes: [String] = []
     ) {
@@ -755,15 +970,108 @@ public struct TurboQuantProfile: Codable, Equatable, Identifiable, Sendable {
         self.confidence = confidence
         self.measured = measured
         self.modelFingerprint = modelFingerprint
+        self.kvCodec = kvCodec
+        let defaultPrecisionPolicy =
+            if Self.isQwen35Or36DefaultProfile(
+                id: id,
+                architecture: architecture,
+                modelTypes: self.modelTypes,
+                recommendedScheme: recommendedScheme
+            ) {
+                TurboQuantKVPrecisionPolicy.qwenQ4Default
+            } else {
+                TurboQuantKVPrecisionPolicy.legacy(
+                    preset: recommendedScheme.preset,
+                    valueBits: valueBits,
+                    boundary: Self.defaultBoundaryPolicy(
+                        id: id,
+                        architecture: architecture,
+                        modelTypes: self.modelTypes
+                    ),
+                    boundaryCachePrecision: .affineK8V4
+                )
+            }
         self.turboQuant =
             turboQuant
             ?? TurboQuantProfileTurboQuantManifest(
                 keyPreset: recommendedScheme,
                 valueBits: valueBits,
-                groupSize: groupSize
+                groupSize: groupSize,
+                runtimeMode: .auto,
+                precisionPolicy: defaultPrecisionPolicy
             )
+        self.affineInt4 = affineInt4
         self.measuredOutcomes = measuredOutcomes
         self.notes = notes
+    }
+
+    private static func isQwen35Or36DefaultProfile(
+        id: String,
+        architecture: String?,
+        modelTypes: [String],
+        recommendedScheme: TurboQuantScheme
+    ) -> Bool {
+        guard recommendedScheme == .turbo8 else { return false }
+        return isQwen35Or36Family(id: id, architecture: architecture, modelTypes: modelTypes)
+    }
+
+    private static func normalizedIdentifier(_ value: String?) -> String? {
+        value?
+            .lowercased()
+            .replacingOccurrences(of: "-", with: "_")
+            .replacingOccurrences(of: ".", with: "_")
+    }
+
+    private static func isQwen35Or36Family(
+        id: String,
+        architecture: String?,
+        modelTypes: [String]
+    ) -> Bool {
+        let normalizedID = id.lowercased()
+        if normalizedID.hasPrefix("qwen3.5-") || normalizedID.hasPrefix("qwen3.6-")
+            || normalizedID.hasPrefix("qwen3_5-") || normalizedID.hasPrefix("qwen3_6-")
+        {
+            return true
+        }
+        if normalizedIdentifier(architecture)?.hasPrefix("qwen3_5") == true
+            || normalizedIdentifier(architecture)?.hasPrefix("qwen3_6") == true
+        {
+            return true
+        }
+        return modelTypes.contains {
+            let normalized = normalizedIdentifier($0) ?? ""
+            return normalized.hasPrefix("qwen3_5") || normalized.hasPrefix("qwen3_6")
+        }
+    }
+
+    fileprivate static func defaultBoundaryPolicy(
+        id: String,
+        architecture: String?,
+        modelTypes: [String]
+    ) -> TurboQuantBoundaryPolicy {
+        if isQwen35Or36Family(id: id, architecture: architecture, modelTypes: modelTypes) {
+            return .protectedEdges(first: 1, last: 1)
+        }
+
+        let normalizedArchitecture = normalizedIdentifier(architecture) ?? ""
+        let normalizedModelTypes = modelTypes.map { normalizedIdentifier($0) ?? "" }
+        if normalizedArchitecture.hasPrefix("gemma3")
+            || normalizedArchitecture.hasPrefix("gemma4")
+            || normalizedModelTypes.contains(where: {
+                $0.hasPrefix("gemma3") || $0.hasPrefix("gemma4")
+            })
+        {
+            return .protectedEdges(first: 1, last: 1)
+        }
+        if normalizedArchitecture.hasPrefix("gemma2")
+            || normalizedArchitecture.hasPrefix("gemma")
+            || normalizedModelTypes.contains(where: {
+                $0.hasPrefix("gemma2") || $0 == "gemma" || $0.hasPrefix("gemma_")
+            })
+        {
+            return .protectedEdges(first: 2, last: 2)
+        }
+        return .profileDefault
     }
 
     enum CodingKeys: String, CodingKey {
@@ -807,7 +1115,9 @@ public struct TurboQuantProfile: Codable, Equatable, Identifiable, Sendable {
         case confidence
         case measured
         case modelFingerprint
+        case kvCodec
         case turboQuant
+        case affineInt4
         case measuredOutcomes
         case notes
     }
@@ -886,8 +1196,12 @@ public struct TurboQuantProfile: Codable, Equatable, Identifiable, Sendable {
                 ?? TurboQuantProfileMeasurements(),
             modelFingerprint: try container.decodeIfPresent(
                 TurboQuantModelFingerprint.self, forKey: .modelFingerprint),
+            kvCodec: try container.decodeIfPresent(TurboQuantKVCodec.self, forKey: .kvCodec)
+                ?? .polarQJL,
             turboQuant: try container.decodeIfPresent(
                 TurboQuantProfileTurboQuantManifest.self, forKey: .turboQuant),
+            affineInt4: try container.decodeIfPresent(
+                TurboQuantProfileAffineInt4Manifest.self, forKey: .affineInt4),
             measuredOutcomes: try container.decodeIfPresent(
                 [TurboQuantMeasuredOutcome].self, forKey: .measuredOutcomes) ?? [],
             notes: try container.decodeIfPresent([String].self, forKey: .notes) ?? []
@@ -927,21 +1241,292 @@ public struct TurboQuantProfile: Codable, Equatable, Identifiable, Sendable {
 
     public func applying(to parameters: GenerateParameters) -> GenerateParameters {
         var resolved = parameters
+        resolved.kvLayerPolicy = turboQuant.kvLayerPolicy
+        if kvCodec == .affineK8V4 || kvCodec == .affineK8Vx {
+            let affineValueBits = (
+                TurboQuantKVCodec.affineK8VxSupportedValueBits.contains(valueBits)
+                    ? valueBits : TurboQuantKVCodec.affineK8V4ValueBits
+            )
+            let usesLowerValueBits =
+                affineValueBits != TurboQuantKVCodec.affineK8V4ValueBits || kvCodec == .affineK8Vx
+            resolved.kvCodec = usesLowerValueBits ? .affineK8Vx : .affineK8V4
+            resolved.kvCacheStrategy = usesLowerValueBits ? .affineK8Vx : .affineK8V4
+            resolved.kvBits = TurboQuantKVCodec.affineK8V4KeyBits
+            resolved.kvGroupSize = TurboQuantKVCodec.affineK8V4KeyGroupSize
+            resolved.turboQuantBackend = .mlxPacked
+            resolved.turboQuantValueBits = affineValueBits
+            resolved.turboQuantPrecisionPolicy = turboQuant.precisionPolicy
+            resolved.turboQuantOptimizationPolicy = .preferThroughput
+            resolved.quantizedKVStart = max(
+                resolved.quantizedKVStart,
+                resolved.turboQuantRawSDPAThreshold
+            )
+            return resolved
+        }
+        if let affine = selectableAffineInt4Manifest {
+            resolved.kvCodec = .affineInt4
+            resolved.kvCacheStrategy = .affineInt4
+            resolved.kvBits = TurboQuantKVCodec.affineInt4Bits
+            resolved.kvGroupSize = affine.groupSize
+            resolved.turboQuantBackend = .mlxPacked
+            resolved.turboQuantValueBits = TurboQuantKVCodec.affineInt4Bits
+            resolved.quantizedKVStart = max(
+                resolved.quantizedKVStart,
+                resolved.turboQuantRawSDPAThreshold
+            )
+            return resolved
+        }
+        let usesPolarWHT = kvCodec == .polarWHT
+        resolved.kvCodec = usesPolarWHT ? .polarWHT : .polarQJL
         resolved.kvCacheStrategy = recommendedScheme.kvCacheStrategy
         resolved.kvGroupSize = groupSize
         resolved.turboQuantPreset = recommendedScheme.preset
-        resolved.turboQuantBackend = backend
+        if usesPolarWHT {
+            switch backend {
+            case .polarWHTReference, .metalPolarWHT:
+                resolved.turboQuantBackend = backend
+            default:
+                resolved.turboQuantBackend = .metalPolarWHT
+            }
+        } else {
+            resolved.turboQuantBackend = backend
+        }
+        resolved.turboQuantRuntimeMode = turboQuant.runtimeMode
         resolved.turboQuantOptimizationPolicy =
             optimizationPolicy == .auto
             ? recommendedScheme.defaultOptimizationPolicy
             : optimizationPolicy
         resolved.turboQuantValueBits = valueBits
+        if isQwen35Or36Family, recommendedScheme == .turbo8 {
+            resolved.turboQuantPrecisionPolicy = .qwenQ4Default
+        } else {
+            resolved.turboQuantPrecisionPolicy =
+                turboQuant.precisionPolicy
+                ?? TurboQuantKVPrecisionPolicy.legacy(
+                    preset: recommendedScheme.preset,
+                    valueBits: valueBits,
+                    boundary: Self.defaultBoundaryPolicy(
+                        id: id,
+                        architecture: architecture,
+                        modelTypes: modelTypes
+                    ),
+                    boundaryCachePrecision: .affineK8V4
+                )
+        }
+        resolved.turboQuantFallbackPolicy = turboQuant.fallbackPolicy
         warmTurboQuantAttentionKernelsIfAvailable()
         return resolved
     }
 
+    public var selectableAffineInt4Manifest: TurboQuantProfileAffineInt4Manifest? {
+        guard kvCodec == .affineInt4,
+            let affineInt4,
+            affineInt4.bits == TurboQuantKVCodec.affineInt4Bits
+        else {
+            return nil
+        }
+        switch affineInt4.selectionStatus {
+        case .preferred:
+            return affineInt4
+        case .guarded:
+            return TurboQuantRuntimeControl.enabled("TURBOQUANT_ENABLE_GUARDED_AFFINE_INT4")
+                || TurboQuantRuntimeControl.enabled("TURBOQUANT_BENCHMARK_AFFINE_INT4")
+                || TurboQuantRuntimeControl.enabled("TURBOQUANT_DEBUG_AFFINE_INT4")
+                || TurboQuantRuntimeControl.enabled("TURBOQUANT_FORCE_AFFINE_INT4")
+                || TurboQuantRuntimeControl.enabled("TURBOQUANT_FAST_AFFINE_INT4")
+                ? affineInt4 : nil
+        case .unsupported:
+            return nil
+        }
+    }
+
+    public var isQwen35Or36Family: Bool {
+        Self.isQwen35Or36Family(
+            id: id,
+            architecture: architecture,
+            modelTypes: modelTypes
+        )
+    }
+
+    public var precisionCandidates: [TurboQuantPrecisionCandidate] {
+        if isQwen35Or36Family {
+            return [
+                TurboQuantPrecisionCandidate(
+                    scheme: .turbo8,
+                    keyBits: 8,
+                    valueBits: 4,
+                    optimizationPolicy: .preferThroughput,
+                    fallbackPolicy: .compressedDecodeAllowed,
+                    status: .preferred,
+                    reason:
+                        "Qwen3.5/Qwen3.6 Wave 1 route: high-precision K with Turbo4V2 V and throughput/native SDPA when admitted."
+                ),
+                TurboQuantPrecisionCandidate(
+                    scheme: .turbo4v2,
+                    keyBits: 4,
+                    valueBits: 4,
+                    optimizationPolicy: .preferThroughput,
+                    fallbackPolicy: .compressedDecodeAllowed,
+                    status: .guarded,
+                    reason:
+                        "Guarded Qwen lower-bit fused candidate; must pass per-device proof before product promotion."
+                ),
+                TurboQuantPrecisionCandidate(
+                    scheme: .turbo3_5,
+                    keyBits: 3.5,
+                    valueBits: 4,
+                    optimizationPolicy: .preferThroughput,
+                    fallbackPolicy: .compressedDecodeAllowed,
+                    status: .guarded,
+                    reason:
+                        "Guarded Qwen lower-bit fused candidate; must pass per-device proof before product promotion."
+                ),
+            ]
+        }
+
+        return [
+            TurboQuantPrecisionCandidate(
+                scheme: recommendedScheme,
+                keyBits: keyBits,
+                valueBits: valueBits,
+                optimizationPolicy: optimizationPolicy,
+                fallbackPolicy: turboQuant.fallbackPolicy,
+                status: status == .deprecated ? .unsupported : .preferred,
+                reason: "Profile-declared production precision."
+            )
+        ]
+    }
+
+    public var affineK8VxPrecisionCandidates: [TurboQuantAffineK8VxPrecisionCandidate] {
+        guard isQwen35Or36Family else { return [] }
+        return [
+            TurboQuantAffineK8VxPrecisionCandidate(
+                valueBits: 4,
+                status: .preferred,
+                reason: "Current Qwen native affine baseline: K8/V4 remains the default throughput route."
+            ),
+            TurboQuantAffineK8VxPrecisionCandidate(
+                valueBits: 3,
+                status: .guarded,
+                reason: "Guarded high-K/lower-V experiment: K8/V3 with protected boundary layers."
+            ),
+            TurboQuantAffineK8VxPrecisionCandidate(
+                valueBits: 2,
+                status: .guarded,
+                reason: "Guarded high-K/lower-V experiment: K8/V2 with protected boundary layers."
+            ),
+        ]
+    }
+
+    public func applyingPrecisionCandidate(_ scheme: TurboQuantScheme) -> TurboQuantProfile? {
+        guard let candidate = precisionCandidates.first(where: { $0.scheme == scheme }),
+            candidate.status != .unsupported
+        else {
+            return nil
+        }
+        var profile = self
+        profile.recommendedScheme = candidate.scheme
+        profile.fallbackScheme = candidate.scheme == .turbo8 ? .turbo3_5 : .turbo8
+        profile.keyBits = candidate.keyBits
+        profile.valueBits = candidate.valueBits
+        profile.optimizationPolicy = candidate.optimizationPolicy
+        if isQwen35Or36Family, candidate.scheme != .turbo8 {
+            profile.kvCodec = .polarQJL
+        }
+        profile.turboQuant = TurboQuantProfileTurboQuantManifest(
+            keyPreset: candidate.scheme,
+            valueBits: candidate.valueBits,
+            groupSize: groupSize,
+            runtimeMode: .auto,
+            precisionPolicy: isQwen35Or36Family && candidate.scheme == .turbo8
+                ? .qwenQ4Default
+                : TurboQuantKVPrecisionPolicy.legacy(
+                    preset: candidate.scheme.preset,
+                    valueBits: candidate.valueBits,
+                    boundary: Self.defaultBoundaryPolicy(
+                        id: id,
+                        architecture: architecture,
+                        modelTypes: modelTypes
+                    ),
+                    boundaryCachePrecision: .affineK8V4
+                ),
+            kvLayerPolicy: profile.turboQuant.kvLayerPolicy,
+            fallbackPolicy: candidate.fallbackPolicy
+        )
+        if candidate.status == .guarded {
+            profile.status = .guarded
+        }
+        return profile
+    }
+
+    public func applyingAffineK8VxCandidate(
+        valueBits: Int,
+        boundaryCachePrecision: TurboQuantBoundaryCachePrecision = .affineK8V4,
+        firstProtectedLayers: Int? = nil,
+        lastProtectedLayers: Int? = nil
+    ) -> TurboQuantProfile? {
+        let resolvedValueBits = TurboQuantKVCodec.affineK8VxSupportedValueBits.contains(valueBits)
+            ? valueBits : TurboQuantKVCodec.affineK8V4ValueBits
+        guard let candidate = affineK8VxPrecisionCandidates.first(where: {
+            $0.valueBits == resolvedValueBits
+        }) else {
+            return nil
+        }
+        var profile = self
+        profile.recommendedScheme = .turbo8
+        profile.fallbackScheme = .turbo8
+        profile.keyBits = 8
+        profile.valueBits = resolvedValueBits
+        profile.kvCodec = resolvedValueBits == TurboQuantKVCodec.affineK8V4ValueBits
+            ? .affineK8V4 : .affineK8Vx
+        profile.optimizationPolicy = .preferThroughput
+        let first = max(
+            0,
+            firstProtectedLayers
+                ?? Self.defaultAffineK8VxProtectedEdgeLayers(valueBits: resolvedValueBits)
+        )
+        let last = max(
+            0,
+            lastProtectedLayers
+                ?? Self.defaultAffineK8VxProtectedEdgeLayers(valueBits: resolvedValueBits)
+        )
+        let boundary = TurboQuantBoundaryPolicy.protectedEdges(
+            first: first,
+            last: last
+        )
+        let layerPolicy = profile.modelFingerprint?.layerCount.map {
+            KVLayerPolicy.affineK8VxProtectedEdges(
+                layerCount: $0,
+                valueBits: resolvedValueBits,
+                boundaryCachePrecision: boundaryCachePrecision,
+                first: first,
+                last: last
+            )
+        }
+        profile.turboQuant = TurboQuantProfileTurboQuantManifest(
+            keyPreset: .turbo8,
+            valueBits: resolvedValueBits,
+            groupSize: groupSize,
+            runtimeMode: .auto,
+            precisionPolicy: TurboQuantKVPrecisionPolicy(
+                key: .affineQ8,
+                value: .compressed(bits: resolvedValueBits),
+                boundary: boundary,
+                boundaryCachePrecision: boundaryCachePrecision
+            ),
+            kvLayerPolicy: layerPolicy,
+            fallbackPolicy: candidate.status == .preferred
+                ? turboQuant.fallbackPolicy : .compressedDecodeAllowed
+        )
+        if candidate.status == .guarded {
+            profile.status = .guarded
+            profile.notes.append(candidate.reason)
+        }
+        return profile
+    }
+
     public func warmTurboQuantAttentionKernelsIfAvailable() {
-        guard recommendedScheme.kvCacheStrategy == .turboQuant,
+        guard recommendedScheme.kvCacheStrategy.canUseTurboQuant,
             !TurboQuantRuntimeControl.enabled("TURBOQUANT_DISABLE")
         else {
             return
@@ -961,7 +1546,7 @@ public struct TurboQuantProfile: Codable, Equatable, Identifiable, Sendable {
         requireMeasuredOutcomes: Bool = true
     ) -> TurboQuantProfileManifestValidation {
         var issues = [TurboQuantProfileManifestIssue]()
-        if schemaVersion != Self.currentSchemaVersion {
+        if schemaVersion < 1 || schemaVersion > Self.currentSchemaVersion {
             issues.append(
                 TurboQuantProfileManifestIssue(
                     profileID: id,
@@ -969,7 +1554,7 @@ public struct TurboQuantProfile: Codable, Equatable, Identifiable, Sendable {
                     kind: .unsupportedSchemaVersion,
                     expected: String(Self.currentSchemaVersion),
                     actual: String(schemaVersion),
-                    reason: "TurboQuant product manifests require schema version 2"
+                    reason: "TurboQuant product manifests require schema version 1...\(Self.currentSchemaVersion)"
                 )
             )
         }
@@ -1052,6 +1637,21 @@ public struct TurboQuantProfile: Codable, Equatable, Identifiable, Sendable {
                 )
             )
         }
+        if status.isDeviceEvidenceBacked,
+            turboQuant.precisionPolicy?.usesLowPrecisionKey == true,
+            measuredOutcomes.isEmpty
+        {
+            issues.append(
+                TurboQuantProfileManifestIssue(
+                    profileID: id,
+                    field: "turbo_quant.precision_policy.key",
+                    kind: .missingMeasuredOutcome,
+                    expected: "exact low-bit K evidence",
+                    actual: turboQuant.precisionPolicy?.key.rawValue,
+                    reason: "verified/certified profiles cannot downgrade K precision without exact device evidence"
+                )
+            )
+        }
         if turboQuant.preferredPaths.isEmpty {
             issues.append(
                 TurboQuantProfileManifestIssue(
@@ -1061,6 +1661,65 @@ public struct TurboQuantProfile: Codable, Equatable, Identifiable, Sendable {
                     reason: "at least one preferred runtime path is required"
                 )
             )
+        }
+        if let kvLayerPolicy = turboQuant.kvLayerPolicy {
+            for error in kvLayerPolicy.validationErrors(layerCount: modelFingerprint?.layerCount) {
+                issues.append(
+                    TurboQuantProfileManifestIssue(
+                        profileID: id,
+                        field: "turbo_quant.kv_layer_policy",
+                        kind: .inconsistentTurboQuantField,
+                        reason: error
+                    )
+                )
+            }
+        }
+        if kvCodec == .affineInt4 {
+            if let affineInt4 {
+                if affineInt4.bits != TurboQuantKVCodec.affineInt4Bits {
+                    issues.append(
+                        TurboQuantProfileManifestIssue(
+                            profileID: id,
+                            field: "affine_int4.bits",
+                            kind: .inconsistentTurboQuantField,
+                            expected: String(TurboQuantKVCodec.affineInt4Bits),
+                            actual: String(affineInt4.bits),
+                            reason: "Wave 4 affine KV profiles support int4 only"
+                        )
+                    )
+                }
+                if affineInt4.groupSize != 32 && affineInt4.groupSize != 64 {
+                    issues.append(
+                        TurboQuantProfileManifestIssue(
+                            profileID: id,
+                            field: "affine_int4.group_size",
+                            kind: .inconsistentTurboQuantField,
+                            expected: "32 or 64",
+                            actual: String(affineInt4.groupSize),
+                            reason: "native affine quantized SDPA supports affine group sizes 32 and 64"
+                        )
+                    )
+                }
+                if affineInt4.selectionStatus == .preferred && affineInt4.evidenceIds.isEmpty {
+                    issues.append(
+                        TurboQuantProfileManifestIssue(
+                            profileID: id,
+                            field: "affine_int4.evidence_ids",
+                            kind: .missingMeasuredOutcome,
+                            reason: "preferred affine int4 profiles require explicit evidence ids"
+                        )
+                    )
+                }
+            } else {
+                issues.append(
+                    TurboQuantProfileManifestIssue(
+                        profileID: id,
+                        field: "affine_int4",
+                        kind: .missingField,
+                        reason: "kv_codec=affine_int4 requires affine_int4 metadata"
+                    )
+                )
+            }
         }
         if requireMeasuredOutcomes && measuredOutcomes.isEmpty {
             issues.append(
@@ -1210,7 +1869,9 @@ public struct TurboQuantProfileRegistry: Sendable {
             .sorted { $0.lastPathComponent < $1.lastPathComponent }
             .map { url in
                 let data = try Data(contentsOf: url)
-                return try decoder.decode(TurboQuantProfile.self, from: data)
+                return applyingBundledProfileOptimizations(
+                    try decoder.decode(TurboQuantProfile.self, from: data)
+                )
             }
     }
 }
@@ -1311,9 +1972,9 @@ extension TurboQuantProfile {
         requireFingerprint: Bool = false
     ) -> [String] {
         var reasons = [String]()
-        if schemaVersion != Self.currentSchemaVersion {
+        if schemaVersion < 1 || schemaVersion > Self.currentSchemaVersion {
             reasons.append(
-                "schema version \(schemaVersion) is unsupported; expected \(Self.currentSchemaVersion)"
+                "schema version \(schemaVersion) is unsupported; expected 1...\(Self.currentSchemaVersion)"
             )
         }
         if turboQuant.layoutVersion != TurboQuantAttentionLayout.currentVersion {
@@ -1339,7 +2000,7 @@ extension TurboQuantProfile {
         if turboQuant.preferredPaths.isEmpty {
             reasons.append("TurboQuant preferred paths are required")
         }
-        if status == .deprecated {
+        if !status.isActive {
             reasons.append("profile is deprecated")
         }
 
@@ -1502,10 +2163,10 @@ extension TurboQuantProfile {
             )
         }
 
-        if schemaVersion != Self.currentSchemaVersion {
+        if schemaVersion < 1 || schemaVersion > Self.currentSchemaVersion {
             append(
                 "schema_version",
-                expected: String(Self.currentSchemaVersion),
+                expected: "1...\(Self.currentSchemaVersion)",
                 actual: String(schemaVersion)
             )
         }
@@ -1544,7 +2205,7 @@ extension TurboQuantProfile {
                 actual: "empty"
             )
         }
-        if status == .deprecated {
+        if !status.isActive {
             append("status", expected: "active", actual: status.rawValue)
         }
         if requireFingerprint, modelFingerprint == nil {
@@ -1800,6 +2461,10 @@ private let turboQuantProfileNotes = [
 ]
 
 private let commonSafeMasks: [TurboQuantMaskMode] = [.none, .causal]
+private let qualitySensitiveScheme = TurboQuantScheme.turbo8
+private let qualitySensitiveValueBits = 8
+private let qwen35ProductionScheme = TurboQuantScheme.turbo8
+private let qwen35ProductionValueBits = 4
 
 private let bundledProfileDefaultContextLengths = [4096, 8192, 16384, 32768, 65536]
 private let bundledProfile8KContextLengths = [4096, 8192]
@@ -1835,14 +2500,18 @@ private func bundledProfile(
     supportedExpertsPerToken: [Int] = [],
     supportedKeyHeadDimensions: [Int],
     supportedValueHeadDimensions: [Int]? = nil,
+    recommendedScheme: TurboQuantScheme = .turbo4v2,
+    fallbackScheme: TurboQuantScheme? = .turbo3_5,
     supportedContextLengths: [Int] = bundledProfileDefaultContextLengths,
     safeContextLength: Int? = 65536,
+    keyBits: Double? = nil,
+    valueBits: Int = 4,
     source: String? = "profile-audit-2026-05-23",
     confidence: Double? = nil,
     extraNotes: [String] = []
 ) -> TurboQuantProfile {
     TurboQuantProfile(
-        schemaVersion: 2,
+        schemaVersion: TurboQuantProfile.currentSchemaVersion,
         id: id,
         modelPatterns: patterns,
         includePatterns: includePatterns ?? patterns,
@@ -1861,6 +2530,10 @@ private func bundledProfile(
         supportedExpertsPerToken: supportedExpertsPerToken,
         supportedKeyHeadDimensions: supportedKeyHeadDimensions,
         supportedValueHeadDimensions: supportedValueHeadDimensions,
+        recommendedScheme: recommendedScheme,
+        fallbackScheme: fallbackScheme,
+        keyBits: keyBits ?? recommendedScheme.defaultKeyBits ?? 3.5,
+        valueBits: valueBits,
         safeMaskModes: commonSafeMasks,
         supportedContextLengths: supportedContextLengths,
         safeContextLength: safeContextLength,
@@ -1940,6 +2613,11 @@ private let bundledConservativeOptimizationProfileIDs: Set<String> = [
     "glm4-moe-lite"
 ]
 
+private let bundledGuardedProfileIDs: Set<String> = [
+    "gemma-3-1b",
+    "llama-3.2-3b",
+]
+
 private let bundledThroughputOptimizationProfileIDs: Set<String> = [
     "phi-2",
     "phi-3-mini",
@@ -1954,8 +2632,22 @@ private func defaultBundledOptimizationPolicy(
     if bundledConservativeOptimizationProfileIDs.contains(profile.id) {
         return .conservative
     }
+    if profile.recommendedScheme.requiresGuardedQualityValidation {
+        return .conservative
+    }
     if bundledThroughputOptimizationProfileIDs.contains(profile.id) {
         return .preferThroughput
+    }
+    if isQwen35Or36Profile(profile), profile.recommendedScheme == .turbo8,
+        profile.valueBits == 4
+    {
+        return .preferThroughput
+    }
+    if profile.recommendedScheme == .turbo8, profile.valueBits == 8 {
+        return .auto
+    }
+    if isDenseQwen35HybridProfile(profile) {
+        return .auto
     }
     if profile.modalities.contains(where: { $0 != .text }) {
         return .preferMemory
@@ -1983,6 +2675,24 @@ private func defaultBundledOptimizationPolicy(
     return .auto
 }
 
+private func isQwen35Or36Profile(_ profile: TurboQuantProfile) -> Bool {
+    let normalizedID = profile.id.lowercased()
+    guard normalizedID.hasPrefix("qwen3.5-") || normalizedID.hasPrefix("qwen3.6-") else {
+        return false
+    }
+    return true
+}
+
+private func isDenseQwen35HybridProfile(_ profile: TurboQuantProfile) -> Bool {
+    guard isQwen35Or36Profile(profile) else {
+        return false
+    }
+    let architecture = profile.architecture?.lowercased() ?? ""
+    return !architecture.contains("moe")
+        && profile.minRoutedExperts == nil
+        && profile.maxRoutedExperts == nil
+}
+
 private func applyingBundledProfileOptimizations(_ profile: TurboQuantProfile)
     -> TurboQuantProfile
 {
@@ -1995,6 +2705,42 @@ private func applyingBundledProfileOptimizations(_ profile: TurboQuantProfile)
         for: profile,
         safeContextLength: profile.safeContextLength
     )
+    if bundledGuardedProfileIDs.contains(profile.id)
+        || (isQwen35Or36Profile(profile) && profile.recommendedScheme == .turbo8)
+        || profile.recommendedScheme.requiresGuardedQualityValidation
+    {
+        profile.status = .guarded
+    }
+    if isQwen35Or36Profile(profile), profile.recommendedScheme == .turbo8 {
+        profile.valueBits = 4
+        profile.turboQuant.valueBits = 4
+        profile.turboQuant.runtimeMode = .auto
+        profile.turboQuant.precisionPolicy = .qwenQ4Default
+        if isDenseQwen35HybridProfile(profile) {
+            profile.kvCodec = .affineK8V4
+            profile.affineInt4 = TurboQuantProfileAffineInt4Manifest(
+                groupSize: TurboQuantKVCodec.affineInt4DefaultGroupSize,
+                selectionStatus: .guarded,
+                fallbackCodec: .polarQJL
+            )
+            profile.notes.append(
+                "Default speed-balanced path: native affine K8/V4 keeps keys at 8-bit and values at 4-bit using fused mixed quantized SDPA after the raw SDPA start threshold; affineInt4 remains an explicit maximum-throughput override and Polar/QJL TurboQuant remains the capacity fallback."
+            )
+        }
+    }
+    if var precisionPolicy = profile.turboQuant.precisionPolicy,
+        precisionPolicy.requiresBoundaryProtection
+    {
+        if precisionPolicy.boundary == .profileDefault {
+            precisionPolicy.boundary = TurboQuantProfile.defaultBoundaryPolicy(
+                id: profile.id,
+                architecture: profile.architecture,
+                modelTypes: profile.modelTypes
+            )
+        }
+        precisionPolicy.boundaryCachePrecision = .affineK8V4
+        profile.turboQuant.precisionPolicy = precisionPolicy
+    }
     return profile
 }
 
@@ -2105,7 +2851,9 @@ private let qwen35ModelTypes = ["qwen3_5", "qwen3_5_text"]
 private let qwen35MoEModelTypes = ["qwen3_5_moe", "qwen3_5_moe_text"]
 private let qwen35Modalities: [TurboQuantModelModality] = [.text, .visionText]
 private let qwen35ProfileNotes = [
-    "Qwen3.5 and Qwen3.6 profiles are config-backed with verified 256-dimensional key and value heads."
+    "Qwen3.5 and Qwen3.6 profiles are config-backed with verified 256-dimensional key and value heads.",
+    "Production Qwen3.5/Qwen3.6 profiles default to high-precision K with Turbo4V2 V under the Wave 1 runtime policy.",
+    "Symmetric low-bit K remains guarded proof-only; promote it per model/device after the Qwen proof pipeline passes quality, stop, memory, and throughput gates.",
 ]
 
 private let gemmaTextExcludePatterns =
@@ -2348,8 +3096,12 @@ private let bundledProfiles: [TurboQuantProfile] = [
         requiresModelType: true,
         requiresHeadDimensions: true,
         supportedKeyHeadDimensions: [256],
+        recommendedScheme: qualitySensitiveScheme,
+        valueBits: qualitySensitiveValueBits,
         confidence: 0.75,
-        extraNotes: gemmaProfileNotes
+        extraNotes: gemmaProfileNotes + [
+            "Physical A17 Pro evidence showed the 1B Gemma 3 text profile is quality and latency sensitive under 4-bit compressed attention; use turbo8 with exact initial prefill and raw-free decode while lower-bit modes remain guarded."
+        ]
     ),
     bundledProfile(
         id: "gemma-3-4b",
@@ -3298,8 +4050,12 @@ private let bundledProfiles: [TurboQuantProfile] = [
         requiresModelType: true,
         requiresHeadDimensions: true,
         supportedKeyHeadDimensions: [128],
+        recommendedScheme: qualitySensitiveScheme,
+        valueBits: qualitySensitiveValueBits,
         confidence: 0.85,
-        extraNotes: llamaProfileNotes
+        extraNotes: llamaProfileNotes + [
+            "Physical A17 Pro evidence showed Llama 3.2 3B can emit corrupted text under 4-bit compressed attention; use turbo8 with exact initial prefill and raw-free decode while lower-bit modes remain guarded."
+        ]
     ),
     bundledProfile(
         id: "llama-3.3-3b",
@@ -3571,6 +4327,8 @@ private let bundledProfiles: [TurboQuantProfile] = [
         requiresModelType: true,
         requiresHeadDimensions: true,
         supportedKeyHeadDimensions: [256],
+        recommendedScheme: qwen35ProductionScheme,
+        valueBits: qwen35ProductionValueBits,
         confidence: 0.85,
         extraNotes: qwen35ProfileNotes
     ),
@@ -3586,6 +4344,8 @@ private let bundledProfiles: [TurboQuantProfile] = [
         requiresModelType: true,
         requiresHeadDimensions: true,
         supportedKeyHeadDimensions: [256],
+        recommendedScheme: qwen35ProductionScheme,
+        valueBits: qwen35ProductionValueBits,
         confidence: 0.85,
         extraNotes: qwen35ProfileNotes
     ),
@@ -3601,6 +4361,8 @@ private let bundledProfiles: [TurboQuantProfile] = [
         requiresModelType: true,
         requiresHeadDimensions: true,
         supportedKeyHeadDimensions: [256],
+        recommendedScheme: qwen35ProductionScheme,
+        valueBits: qwen35ProductionValueBits,
         confidence: 0.85,
         extraNotes: qwen35ProfileNotes
     ),
@@ -3616,6 +4378,8 @@ private let bundledProfiles: [TurboQuantProfile] = [
         requiresModelType: true,
         requiresHeadDimensions: true,
         supportedKeyHeadDimensions: [256],
+        recommendedScheme: qwen35ProductionScheme,
+        valueBits: qwen35ProductionValueBits,
         confidence: 0.85,
         extraNotes: qwen35ProfileNotes
     ),
@@ -3631,6 +4395,8 @@ private let bundledProfiles: [TurboQuantProfile] = [
         requiresModelType: true,
         requiresHeadDimensions: true,
         supportedKeyHeadDimensions: [256],
+        recommendedScheme: qwen35ProductionScheme,
+        valueBits: qwen35ProductionValueBits,
         confidence: 0.8,
         extraNotes: qwen35ProfileNotes
     ),
@@ -3646,6 +4412,8 @@ private let bundledProfiles: [TurboQuantProfile] = [
         requiresModelType: true,
         requiresHeadDimensions: true,
         supportedKeyHeadDimensions: [256],
+        recommendedScheme: qwen35ProductionScheme,
+        valueBits: qwen35ProductionValueBits,
         confidence: 0.8,
         extraNotes: qwen35ProfileNotes
     ),
@@ -3661,6 +4429,8 @@ private let bundledProfiles: [TurboQuantProfile] = [
         requiresModelType: true,
         requiresHeadDimensions: true,
         supportedKeyHeadDimensions: [256],
+        recommendedScheme: qwen35ProductionScheme,
+        valueBits: qwen35ProductionValueBits,
         confidence: 0.65,
         extraNotes: qwen35ProfileNotes
     ),
@@ -3676,6 +4446,8 @@ private let bundledProfiles: [TurboQuantProfile] = [
         requiresModelType: true,
         requiresHeadDimensions: true,
         supportedKeyHeadDimensions: [256],
+        recommendedScheme: qwen35ProductionScheme,
+        valueBits: qwen35ProductionValueBits,
         confidence: 0.65,
         extraNotes: qwen35ProfileNotes
     ),
@@ -3691,6 +4463,8 @@ private let bundledProfiles: [TurboQuantProfile] = [
         requiresModelType: true,
         requiresHeadDimensions: true,
         supportedKeyHeadDimensions: [256],
+        recommendedScheme: qwen35ProductionScheme,
+        valueBits: qwen35ProductionValueBits,
         confidence: 0.75,
         extraNotes: qwen35ProfileNotes
     ),
@@ -3706,6 +4480,8 @@ private let bundledProfiles: [TurboQuantProfile] = [
         requiresModelType: true,
         requiresHeadDimensions: true,
         supportedKeyHeadDimensions: [256],
+        recommendedScheme: qwen35ProductionScheme,
+        valueBits: qwen35ProductionValueBits,
         confidence: 0.75,
         extraNotes: qwen35ProfileNotes
     ),
@@ -3722,6 +4498,8 @@ private let bundledProfiles: [TurboQuantProfile] = [
         requiresModelType: true,
         requiresHeadDimensions: true,
         supportedKeyHeadDimensions: [256],
+        recommendedScheme: qwen35ProductionScheme,
+        valueBits: qwen35ProductionValueBits,
         confidence: 0.65,
         extraNotes: qwen35ProfileNotes
     ),
@@ -3737,6 +4515,8 @@ private let bundledProfiles: [TurboQuantProfile] = [
         requiresModelType: true,
         requiresHeadDimensions: true,
         supportedKeyHeadDimensions: [256],
+        recommendedScheme: qwen35ProductionScheme,
+        valueBits: qwen35ProductionValueBits,
         confidence: 0.7,
         extraNotes: qwen35ProfileNotes
     ),
@@ -3752,6 +4532,8 @@ private let bundledProfiles: [TurboQuantProfile] = [
         requiresModelType: true,
         requiresHeadDimensions: true,
         supportedKeyHeadDimensions: [256],
+        recommendedScheme: qwen35ProductionScheme,
+        valueBits: qwen35ProductionValueBits,
         confidence: 0.65,
         extraNotes: qwen35ProfileNotes
     ),

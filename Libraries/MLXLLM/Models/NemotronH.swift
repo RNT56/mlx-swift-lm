@@ -180,7 +180,7 @@ private class NemotronHMamba2Mixer: Module, NemotronHMixer {
         if let cache {
             let end = padded.dim(1)
             let start = max(0, end - (convKernelSize - 1))
-            cache[0] = padded[0..., start ..< end, 0...]
+            cache[0] = contiguous(padded[0..., start ..< end, 0...])
         }
 
         let convOutput = conv1d(padded)
@@ -232,6 +232,7 @@ private class NemotronHMamba2Mixer: Module, NemotronHMixer {
 
         if let cache {
             cache[1] = nextState
+            cache.advance(hiddenStates.dim(1))
         }
 
         let flattenedY = y.flattened(start: 2)
@@ -527,7 +528,7 @@ private class NemotronHMoE: Module, UnaryLayer, NemotronHMixer {
     func callAsFunction(_ x: MLXArray) -> MLXArray {
         let (inds, scores) = gate(x)
         var y = switchMLP(x, inds)
-        y = (y * scores[.ellipsis, .newAxis]).sum(axis: -2).asType(y.dtype)
+        y = weightedExpertSum(y, scores).asType(y.dtype)
 
         if let sharedExperts {
             y = y + sharedExperts(x)
@@ -740,13 +741,14 @@ public class NemotronHModel: Module, LLMModel, KVCacheDimensionProvider, LoRAMod
 
     public func newCache(parameters: GenerateParameters?) -> [KVCache] {
         let pattern = Array(configuration.hybridOverridePattern)
-        return pattern.compactMap { char -> KVCache? in
+        return pattern.enumerated().compactMap { layerIndex, char -> KVCache? in
             let blockType = NemotronHBlockType(from: char)
             switch blockType {
             case .mamba:
                 return MambaCache()
             case .attention:
-                return makeAttentionKVCache(parameters: parameters)
+                return makeAttentionKVCache(
+                    parameters: parameters, layerIndex: layerIndex, layerCount: pattern.count)
             case .mlp, .moe:
                 return nil  // No cache needed for MLP/MoE layers
             }

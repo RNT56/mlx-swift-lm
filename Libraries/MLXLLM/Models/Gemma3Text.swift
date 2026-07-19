@@ -184,6 +184,18 @@ class Gemma3Attention: Module {
         mask: MLXFast.ScaledDotProductAttentionMaskMode,
         cache: KVCache? = nil
     ) -> MLXArray {
+        do {
+            return try callThrowing(x, mask: mask, cache: cache)
+        } catch {
+            nonThrowingLanguageModelRuntimeFailure(error, owner: type(of: self))
+        }
+    }
+
+    func callThrowing(
+        _ x: MLXArray,
+        mask: MLXFast.ScaledDotProductAttentionMaskMode,
+        cache: KVCache? = nil
+    ) throws -> MLXArray {
         let (B, L, _) = (x.dim(0), x.dim(1), x.dim(2))
 
         var queries = queryProj(x)
@@ -201,14 +213,14 @@ class Gemma3Attention: Module {
         queries = applyRotaryPosition(rope, to: queries, offset: offset)
         keys = applyRotaryPosition(rope, to: keys, offset: offset)
 
-        let output = attentionWithCacheUpdate(
+        let output = try attentionWithCacheUpdateReturningStateThrowing(
             queries: queries,
             keys: keys,
             values: values,
             cache: cache,
             scale: scale,
             mask: mask
-        )
+        ).output
         .transposed(0, 2, 1, 3)
         .reshaped(B, L, -1)
         return outputProj(output)
@@ -270,8 +282,20 @@ class Gemma3TransformerBlock: Module {
         mask: MLXFast.ScaledDotProductAttentionMaskMode,
         cache: KVCache? = nil
     ) -> MLXArray {
+        do {
+            return try callThrowing(x, mask: mask, cache: cache)
+        } catch {
+            nonThrowingLanguageModelRuntimeFailure(error, owner: type(of: self))
+        }
+    }
+
+    func callThrowing(
+        _ x: MLXArray,
+        mask: MLXFast.ScaledDotProductAttentionMaskMode,
+        cache: KVCache? = nil
+    ) throws -> MLXArray {
         let inputNorm = inputLayerNorm(x)
-        let r = selfAttention(inputNorm, mask: mask, cache: cache)
+        let r = try selfAttention.callThrowing(inputNorm, mask: mask, cache: cache)
         let attnNorm = postAttentionLayerNorm(r)
         let h = Gemma.clipResidual(x, attnNorm)
         let preMLPNorm = preFeedforwardLayerNorm(h)
@@ -312,6 +336,17 @@ public class Gemma3Model: Module {
     )
         -> MLXArray
     {
+        do {
+            return try callThrowing(inputs, mask: mask, cache: cache)
+        } catch {
+            nonThrowingLanguageModelRuntimeFailure(error, owner: type(of: self))
+        }
+    }
+
+    func callThrowing(
+        _ inputs: MLXArray, mask: MLXFast.ScaledDotProductAttentionMaskMode? = nil,
+        cache: [KVCache?]? = nil
+    ) throws -> MLXArray {
         var h: MLXArray
         h = embedTokens(inputs)
         let scale = MLXArray(sqrt(Float(config.hiddenSize)), dtype: .bfloat16)
@@ -332,13 +367,13 @@ public class Gemma3Model: Module {
         for (i, layer) in layers.enumerated() {
             let isGlobal = (i % config.slidingWindowPattern == config.slidingWindowPattern - 1)
             let mask = isGlobal ? globalMask : slidingWindowMask
-            h = layer(h, mask: mask, cache: layerCache?[i])
+            h = try layer.callThrowing(h, mask: mask, cache: layerCache?[i])
         }
         return norm(h)
     }
 }
 
-public class Gemma3TextModel: Module, LLMModel {
+public class Gemma3TextModel: Module, LLMModel, ThrowingLanguageModel {
 
     @ModuleInfo public var model: Gemma3Model
     @ModuleInfo(key: "lm_head") var lmHead: Linear
@@ -354,7 +389,15 @@ public class Gemma3TextModel: Module, LLMModel {
     }
 
     public func callAsFunction(_ inputs: MLXArray, cache: [KVCache]? = nil) -> MLXArray {
-        var out = model(inputs, mask: nil, cache: cache)
+        do {
+            return try callAsFunctionThrowing(inputs, cache: cache)
+        } catch {
+            nonThrowingLanguageModelRuntimeFailure(error, owner: type(of: self))
+        }
+    }
+
+    public func callAsFunctionThrowing(_ inputs: MLXArray, cache: [KVCache]?) throws -> MLXArray {
+        var out = try model.callThrowing(inputs, mask: nil, cache: cache)
         out = lmHead(out)
         return out
     }
@@ -397,13 +440,32 @@ public class Gemma3TextModel: Module, LLMModel {
         var caches = [KVCache]()
         let slidingWindow = config.slidingWindow
         let slidingWindowPattern = config.slidingWindowPattern
+        let globalLayerCount = (0 ..< config.hiddenLayers).filter {
+            $0 % slidingWindowPattern == slidingWindowPattern - 1
+        }.count
+        var globalLayerIndex = 0
 
         for i in 0 ..< config.hiddenLayers {
             let isGlobalLayer = (i % slidingWindowPattern == slidingWindowPattern - 1)
 
             if isGlobalLayer {
-                if parameters?.kvCacheStrategy == .turboQuant {
-                    caches.append(makeAttentionKVCache(parameters: parameters))
+                let boundaryLayerIndex = globalLayerIndex
+                globalLayerIndex += 1
+                // Use the same gate makeAttentionKVCache uses internally so .hybridTurboQuant
+                // (and .turboQuant) get a compressed cache on the global — i.e. memory-critical,
+                // non-sliding — layers. The prior `== .turboQuant` exact check silently routed
+                // .hybridTurboQuant to an uncompressed StandardKVCache here, defeating TurboQuant
+                // on exactly the layers that dominate long-context KV memory. .adaptiveTurboQuant
+                // and the no-strategy case correctly fall through (they start raw).
+                if parameters?.kvCacheStrategy.createsTurboQuantCacheImmediately == true {
+                    caches.append(
+                        makeAttentionKVCache(
+                            parameters: parameters,
+                            layerIndex: i,
+                            layerCount: config.hiddenLayers,
+                            boundaryLayerIndex: boundaryLayerIndex,
+                            boundaryLayerCount: globalLayerCount
+                        ))
                 } else {
                     // For global layers, use standard cache but with reasonable step size for long sequences
                     let cache = StandardKVCache()
@@ -413,7 +475,9 @@ public class Gemma3TextModel: Module, LLMModel {
             } else {
                 caches.append(
                     makeAttentionKVCache(
-                        parameters: parameters, maxKVSize: slidingWindow, keep: 0)
+                        parameters: parameters, maxKVSize: slidingWindow, keep: 0,
+                        layerIndex: i, layerCount: config.hiddenLayers,
+                        boundaryLayerIndex: -1, boundaryLayerCount: globalLayerCount)
                 )
             }
         }

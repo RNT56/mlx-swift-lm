@@ -22,14 +22,52 @@ The PR and merge train is owned by:
 
 Current status:
 
-- The Pines local compatibility pair is green with this branch at
-  `6d2d791a12e60dc1bd7534d6c95454a2284edf8c`.
-- This branch pins `mlx-swift`
-  `21a897c5d1ae1930bd7c7a47bb3ed6c9fe8c8772`, the release-green core branch.
-- Full `swift test` and `swift build --target MLXLMCommon` pass for this branch.
+- The current local delivery contract for upstream PRs, staging branches,
+  dependency order, and product gates is
+  [Fork Stack Delivery Roadmap - 2026-06-25](fork-stack-delivery-roadmap-2026-06-25.md).
+- The current local launch packet for future upstream PRs, including blocked
+  branches, validation commands, and copy-ready PR descriptions, is
+  [Upstream PR Launch Packets - 2026-06-25](upstream-pr-launch-packets-2026-06-25.md).
+- The focused support roadmap for upstream `ml-explore/mlx#3026` is
+  [MLX #3026 Support Roadmap - 2026-06-26](mlx-3026-support-roadmap-2026-06-26.md).
+  It owns the local no-competing-PR rule, verifier-batch follow-up lane, and
+  dependency order from core MLX to C API, Swift, LM, and Pines evidence.
+- The active Pines compatibility pair is non-green. Local TurboQuant gates and
+  synthetic app-host smoke have passed in recent runs, but product promotion
+  still requires same-report real-model quality/throughput evidence, physical
+  device evidence, and compatibility-pair proof.
+- The current continuation anchor for the **inference-speed overhaul** is
+  [Speed-Overhaul Continuation Handoff - 2026-06-07](continuation-handoff-2026-06-07-overhaul.md)
+  (with [inference-speed-roadmap](inference-speed-roadmap-2026-06-07.md) for the
+  measured evidence and [overhaul-plan](overhaul-plan-2026-06-07.md) for the lever
+  ladder). Start there for speed/throughput work. Lever ① (no-draft n-gram
+  self-speculation) is implemented and bit-exact, but the early 1.2–2.2× and
+  1.43–1.76× single-shot figures DID NOT REPRODUCE under the repeated-measurement
+  P4 campaign (2026-07-12): the validated effect is **+7–17% @16K** (code > doc
+  workloads, Qwen3-4B, bootstrap CIs), and optimistic prefetch (N7) was
+  promotion-DENIED (adds nothing over plain sync speculation). See
+  `artifacts/campaign-20260710-verdicts.md` (workspace root), the
+  [2026-07-10 architecture ruling](architecture-ruling-2026-07-10.md), and the
+  live [continuation handoff](continuation-handoff-2026-07-03.md).
+- The earlier same-day anchor
+  [TurboQuant Continuation Handoff - 2026-06-07](continuation-handoff-2026-06-07.md)
+  remains valid for the affine quality-gate work (state, artifacts, nonclaims).
+- For a full, self-contained, externally-auditable description of the whole design
+  (architecture, every codec's math, how the decode kernels are built at the Metal
+  level, the speculation algorithms, the measured evidence, the non-claims, and an
+  explicit "what to scrutinize" list), see
+  [TurboQuant Architecture Report](turboquant-architecture-2026-06-07.md).
+- The practical upstream-comparable route is affine K8/V4. Upstream's pinned
+  README K8+V4 row is the mixed affine route, not the PolarWHT-V scaffold.
+  Full `polarWHTV3` and `hybridK8PolarWHTV3/V4` remain experimental diagnostics
+  and are blocked from default promotion.
+- Native Sparse-V threshold, top-k, cumulative-mass, hybrid, pageTopK, and
+  CandidateSparse diagnostics are wired, but the measured sparse family is
+  rejected for promotion. Sparse-V auto policy now resolves to off; only
+  explicit proof/debug requests can activate sparse modes.
 - Snapshot and speculative contracts are implemented, but product activation
-  remains controlled by Pines admission, compatibility, and real-device evidence
-  gates.
+  remains controlled by Pines admission, compatibility, quality, fallback,
+  memory, and real-device evidence gates.
 
 For this repo, the launch order is:
 
@@ -70,12 +108,17 @@ compatibility pair and Pines production pin gate recorded in the Pines packet.
 
 ## Required reading
 
-1. [LM Worker Cards](worker-cards.md)
-2. [Runtime Failures](runtime-failures.md)
-3. [Cache Lifecycle](cache-lifecycle.md)
-4. [Fallback Policy](fallback-policy.md)
-5. [Model Profile v2 and Quality](model-profile-v2-quality.md)
-6. [KV Snapshots and Speculative Verifier](kv-snapshots-speculative.md)
+1. [Fork Stack Delivery Roadmap - 2026-06-25](fork-stack-delivery-roadmap-2026-06-25.md)
+2. [Upstream PR Launch Packets - 2026-06-25](upstream-pr-launch-packets-2026-06-25.md)
+3. [LM Worker Cards](worker-cards.md)
+4. [Runtime Failures](runtime-failures.md)
+5. [Cache Lifecycle](cache-lifecycle.md)
+6. [Fallback Policy](fallback-policy.md)
+7. [Model Profile v2 and Quality](model-profile-v2-quality.md)
+8. [Current Paths and Benchmarks](current-paths-and-benchmarks.md)
+9. [External Port Optimization Map](external-port-optimization-map.md)
+10. [TurboQuant Continuation Handoff - 2026-06-07](continuation-handoff-2026-06-07.md)
+11. [KV Snapshots and Speculative Verifier](kv-snapshots-speculative.md)
 
 ## Non-negotiables
 

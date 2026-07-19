@@ -23,12 +23,25 @@ public actor ModelTypeRegistry<T> {
         creators[type] = creator
     }
 
+    /// Registered `model_type` values currently known to this registry.
+    public var registeredModelTypes: [String] {
+        creators.keys.sorted()
+    }
+
     /// Given a `modelType` and configuration data instantiate a new `LanguageModel`.
     public func createModel(configuration: Data, modelType: String) throws -> sending T {
         guard let creator = creators[modelType] else {
             throw ModelFactoryError.unsupportedModelType(modelType)
         }
         return try creator(configuration)
+    }
+
+    /// Whether a creator is registered for `modelType` — i.e. this registry can
+    /// instantiate that architecture. Lets a caller check support without
+    /// attempting a (throwing, allocating) `createModel`, e.g. to decide before
+    /// a multi-GB download whether a Hub repo's `model_type` is runnable.
+    public func contains(_ modelType: String) -> Bool {
+        creators[modelType] != nil
     }
 
 }

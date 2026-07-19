@@ -15,38 +15,49 @@ public enum Chat {
         public var videos: [UserInput.Video]
 
         /// Array of audio data associated with the message.
-        public var audio: [UserInput.Audio]
+        public var audios: [UserInput.Audio]
 
         public init(
-            role: Role, content: String, images: [UserInput.Image] = [],
-            videos: [UserInput.Video] = [], audio: [UserInput.Audio] = []
+            role: Role, content: String,
+            images: [UserInput.Image] = [],
+            videos: [UserInput.Video] = [],
+            audios: [UserInput.Audio] = []
         ) {
             self.role = role
             self.content = content
             self.images = images
             self.videos = videos
-            self.audio = audio
+            self.audios = audios
         }
 
         public static func system(
-            _ content: String, images: [UserInput.Image] = [], videos: [UserInput.Video] = [],
-            audio: [UserInput.Audio] = []
+            _ content: String, images: [UserInput.Image] = [], videos: [UserInput.Video] = []
         ) -> Self {
-            Self(role: .system, content: content, images: images, videos: videos, audio: audio)
+            Self(role: .system, content: content, images: images, videos: videos)
         }
 
         public static func assistant(
-            _ content: String, images: [UserInput.Image] = [], videos: [UserInput.Video] = [],
-            audio: [UserInput.Audio] = []
+            _ content: String, images: [UserInput.Image] = [], videos: [UserInput.Video] = []
         ) -> Self {
-            Self(role: .assistant, content: content, images: images, videos: videos, audio: audio)
+            Self(role: .assistant, content: content, images: images, videos: videos)
         }
 
         public static func user(
-            _ content: String, images: [UserInput.Image] = [], videos: [UserInput.Video] = [],
-            audio: [UserInput.Audio] = []
+            _ content: String,
+            images: [UserInput.Image] = [],
+            videos: [UserInput.Video] = [],
+            audios: [UserInput.Audio] = []
         ) -> Self {
-            Self(role: .user, content: content, images: images, videos: videos, audio: audio)
+            Self(role: .user, content: content, images: images, videos: videos, audios: audios)
+        }
+
+        public static func user(
+            _ content: String,
+            images: [UserInput.Image] = [],
+            videos: [UserInput.Video] = [],
+            audio: [UserInput.Audio]
+        ) -> Self {
+            Self(role: .user, content: content, images: images, videos: videos, audios: audio)
         }
 
         public static func tool(_ content: String) -> Self {

@@ -255,7 +255,7 @@ final class Qwen35GatedDeltaNet: Module {
 
         let convInput = concatenated([convState, qkv], axis: 1)
         if let cache {
-            cache[0] = convInput[0..., (-(convKernelSize - 1))...]
+            cache[0] = contiguous(convInput[0..., (-(convKernelSize - 1))..., 0...])
         }
 
         let convOut = silu(conv1d(convInput))
@@ -291,6 +291,7 @@ final class Qwen35GatedDeltaNet: Module {
 
         if let cache {
             cache[1] = state
+            cache.advance(S)
         }
 
         out = norm(out, gate: z)
@@ -348,6 +349,16 @@ final class Qwen35Attention: Module {
     func callAsFunction(
         _ x: MLXArray, mask: MLXFast.ScaledDotProductAttentionMaskMode, cache: KVCache?
     ) -> MLXArray {
+        do {
+            return try callThrowing(x, mask: mask, cache: cache)
+        } catch {
+            nonThrowingLanguageModelRuntimeFailure(error, owner: type(of: self))
+        }
+    }
+
+    func callThrowing(
+        _ x: MLXArray, mask: MLXFast.ScaledDotProductAttentionMaskMode, cache: KVCache?
+    ) throws -> MLXArray {
         let B = x.dim(0)
         let L = x.dim(1)
 
@@ -367,14 +378,14 @@ final class Qwen35Attention: Module {
         queries = applyRotaryPosition(rope, to: queries, offset: offset)
         keys = applyRotaryPosition(rope, to: keys, offset: offset)
 
-        let output = attentionWithCacheUpdate(
+        let output = try attentionWithCacheUpdateReturningStateThrowing(
             queries: queries,
             keys: keys,
             values: values,
             cache: cache,
             scale: scale,
             mask: mask
-        )
+        ).output
         .transposed(0, 2, 1, 3)
         .reshaped(B, L, -1)
 
@@ -427,7 +438,7 @@ final class Qwen35SparseMoeBlock: Module, UnaryLayer {
         }
 
         let y = switchMLP(x, inds)
-        let combined = (y * scores[.ellipsis, .newAxis]).sum(axis: -2)
+        let combined = weightedExpertSum(y, scores)
 
         var sharedY = sharedExpert(x)
         sharedY = sigmoid(sharedExpertGate(x)) * sharedY
@@ -485,11 +496,29 @@ final class Qwen35DecoderLayer: Module {
         ssmMask: MLXArray?,
         cache: KVCache?
     ) -> MLXArray {
+        do {
+            return try callThrowing(
+                x,
+                attentionMask: attentionMask,
+                ssmMask: ssmMask,
+                cache: cache
+            )
+        } catch {
+            nonThrowingLanguageModelRuntimeFailure(error, owner: type(of: self))
+        }
+    }
+
+    func callThrowing(
+        _ x: MLXArray,
+        attentionMask: MLXFast.ScaledDotProductAttentionMaskMode,
+        ssmMask: MLXArray?,
+        cache: KVCache?
+    ) throws -> MLXArray {
         let r: MLXArray
         if isLinear {
             r = linearAttn!(inputLayerNorm(x), mask: ssmMask, cache: cache as? MambaCache)
         } else {
-            r = selfAttn!(inputLayerNorm(x), mask: attentionMask, cache: cache)
+            r = try selfAttn!.callThrowing(inputLayerNorm(x), mask: attentionMask, cache: cache)
         }
 
         let h = x + r
@@ -533,6 +562,14 @@ public class Qwen35TextModelInner: Module, LayerPartitionable, StreamableMoE {
     }
 
     func callAsFunction(_ inputs: MLXArray, cache: [KVCache?]? = nil) -> MLXArray {
+        do {
+            return try callThrowing(inputs, cache: cache)
+        } catch {
+            nonThrowingLanguageModelRuntimeFailure(error, owner: type(of: self))
+        }
+    }
+
+    func callThrowing(_ inputs: MLXArray, cache: [KVCache?]? = nil) throws -> MLXArray {
         var hiddenStates = embedTokens(inputs)
 
         var cacheArray = cache
@@ -548,11 +585,16 @@ public class Qwen35TextModelInner: Module, LayerPartitionable, StreamableMoE {
             let attnMask =
                 layer.isLinear
                 ? MLXFast.ScaledDotProductAttentionMaskMode.none : faMask
-            hiddenStates = partitionedLayerCall(
+            hiddenStates = try partitionedLayerCallThrowing(
                 index: i, gpuLayerCount: gpuLayerCount, stream: streamExperts,
                 cacheToEval: cacheArray?[i]
             ) {
-                layer(hiddenStates, attentionMask: attnMask, ssmMask: mask, cache: cacheArray?[i])
+                try layer.callThrowing(
+                    hiddenStates,
+                    attentionMask: attnMask,
+                    ssmMask: mask,
+                    cache: cacheArray?[i]
+                )
             }
         }
 
@@ -596,7 +638,7 @@ public class Qwen35TextModelInner: Module, LayerPartitionable, StreamableMoE {
     }
 }
 
-public class Qwen35TextModel: Module, LLMModel, KVCacheDimensionProvider {
+public class Qwen35TextModel: Module, LLMModel, KVCacheDimensionProvider, ThrowingLanguageModel {
     public let vocabularySize: Int
     public let kvHeads: [Int]
 
@@ -609,7 +651,10 @@ public class Qwen35TextModel: Module, LLMModel, KVCacheDimensionProvider {
     public init(_ args: Qwen35TextConfiguration) {
         self.configuration = args
         self.vocabularySize = args.vocabularySize
-        self.kvHeads = (0 ..< args.hiddenLayers).map { _ in args.kvHeads }
+        let fullAttentionInterval = max(1, args.fullAttentionInterval)
+        self.kvHeads = (0 ..< args.hiddenLayers).map { layerIdx in
+            (layerIdx + 1).isMultiple(of: fullAttentionInterval) ? args.kvHeads : 0
+        }
         self.model = Qwen35TextModelInner(args)
 
         if !args.tieWordEmbeddings {
@@ -623,7 +668,15 @@ public class Qwen35TextModel: Module, LLMModel, KVCacheDimensionProvider {
     }
 
     public func callAsFunction(_ inputs: MLXArray, cache: [KVCache]?) -> MLXArray {
-        var out = model(inputs, cache: cache)
+        do {
+            return try callAsFunctionThrowing(inputs, cache: cache)
+        } catch {
+            nonThrowingLanguageModelRuntimeFailure(error, owner: type(of: self))
+        }
+    }
+
+    public func callAsFunctionThrowing(_ inputs: MLXArray, cache: [KVCache]?) throws -> MLXArray {
+        var out = try model.callThrowing(inputs, cache: cache)
         if let lmHead {
             out = lmHead(out)
         } else {
@@ -633,11 +686,21 @@ public class Qwen35TextModel: Module, LLMModel, KVCacheDimensionProvider {
     }
 
     public func newCache(parameters: GenerateParameters?) -> [KVCache] {
-        return model.layers.map { layer in
+        let attentionLayerCount = model.layers.filter { !$0.isLinear }.count
+        var attentionLayerIndex = 0
+        return model.layers.enumerated().map { index, layer in
             if layer.isLinear {
                 return MambaCache()
             }
-            return makeAttentionKVCache(parameters: parameters)
+            let boundaryLayerIndex = attentionLayerIndex
+            attentionLayerIndex += 1
+            return makeAttentionKVCache(
+                parameters: parameters,
+                layerIndex: index,
+                layerCount: model.layers.count,
+                boundaryLayerIndex: boundaryLayerIndex,
+                boundaryLayerCount: attentionLayerCount
+            )
         }
     }
 
@@ -705,7 +768,7 @@ extension Qwen35TextModel: LoRAModel {
 
 // MARK: - Top-level Model
 
-public class Qwen35Model: Module, LLMModel, KVCacheDimensionProvider {
+public class Qwen35Model: Module, LLMModel, KVCacheDimensionProvider, ThrowingLanguageModel {
     public let vocabularySize: Int
     public let kvHeads: [Int]
 
@@ -719,7 +782,15 @@ public class Qwen35Model: Module, LLMModel, KVCacheDimensionProvider {
     }
 
     public func callAsFunction(_ inputs: MLXArray, cache: [KVCache]?) -> MLXArray {
-        languageModel(inputs, cache: cache)
+        do {
+            return try callAsFunctionThrowing(inputs, cache: cache)
+        } catch {
+            nonThrowingLanguageModelRuntimeFailure(error, owner: type(of: self))
+        }
+    }
+
+    public func callAsFunctionThrowing(_ inputs: MLXArray, cache: [KVCache]?) throws -> MLXArray {
+        try languageModel.callAsFunctionThrowing(inputs, cache: cache)
     }
 
     public func newCache(parameters: GenerateParameters?) -> [KVCache] {
@@ -820,7 +891,17 @@ extension Qwen35TextModel: MTPLanguageModel {
     }
 
     public func makeMTPCaches(parameters: GenerateParameters?) -> [[KVCache]] {
-        mtp.map { _ in [makeAttentionKVCache(parameters: parameters)] }
+        mtp.map { _ in
+            [
+                makeAttentionKVCache(
+                    parameters: parameters,
+                    layerIndex: 0,
+                    layerCount: 1,
+                    boundaryLayerIndex: 0,
+                    boundaryLayerCount: 1
+                )
+            ]
+        }
     }
 }
 

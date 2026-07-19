@@ -7,6 +7,7 @@ public enum TurboQuantBenchmarkSuiteID: String, Codable, Sendable, CaseIterable 
     case longContextNeedleV1 = "long-context-needle-v1"
     case snapshotRoundtripV1 = "snapshot-roundtrip-v1"
     case mobileMemoryAcceptanceV1 = "mobile-memory-acceptance-v1"
+    case realModelInferenceV1 = "real-model-inference-v1"
 }
 
 public struct TurboQuantQualityGateReport: Hashable, Codable, Sendable {
@@ -161,6 +162,41 @@ public struct TurboQuantQualityGateReport: Hashable, Codable, Sendable {
             profileQualityThresholdOverride: profileQualityThresholdOverride,
             gateReason: reasons.isEmpty ? nil : reasons.joined(separator: "; "),
             passed: reasons.isEmpty
+        )
+    }
+
+    public static func evaluatedAffineInt4(
+        benchmarkSuiteID: TurboQuantBenchmarkSuiteID = .tinyDeterministicLogitsV1,
+        deterministicTop1MatchRate: Double,
+        logitKLDivergenceMean: Double,
+        logitMaxAbsErrorP95: Double,
+        perplexityDeltaPercent: Double? = nil,
+        retrievalNeedlePassRate: Double? = nil,
+        taskEvalDeltaPercent: Double? = nil,
+        attentionOutputCosineMean: Double? = nil,
+        noNaNOrInf: Bool,
+        snapshotRoundtripEquivalent: Bool? = nil,
+        top1Threshold: Double = 0.95,
+        klThreshold: Double = 0.05,
+        p95MaxAbsErrorThreshold: Double = 0.5
+    ) -> TurboQuantQualityGateReport {
+        evaluated(
+            benchmarkSuiteID: benchmarkSuiteID,
+            deterministicTop1MatchRate: deterministicTop1MatchRate,
+            logitKLDivergenceMean: logitKLDivergenceMean,
+            logitMaxAbsErrorP95: logitMaxAbsErrorP95,
+            perplexityDeltaPercent: perplexityDeltaPercent,
+            retrievalNeedlePassRate: retrievalNeedlePassRate,
+            taskEvalDeltaPercent: taskEvalDeltaPercent,
+            attentionOutputCosineMean: attentionOutputCosineMean,
+            noNaNOrInf: noNaNOrInf,
+            fallbackEquivalent: true,
+            prefillExact: true,
+            snapshotRoundtripEquivalent: snapshotRoundtripEquivalent,
+            profileQualityThresholdOverride: "affine_int4_native_lossy",
+            top1Threshold: top1Threshold,
+            klThreshold: klThreshold,
+            p95MaxAbsErrorThreshold: p95MaxAbsErrorThreshold
         )
     }
 

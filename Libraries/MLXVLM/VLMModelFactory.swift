@@ -51,7 +51,7 @@ public struct BaseProcessorConfiguration: Codable, Sendable {
 }
 
 /// Creates a function that loads a configuration file and instantiates a model with the proper configuration
-private func create<C: Codable, M>(
+private func create<C: Decodable, M>(
     _ configurationType: C.Type, _ modelInit: @escaping (C) -> M
 ) -> (Data) throws -> M {
     { data in
@@ -63,7 +63,7 @@ private func create<C: Codable, M>(
     }
 }
 
-private func create<C: Codable, P>(
+private func create<C: Decodable, P>(
     _ configurationType: C.Type,
     _ processorInit:
         @escaping (
@@ -96,6 +96,7 @@ public enum VLMTypeRegistry {
         "idefics3": create(Idefics3Configuration.self, Idefics3.init),
         "gemma3": create(Gemma3Configuration.self, Gemma3.init),
         "gemma4": create(Gemma4Configuration.self, Gemma4.init),
+        "gemma4_unified": create(Gemma4UnifiedConfiguration.self, Gemma4Unified.init),
         "smolvlm": create(SmolVLM2Configuration.self, SmolVLM2.init),
         "fastvlm": create(FastVLMConfiguration.self, FastVLM.init),
         "llava_qwen2": create(FastVLMConfiguration.self, FastVLM.init),
@@ -125,6 +126,8 @@ public enum VLMProcessorTypeRegistry {
             Gemma3ProcessorConfiguration.self, Gemma3Processor.init),
         "Gemma4Processor": create(
             Gemma4ProcessorConfiguration.self, Gemma4Processor.init),
+        "Gemma4UnifiedProcessor": create(
+            Gemma4UnifiedProcessorConfiguration.self, Gemma4UnifiedProcessor.init),
         "SmolVLMProcessor": create(
             SmolVLMProcessorConfiguration.self, SmolVLMProcessor.init),
         "FastVLMProcessor": create(
@@ -159,29 +162,25 @@ public class VLMRegistry: AbstractModelRegistry, @unchecked Sendable {
     static public let qwen2VL2BInstruct4Bit = ModelConfiguration(
         id: "mlx-community/Qwen2-VL-2B-Instruct-4bit",
         defaultPrompt: "Describe the image in English",
-        extraEOSTokens: ["<|im_end|>"],
-        stopStrings: ["<|im_end|>"]
+        extraEOSTokens: ["<|im_end|>"]
     )
 
     static public let qwen2_5VL3BInstruct4Bit = ModelConfiguration(
         id: "mlx-community/Qwen2.5-VL-3B-Instruct-4bit",
         defaultPrompt: "Describe the image in English",
-        extraEOSTokens: ["<|im_end|>"],
-        stopStrings: ["<|im_end|>"]
+        extraEOSTokens: ["<|im_end|>"]
     )
 
     static public let qwen3VL4BInstruct4Bit = ModelConfiguration(
         id: "lmstudio-community/Qwen3-VL-4B-Instruct-MLX-4bit",
         defaultPrompt: "Describe the image in English",
-        extraEOSTokens: ["<|im_end|>"],
-        stopStrings: ["<|im_end|>"]
+        extraEOSTokens: ["<|im_end|>"]
     )
 
     static public let qwen3VL4BInstruct8Bit = ModelConfiguration(
         id: "mlx-community/Qwen3-VL-4B-Instruct-8bit",
         defaultPrompt: "Write a haiku about Swift programming",
-        extraEOSTokens: ["<|im_end|>"],
-        stopStrings: ["<|im_end|>"]
+        extraEOSTokens: ["<|im_end|>"]
     )
 
     static public let smolvlminstruct4bit = ModelConfiguration(
@@ -228,29 +227,25 @@ public class VLMRegistry: AbstractModelRegistry, @unchecked Sendable {
     static public let gemma4_E2B_it_4bit = ModelConfiguration(
         id: "mlx-community/gemma-4-e2b-it-4bit",
         defaultPrompt: "Describe the image in English",
-        extraEOSTokens: ["<end_of_turn>"],
-        stopStrings: ["<end_of_turn>"]
+        extraEOSTokens: ["<turn|>"]
     )
 
     static public let gemma4_E4B_it_4bit = ModelConfiguration(
         id: "mlx-community/gemma-4-e4b-it-4bit",
         defaultPrompt: "Describe the image in English",
-        extraEOSTokens: ["<end_of_turn>"],
-        stopStrings: ["<end_of_turn>"]
+        extraEOSTokens: ["<turn|>"]
     )
 
     static public let gemma4_31B_it_4bit = ModelConfiguration(
         id: "mlx-community/gemma-4-31b-it-4bit",
         defaultPrompt: "Describe the image in English",
-        extraEOSTokens: ["<end_of_turn>"],
-        stopStrings: ["<end_of_turn>"]
+        extraEOSTokens: ["<turn|>"]
     )
 
     static public let gemma4_26BA4B_it_4bit = ModelConfiguration(
         id: "mlx-community/gemma-4-26b-a4b-it-4bit",
         defaultPrompt: "Describe the image in English",
-        extraEOSTokens: ["<end_of_turn>"],
-        stopStrings: ["<end_of_turn>"]
+        extraEOSTokens: ["<turn|>"]
     )
 
     static public let smolvlm = ModelConfiguration(
@@ -267,15 +262,13 @@ public class VLMRegistry: AbstractModelRegistry, @unchecked Sendable {
     static public let qwen3_5_27B_4bit = ModelConfiguration(
         id: "mlx-community/Qwen3.5-27B-4bit",
         defaultPrompt: "Describe the image in English",
-        extraEOSTokens: ["<|im_end|>"],
-        stopStrings: ["<|im_end|>"]
+        extraEOSTokens: ["<|im_end|>"]
     )
 
     static public let qwen3_5_35B_A3B_4bit = ModelConfiguration(
         id: "mlx-community/Qwen3.5-35B-A3B-4bit",
         defaultPrompt: "Describe the image in English",
-        extraEOSTokens: ["<|im_end|>"],
-        stopStrings: ["<|im_end|>"]
+        extraEOSTokens: ["<|im_end|>"]
     )
 
     static public func all() -> [ModelConfiguration] {
@@ -389,7 +382,11 @@ public final class VLMModelFactory: GenericModelFactory {
 
         var mutableConfiguration = configuration
         mutableConfiguration.eosTokenIds = eosTokenIds
-        mutableConfiguration.stopStrings.formUnion(generationConfig?.stopStrings ?? [])
+        if let generationStopStrings = generationConfig?.stopStrings, !generationStopStrings.isEmpty {
+            var stopStrings = mutableConfiguration.stopStrings
+            stopStrings.formUnion(generationStopStrings)
+            mutableConfiguration.stopStrings = stopStrings
+        }
 
         // Auto-detect tool call format from model type if not explicitly set
         if mutableConfiguration.toolCallFormat == nil {
@@ -428,7 +425,8 @@ public final class VLMModelFactory: GenericModelFactory {
         // Mistral3 models ship with "PixtralProcessor" in their config but need Mistral3Processor
         // to handle spatial merging correctly
         let processorTypeOverrides: [String: String] = [
-            "mistral3": "Mistral3Processor"
+            "mistral3": "Mistral3Processor",
+            "gemma4_unified": "Gemma4UnifiedProcessor",
         ]
         let processorType =
             processorTypeOverrides[baseConfig.modelType] ?? baseProcessorConfig.processorClass

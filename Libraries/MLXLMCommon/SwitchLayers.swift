@@ -4,6 +4,18 @@ import MLXNN
 
 // Port of https://github.com/ml-explore/mlx-examples/blob/main/llms/mlx_lm/models/switch_layers.py
 
+public let compiledSiluProduct: @Sendable (MLXArray, MLXArray) -> MLXArray = compile(
+    shapeless: true
+) { gate, up in
+    MLXNN.silu(gate) * up
+}
+
+public let weightedExpertSum: @Sendable (MLXArray, MLXArray) -> MLXArray = compile(
+    shapeless: true
+) { outputs, weights in
+    (outputs * MLX.expandedDimensions(weights, axis: -1)).sum(axis: -2)
+}
+
 public func gatherSort(x: MLXArray, indices: MLXArray) -> (MLXArray, MLXArray, MLXArray) {
     let m = indices.dim(-1)
     let indices = indices.flattened()
@@ -66,18 +78,42 @@ public class SwitchGLU: Module {
     let hiddenDims: Int
     let numExperts: Int
     let activation: (MLXArray) -> MLXArray
+    let activationProduct: (@Sendable (MLXArray, MLXArray) -> MLXArray)?
 
     public init(
         inputDims: Int,
         hiddenDims: Int,
         numExperts: Int,
-        activation: @escaping (MLXArray) -> MLXArray = MLXNN.silu,
+        bias: Bool = false
+    ) {
+        self.inputDims = inputDims
+        self.hiddenDims = hiddenDims
+        self.numExperts = numExperts
+        self.activation = MLXNN.silu
+        self.activationProduct = compiledSiluProduct
+
+        self._gateProj.wrappedValue = SwitchLinear(
+            inputDims: inputDims, outputDims: hiddenDims, numExperts: numExperts, bias: bias)
+        self._upProj.wrappedValue = SwitchLinear(
+            inputDims: inputDims, outputDims: hiddenDims, numExperts: numExperts, bias: bias)
+        self._downProj.wrappedValue = SwitchLinear(
+            inputDims: hiddenDims, outputDims: inputDims, numExperts: numExperts, bias: bias)
+
+        super.init()
+    }
+
+    public init(
+        inputDims: Int,
+        hiddenDims: Int,
+        numExperts: Int,
+        activation: @escaping (MLXArray) -> MLXArray,
         bias: Bool = false
     ) {
         self.inputDims = inputDims
         self.hiddenDims = hiddenDims
         self.numExperts = numExperts
         self.activation = activation
+        self.activationProduct = nil
 
         self._gateProj.wrappedValue = SwitchLinear(
             inputDims: inputDims, outputDims: hiddenDims, numExperts: numExperts, bias: bias)
@@ -107,12 +143,24 @@ public class SwitchGLU: Module {
             let ranges = expertRanges(from: idx)
             let xGate = gateProj.computeStreamedExperts(x, ranges: ranges)
             let xUp = upProj.computeStreamedExperts(x, ranges: ranges)
-            x = downProj.computeStreamedExperts(activation(xGate) * xUp, ranges: ranges)
+            let activated =
+                if let activationProduct {
+                    activationProduct(xGate, xUp)
+                } else {
+                    activation(xGate) * xUp
+                }
+            x = downProj.computeStreamedExperts(activated, ranges: ranges)
         } else {
             let xUp = upProj(x, idx, sortedIndices: doSort)
             let xGate = gateProj(x, idx, sortedIndices: doSort)
+            let activated =
+                if let activationProduct {
+                    activationProduct(xGate, xUp)
+                } else {
+                    activation(xGate) * xUp
+                }
             x = downProj(
-                activation(xGate) * xUp,
+                activated,
                 idx,
                 sortedIndices: doSort)
         }
@@ -138,18 +186,40 @@ public class FusedGateUpSwitchGLU: Module {
     let hiddenDims: Int
     let numExperts: Int
     let activation: (MLXArray) -> MLXArray
+    let activationProduct: (@Sendable (MLXArray, MLXArray) -> MLXArray)?
 
     public init(
         inputDims: Int,
         hiddenDims: Int,
         numExperts: Int,
-        activation: @escaping (MLXArray) -> MLXArray = MLXNN.silu,
+        bias: Bool = false
+    ) {
+        self.inputDims = inputDims
+        self.hiddenDims = hiddenDims
+        self.numExperts = numExperts
+        self.activation = MLXNN.silu
+        self.activationProduct = compiledSiluProduct
+
+        self._gateUpProj.wrappedValue = SwitchLinear(
+            inputDims: inputDims, outputDims: 2 * hiddenDims, numExperts: numExperts, bias: bias)
+        self._downProj.wrappedValue = SwitchLinear(
+            inputDims: hiddenDims, outputDims: inputDims, numExperts: numExperts, bias: bias)
+
+        super.init()
+    }
+
+    public init(
+        inputDims: Int,
+        hiddenDims: Int,
+        numExperts: Int,
+        activation: @escaping (MLXArray) -> MLXArray,
         bias: Bool = false
     ) {
         self.inputDims = inputDims
         self.hiddenDims = hiddenDims
         self.numExperts = numExperts
         self.activation = activation
+        self.activationProduct = nil
 
         self._gateUpProj.wrappedValue = SwitchLinear(
             inputDims: inputDims, outputDims: 2 * hiddenDims, numExperts: numExperts, bias: bias)
@@ -185,11 +255,17 @@ public class FusedGateUpSwitchGLU: Module {
         }
 
         let parts = MLX.split(gateUp, parts: 2, axis: -1)
+        let activated =
+            if let activationProduct {
+                activationProduct(parts[0], parts[1])
+            } else {
+                activation(parts[0]) * parts[1]
+            }
         if let ranges {
-            x = downProj.computeStreamedExperts(activation(parts[0]) * parts[1], ranges: ranges)
+            x = downProj.computeStreamedExperts(activated, ranges: ranges)
         } else {
             x = downProj(
-                activation(parts[0]) * parts[1],
+                activated,
                 idx,
                 sortedIndices: doSort)
         }

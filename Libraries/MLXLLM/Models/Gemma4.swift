@@ -45,7 +45,9 @@ public struct Gemma4Configuration: Codable, Sendable {
 
 // MARK: - Model
 
-public class Gemma4Model: Module, LLMModel, KVCacheDimensionProvider {
+public class Gemma4Model: Module, LLMModel, KVCacheDimensionProvider,
+    ThrowingLanguageModel
+{
     public var vocabularySize: Int { languageModel.vocabularySize }
     public var kvHeads: [Int] { languageModel.kvHeads }
 
@@ -56,7 +58,15 @@ public class Gemma4Model: Module, LLMModel, KVCacheDimensionProvider {
     }
 
     public func callAsFunction(_ inputs: MLXArray, cache: [KVCache]?) -> MLXArray {
-        languageModel(inputs, cache: cache)
+        do {
+            return try callAsFunctionThrowing(inputs, cache: cache)
+        } catch {
+            nonThrowingLanguageModelRuntimeFailure(error, owner: type(of: self))
+        }
+    }
+
+    public func callAsFunctionThrowing(_ inputs: MLXArray, cache: [KVCache]?) throws -> MLXArray {
+        try languageModel.callAsFunctionThrowing(inputs, cache: cache)
     }
 
     public func sanitize(weights: [String: MLXArray]) -> [String: MLXArray] {

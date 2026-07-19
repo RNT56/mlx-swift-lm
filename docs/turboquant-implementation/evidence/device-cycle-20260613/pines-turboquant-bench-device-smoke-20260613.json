@@ -1,0 +1,115 @@
+{
+  "appHost" : {
+    "deviceID" : "GBU-12-iPhone15ProMax-A17Pro",
+    "hardwareModel" : "iPhone16,2",
+    "launchMode" : "pines-debug-app-host",
+    "mlxPinPair" : "mlx-swift-6bfa04e2924152c52c56eac5c3420a7cc7e8d720+mlx-swift-lm-295e66bef0b3d85be70290b5c1adea83d694660c",
+    "osVersion" : "Version 26.5 (Build 23F77)",
+    "pinesCommit" : "local-wt"
+  },
+  "comparisonBasis" : "synthetic-attention-shape-smoke; release comparisons require real-model-inference-v1",
+  "compatibilityPairID" : "mlx-swift-6bfa04e2924152c52c56eac5c3420a7cc7e8d720+mlx-swift-lm-295e66bef0b3d85be70290b5c1adea83d694660c",
+  "contexts" : [
+    8192
+  ],
+  "createdAt" : "2026-06-12T23:32:02Z",
+  "hybridNativeDiagnostics" : {
+    "benchmarkModelType" : "qwen3_5",
+    "cacheTopology" : "hybridAttentionKVAndNativeState",
+    "hybridAttentionKVPolicy" : "turboquant-attention-kv",
+    "nativeBackendPerformanceEvidence" : "not-proven",
+    "nativeStateCachePolicy" : "exact-mlx-native-state",
+    "performanceParityEvidence" : "not-proven",
+    "productClaimLevel" : "unverified",
+    "realModelInferenceEvidence" : "missing",
+    "requestedNativeBackend" : "metalPolarQJL"
+  },
+  "iterations" : 3,
+  "matrixExecution" : "legacy-capacity-only",
+  "modelProfile" : "qwen3.5-2b",
+  "precisionPolicies" : [
+    "qwen-q4-default"
+  ],
+  "results" : [
+    {
+      "backend" : "nativeMLX",
+      "boundaryProtectedLayerCount" : 0,
+      "codec" : "polar_qjl",
+      "compressedKVBytes" : 15204360,
+      "compressedKeyBytes" : 9961480,
+      "compressedP95TokensPerSecond" : 99.69110831174387,
+      "compressedTokensPerSecond" : 105.94352109118465,
+      "compressedValueBytes" : 5242880,
+      "contextLength" : 8192,
+      "cooldownMilliseconds" : 10,
+      "cosineSimilarity" : 0.9987052296813199,
+      "decodedActiveKVBytes" : 0,
+      "finite" : true,
+      "groupSize" : 64,
+      "kernelFlags" : {
+        "gqaSpecialization" : "gqa4",
+        "outputDType" : "float16",
+        "tqCoopEnabled" : false
+      },
+      "keyPrecision" : "fp16OrQ8",
+      "label" : "qwen3.5-2b",
+      "maxAbsErrorP95" : 0.0048675537109375,
+      "maxOutputError" : 0.0048675537109375,
+      "measuredIterations" : 3,
+      "memoryReductionRatio" : 2.2068953905327158,
+      "nativeDiagnostics" : [
+        3,
+        3,
+        16,
+        512,
+        0,
+        0,
+        0,
+        7
+      ],
+      "nativePerfGateMinimumContextLength" : 32768,
+      "nativePerfGateRequiredSpeedup" : 2,
+      "nativeSpeedRatioToSwiftMetal" : 3.9936473857034605,
+      "plainKVBytes" : 33554432,
+      "plainP95TokensPerSecond" : 566.8744424922287,
+      "plainTokensPerSecond" : 628.5484789450022,
+      "precisionPolicy" : {
+        "boundary" : {
+          "first" : 1,
+          "kind" : "protectedEdges",
+          "last" : 1
+        },
+        "boundaryCachePrecision" : "affineK8V4",
+        "key" : "fp16OrQ8",
+        "value" : "turbo4v2"
+      },
+      "requestedRuntimeMode" : "capacityTurboQuant",
+      "resolvedRuntimeMode" : "capacityTurboQuant",
+      "route" : "capacityTurboQuantCompressed",
+      "runtimeMode" : "capacityTurboQuant",
+      "scaleBiasBytes" : 0,
+      "scheme" : "turbo4v2",
+      "selectedPath" : "nativeMLXCompressed",
+      "sparseVEnabled" : false,
+      "sparseVSkipRatio" : 0,
+      "speedRatioToPlain" : 0.16855266481434708,
+      "status" : "ok",
+      "swiftMetalCompressedP95TokensPerSecond" : 25.81181632722137,
+      "swiftMetalCompressedTokensPerSecond" : 26.52801082800735,
+      "valuePrecision" : "turbo4v2",
+      "warmupIterations" : 1
+    }
+  ],
+  "runID" : "device-smoke-20260613",
+  "runtimeModes" : [
+    "capacityTurboQuant"
+  ],
+  "schemes" : [
+    "turbo4v2"
+  ],
+  "sparseValuePolicies" : [
+    "off"
+  ],
+  "table" : "codec       scheme    ctx      status   comp tok\/s  plain tok\/s  ratio   mlx\/swift×  gate   cosine     mem×\n----------  -------   ------   ------   ----------  -----------  -----   ----------  -----  --------   -----\npolar_qjl   turbo4v2  8K       ok       105.9       628.5        0.17    3.99        -      0.998705   2.21 ",
+  "warmupIterations" : 1
+}

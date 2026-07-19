@@ -255,7 +255,7 @@ class MiMoV2FlashMoE: Module, UnaryLayer {
     func callAsFunction(_ x: MLXArray) -> MLXArray {
         let (inds, scores) = gate(x)
         var y = switchMLP(x, inds)
-        y = (y * scores[.ellipsis, .newAxis]).sum(axis: -2).asType(y.dtype)
+        y = weightedExpertSum(y, scores).asType(y.dtype)
         if let sharedExperts {
             y = y + sharedExperts(x)
         }
@@ -412,12 +412,14 @@ public class MiMoV2FlashModel: Module, LLMModel, KVCacheDimensionProvider {
     }
 
     public func newCache(parameters: GenerateParameters?) -> [KVCache] {
-        return model.layers.map { layer in
+        return model.layers.enumerated().map { layerIndex, layer in
             if layer.isSlidingWindow {
                 return makeAttentionKVCache(
-                    parameters: parameters, maxKVSize: configuration.slidingWindowSize, keep: 0)
+                    parameters: parameters, maxKVSize: configuration.slidingWindowSize, keep: 0,
+                    layerIndex: layerIndex, layerCount: model.layers.count)
             } else {
-                return makeAttentionKVCache(parameters: parameters)
+                return makeAttentionKVCache(
+                    parameters: parameters, layerIndex: layerIndex, layerCount: model.layers.count)
             }
         }
     }

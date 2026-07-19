@@ -75,6 +75,17 @@ class Mistral3Attention: Module {
         _ x: MLXArray, attnScale: MLXArray, mask: MLXFast.ScaledDotProductAttentionMaskMode,
         cache: KVCache?
     ) -> MLXArray {
+        do {
+            return try callThrowing(x, attnScale: attnScale, mask: mask, cache: cache)
+        } catch {
+            nonThrowingLanguageModelRuntimeFailure(error, owner: type(of: self))
+        }
+    }
+
+    func callThrowing(
+        _ x: MLXArray, attnScale: MLXArray, mask: MLXFast.ScaledDotProductAttentionMaskMode,
+        cache: KVCache?
+    ) throws -> MLXArray {
         let (B, L, _) = (x.dim(0), x.dim(1), x.dim(2))
 
         var queries = wq(x)
@@ -95,7 +106,7 @@ class Mistral3Attention: Module {
         queries = queries * attnScale
 
         // Compute attention with automatic quantized/regular cache handling
-        let output = attentionWithCacheUpdate(
+        let output = try attentionWithCacheUpdateReturningStateThrowing(
             queries: queries,
             keys: keys,
             values: values,
@@ -103,6 +114,7 @@ class Mistral3Attention: Module {
             scale: scale,
             mask: mask
         )
+        .output
         .transposed(0, 2, 1, 3)
         .reshaped(B, L, -1)
         return wo(output)
@@ -159,7 +171,19 @@ class Mistral3TextTransformerBlock: Module {
         _ x: MLXArray, attnScale: MLXArray, mask: MLXFast.ScaledDotProductAttentionMaskMode,
         cache: KVCache?
     ) -> MLXArray {
-        let r = attention(inputLayerNorm(x), attnScale: attnScale, mask: mask, cache: cache)
+        do {
+            return try callThrowing(x, attnScale: attnScale, mask: mask, cache: cache)
+        } catch {
+            nonThrowingLanguageModelRuntimeFailure(error, owner: type(of: self))
+        }
+    }
+
+    func callThrowing(
+        _ x: MLXArray, attnScale: MLXArray, mask: MLXFast.ScaledDotProductAttentionMaskMode,
+        cache: KVCache?
+    ) throws -> MLXArray {
+        let r = try attention.callThrowing(
+            inputLayerNorm(x), attnScale: attnScale, mask: mask, cache: cache)
         let h = x + r
         let mlpOut = mlp(postAttentionLayerNorm(h))
         let out = h + mlpOut
@@ -216,6 +240,16 @@ public class Mistral3TextModelInner: Module {
     func callAsFunction(
         _ inputs: MLXArray, cache: [KVCache]? = nil, inputEmbeddings: MLXArray? = nil
     ) -> MLXArray {
+        do {
+            return try callThrowing(inputs, cache: cache, inputEmbeddings: inputEmbeddings)
+        } catch {
+            nonThrowingLanguageModelRuntimeFailure(error, owner: type(of: self))
+        }
+    }
+
+    func callThrowing(
+        _ inputs: MLXArray, cache: [KVCache]? = nil, inputEmbeddings: MLXArray? = nil
+    ) throws -> MLXArray {
         // Use provided embeddings or compute from inputs
         var h: MLXArray
         if let inputEmbeddings = inputEmbeddings {
@@ -262,7 +296,7 @@ public class Mistral3TextModelInner: Module {
         // Process through transformer layers
         for (i, layer) in layers.enumerated() {
             let mask = layer.useSliding ? swaMask : faMask
-            h = layer(h, attnScale: attnScale, mask: mask, cache: cache?[i])
+            h = try layer.callThrowing(h, attnScale: attnScale, mask: mask, cache: cache?[i])
         }
 
         return norm(h)
@@ -272,7 +306,9 @@ public class Mistral3TextModelInner: Module {
 // MARK: - Model
 
 /// Mistral3Text language model.
-public class Mistral3TextModel: Module, LLMModel, KVCacheDimensionProvider {
+public class Mistral3TextModel: Module, LLMModel, KVCacheDimensionProvider,
+    ThrowingLanguageModel
+{
     public let vocabularySize: Int
     public let kvHeads: [Int]
 
@@ -299,7 +335,21 @@ public class Mistral3TextModel: Module, LLMModel, KVCacheDimensionProvider {
     public func callAsFunction(
         _ inputs: MLXArray, cache: [KVCache]?, inputEmbeddings: MLXArray?
     ) -> MLXArray {
-        let out = model(inputs, cache: cache, inputEmbeddings: inputEmbeddings)
+        do {
+            return try callThrowing(inputs, cache: cache, inputEmbeddings: inputEmbeddings)
+        } catch {
+            nonThrowingLanguageModelRuntimeFailure(error, owner: type(of: self))
+        }
+    }
+
+    public func callAsFunctionThrowing(_ inputs: MLXArray, cache: [KVCache]?) throws -> MLXArray {
+        try callThrowing(inputs, cache: cache, inputEmbeddings: nil)
+    }
+
+    public func callThrowing(
+        _ inputs: MLXArray, cache: [KVCache]?, inputEmbeddings: MLXArray?
+    ) throws -> MLXArray {
+        let out = try model.callThrowing(inputs, cache: cache, inputEmbeddings: inputEmbeddings)
         if let lmHead {
             return lmHead(out)
         } else {
@@ -351,12 +401,14 @@ public class Mistral3TextModel: Module, LLMModel, KVCacheDimensionProvider {
     /// Sliding window attention layers use RotatingKVCache,
     /// full attention layers use standard KVCacheSimple.
     public func newCache(parameters: GenerateParameters?) -> [KVCache] {
-        return model.layers.map { layer in
+        return model.layers.enumerated().map { layerIndex, layer in
             if layer.useSliding, let slidingWindow = args.slidingWindow {
                 return makeAttentionKVCache(
-                    parameters: parameters, maxKVSize: slidingWindow, keep: 0)
+                    parameters: parameters, maxKVSize: slidingWindow, keep: 0,
+                    layerIndex: layerIndex, layerCount: model.layers.count)
             } else {
-                return makeAttentionKVCache(parameters: parameters)
+                return makeAttentionKVCache(
+                    parameters: parameters, layerIndex: layerIndex, layerCount: model.layers.count)
             }
         }
     }

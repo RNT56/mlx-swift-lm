@@ -225,6 +225,45 @@ extension ModelMemoryProfile {
         )
     }
 
+    public func polarWHTValueBytesPerTokenPerLayer(
+        valueBits: Int = TurboQuantKVCodec.polarWHTDefaultValueBits
+    ) -> Int {
+        let valueBits = min(8, max(1, valueBits))
+        let packedWordsPerVector = (max(1, headDimension) * valueBits + 31) / 32
+        let bytesPerHead =
+            packedWordsPerVector * MemoryLayout<UInt32>.stride
+            + MemoryLayout<Float>.stride
+        return max(1, kvHeadCount) * bytesPerHead
+    }
+
+    public func polarWHTKeyBytesPerTokenPerLayer(
+        preset: TurboQuantPreset = .turbo4v2
+    ) -> Int {
+        let keyBits = min(8, max(1, preset.effectiveBits))
+        let packedWordsPerVector = (max(1, headDimension) * keyBits + 31) / 32
+        let bytesPerHead =
+            packedWordsPerVector * MemoryLayout<UInt32>.stride
+            + MemoryLayout<Float>.stride
+        return max(1, kvHeadCount) * bytesPerHead
+    }
+
+    public func polarWHTLayerCacheBytesPerTokenPerLayer(
+        preset: TurboQuantPreset = .turbo4v2,
+        valueBits: Int? = TurboQuantKVCodec.polarWHTDefaultValueBits,
+        groupSize: Int = 64
+    ) -> Int {
+        let keyFootprint = turboQuantLayerCacheFootprint(
+            preset: preset,
+            valueBits: valueBits,
+            groupSize: groupSize
+        )
+        return keyFootprint.keyBytesPerTokenPerLayer
+            + polarWHTKeyBytesPerTokenPerLayer(preset: preset)
+            + polarWHTValueBytesPerTokenPerLayer(
+                valueBits: valueBits ?? TurboQuantKVCodec.polarWHTDefaultValueBits
+            )
+    }
+
     public func turboQuantCompressedKVBytes(
         contextLength: Int,
         preset: TurboQuantPreset = .turbo3_5,
@@ -239,6 +278,43 @@ extension ModelMemoryProfile {
         return turboQuantClampedInt(
             Double(max(0, contextLength)) * Double(footprint.bytesPerTokenAllLayers)
         )
+    }
+
+    public func affineK8VxKeyValueBytesPerTokenPerLayer(
+        valueBits: Int = TurboQuantKVCodec.affineK8V4ValueBits
+    ) -> (key: Int, value: Int, total: Int) {
+        func packedAffineBytesPerHead(groupSize: Int, bits: Int) -> Int {
+            let groupSize = max(1, groupSize)
+            let groups = (max(1, headDimension) + groupSize - 1) / groupSize
+            let packedWords = (groupSize * max(1, bits) + 31) / 32
+            return groups * (
+                packedWords * MemoryLayout<UInt32>.stride
+                    + 2 * MemoryLayout<Float>.stride
+            )
+        }
+
+        let keyBytesPerHead = packedAffineBytesPerHead(
+            groupSize: TurboQuantKVCodec.affineK8V4KeyGroupSize,
+            bits: TurboQuantKVCodec.affineK8V4KeyBits
+        )
+        let valueBytesPerHead = packedAffineBytesPerHead(
+            groupSize: TurboQuantKVCodec.affineK8V4ValueGroupSize,
+            bits: valueBits
+        )
+        let heads = max(1, kvHeadCount)
+        let key = heads * keyBytesPerHead
+        let value = heads * valueBytesPerHead
+        return (key, value, key + value)
+    }
+
+    public func affineK8VxBytesPerTokenPerLayer(
+        valueBits: Int = TurboQuantKVCodec.affineK8V4ValueBits
+    ) -> Int {
+        affineK8VxKeyValueBytesPerTokenPerLayer(valueBits: valueBits).total
+    }
+
+    public func affineK8V4BytesPerTokenPerLayer() -> Int {
+        affineK8VxBytesPerTokenPerLayer(valueBits: TurboQuantKVCodec.affineK8V4ValueBits)
     }
 }
 
@@ -352,6 +428,8 @@ public enum TurboQuantAdmissionDowngradeReason: String, Codable, Sendable, CaseI
     case releasedRawShadow
     case disabledPackedFallback
     case loweredValueBits
+    case loweredValuePrecision
+    case keyPrecisionEvidenceRequired
     case movedBalancedToMaxContext
     case reducedContext
     case rollingSummaryMemory
@@ -378,9 +456,24 @@ public struct TurboQuantMemoryPlan: Codable, Equatable, Sendable {
     public var valueBits: Int
     public var groupSize: Int
     public var fallbackPolicy: TurboQuantFallbackPolicy
+    public var requestedRuntimeMode: TurboQuantRuntimeMode?
+    public var resolvedRuntimeMode: TurboQuantRuntimeMode?
+    public var precisionPolicy: TurboQuantKVPrecisionPolicy?
+    public var sparseValuePolicy: TurboQuantSparseValuePolicy?
+    public var runtimeFallbackReason: String?
+    public var kvLayerPolicyHash: String?
+    public var kvLayerPolicySummary: String?
     public var rawBytesPerToken: Int
     public var packedFallbackBytesPerToken: Int
     public var compressedBytesPerToken: Int
+    public var compressedKeyBytes: Int?
+    public var compressedValueBytes: Int?
+    public var decodedActiveKVBytes: Int?
+    public var boundaryLayerCount: Int
+    public var boundaryKVBytes: Int
+    public var boundaryCachePrecision: TurboQuantBoundaryCachePrecision
+    public var rawBoundaryLayerCount: Int
+    public var rawBoundaryKVBytes: Int
     public var layerFootprint: TurboQuantLayerCacheFootprint
     public var usesRawShadow: Bool
     public var packedFallbackEnabled: Bool
@@ -390,12 +483,121 @@ public struct TurboQuantMemoryPlan: Codable, Equatable, Sendable {
     public var fitsRuntimeBudget: Bool {
         runtimeZones.fitsAvailableMemory
     }
+
+    public func rawSDPARuntimeBytes(contextLength: Int) -> Int {
+        let rawKVBytes = rawBytesPerToken * max(0, contextLength)
+        return runtimeZones.modelResidentBytes
+            + runtimeZones.mlxCacheBytes
+            + rawKVBytes
+            + runtimeZones.scratchBytes
+            + runtimeZones.promptAndTokenizerBytes
+            + runtimeZones.uiReserveBytes
+            + runtimeZones.safetyReserveBytes
+            + runtimeZones.rollingSummaryBytes
+    }
+
+    public func rawSDPAFits(contextLength: Int) -> Bool {
+        rawSDPARuntimeBytes(contextLength: contextLength)
+            <= runtimeZones.availableAppMemoryBytes
+    }
+
+    public func throughputRuntimeBytes(contextLength: Int) -> Int {
+        rawSDPARuntimeBytes(contextLength: contextLength)
+            + compressedBytesPerToken * max(0, contextLength)
+    }
+
+    public func throughputFits(contextLength: Int) -> Bool {
+        throughputRuntimeBytes(contextLength: contextLength)
+            <= runtimeZones.availableAppMemoryBytes
+    }
+
+    public init(
+        requestedContextLength: Int,
+        admittedContextLength: Int,
+        requestedMode: TurboQuantUserMode,
+        effectiveMode: TurboQuantUserMode,
+        preset: TurboQuantPreset,
+        valueBits: Int,
+        groupSize: Int,
+        fallbackPolicy: TurboQuantFallbackPolicy,
+        requestedRuntimeMode: TurboQuantRuntimeMode = .auto,
+        resolvedRuntimeMode: TurboQuantRuntimeMode = .capacityTurboQuant,
+        precisionPolicy: TurboQuantKVPrecisionPolicy? = nil,
+        sparseValuePolicy: TurboQuantSparseValuePolicy? = nil,
+        runtimeFallbackReason: String? = nil,
+        kvLayerPolicyHash: String? = nil,
+        kvLayerPolicySummary: String? = nil,
+        rawBytesPerToken: Int,
+        packedFallbackBytesPerToken: Int,
+        compressedBytesPerToken: Int,
+        compressedKeyBytes: Int? = nil,
+        compressedValueBytes: Int? = nil,
+        decodedActiveKVBytes: Int = 0,
+        boundaryLayerCount: Int = 0,
+        boundaryKVBytes: Int = 0,
+        boundaryCachePrecision: TurboQuantBoundaryCachePrecision = .affineK8V4,
+        rawBoundaryLayerCount: Int = 0,
+        rawBoundaryKVBytes: Int = 0,
+        layerFootprint: TurboQuantLayerCacheFootprint,
+        usesRawShadow: Bool,
+        packedFallbackEnabled: Bool,
+        usesRollingSummaryMemory: Bool,
+        runtimeZones: TurboQuantRuntimeMemoryZones
+    ) {
+        self.requestedContextLength = max(1, requestedContextLength)
+        self.admittedContextLength = max(0, admittedContextLength)
+        self.requestedMode = requestedMode
+        self.effectiveMode = effectiveMode
+        self.preset = preset
+        self.valueBits = min(8, max(2, valueBits))
+        self.groupSize = max(1, groupSize)
+        self.fallbackPolicy = fallbackPolicy
+        self.requestedRuntimeMode = requestedRuntimeMode
+        self.resolvedRuntimeMode = resolvedRuntimeMode
+        self.precisionPolicy =
+            precisionPolicy
+            ?? TurboQuantKVPrecisionPolicy.legacy(preset: preset, valueBits: valueBits)
+        self.sparseValuePolicy = sparseValuePolicy
+        self.runtimeFallbackReason = runtimeFallbackReason
+        self.kvLayerPolicyHash = kvLayerPolicyHash
+        self.kvLayerPolicySummary = kvLayerPolicySummary
+        self.rawBytesPerToken = max(0, rawBytesPerToken)
+        self.packedFallbackBytesPerToken = max(0, packedFallbackBytesPerToken)
+        self.compressedBytesPerToken = max(0, compressedBytesPerToken)
+        self.compressedKeyBytes = max(
+            0,
+            compressedKeyBytes ?? layerFootprint.keyBytesPerTokenPerLayer
+                * max(0, layerFootprint.layerCount)
+                * max(0, admittedContextLength)
+        )
+        self.compressedValueBytes = max(
+            0,
+            compressedValueBytes ?? layerFootprint.valueBytesPerTokenPerLayer
+                * max(0, layerFootprint.layerCount)
+                * max(0, admittedContextLength)
+        )
+        self.decodedActiveKVBytes = max(0, decodedActiveKVBytes)
+        self.boundaryLayerCount = max(0, boundaryLayerCount)
+        self.boundaryKVBytes = max(0, boundaryKVBytes)
+        self.boundaryCachePrecision = boundaryCachePrecision
+        self.rawBoundaryLayerCount = max(0, rawBoundaryLayerCount)
+        self.rawBoundaryKVBytes = max(0, rawBoundaryKVBytes)
+        self.layerFootprint = layerFootprint
+        self.usesRawShadow = usesRawShadow
+        self.packedFallbackEnabled = packedFallbackEnabled
+        self.usesRollingSummaryMemory = usesRollingSummaryMemory
+        self.runtimeZones = runtimeZones
+    }
 }
 
 public struct TurboQuantAdmission: Codable, Equatable, Sendable {
     public var admitted: Bool
     public var requestedContextLength: Int
     public var admittedContextLength: Int
+    /// When true, the admitted context fits an uncompressed FP16 KV cache within the live memory
+    /// budget, so the runtime should use plain SDPA (faster + higher quality) rather than the
+    /// compressed codec. Set only when FP16 fits at the admitted length and the mode permits it.
+    public var recommendsPlainKVCache: Bool
     public var requestedMode: TurboQuantUserMode
     public var selectedMode: TurboQuantUserMode
     public var memoryPlan: TurboQuantMemoryPlan
@@ -405,6 +607,30 @@ public struct TurboQuantAdmission: Codable, Equatable, Sendable {
 
     public var primaryDowngradeReason: TurboQuantAdmissionDowngradeReason? {
         downgradeReasons.first?.reason
+    }
+
+    public init(
+        admitted: Bool,
+        requestedContextLength: Int,
+        admittedContextLength: Int,
+        requestedMode: TurboQuantUserMode,
+        selectedMode: TurboQuantUserMode,
+        memoryPlan: TurboQuantMemoryPlan,
+        downgradeReasons: [TurboQuantAdmissionDowngrade] = [],
+        rejectedPaths: [RejectedPath] = [],
+        userMessage: String,
+        recommendsPlainKVCache: Bool = false
+    ) {
+        self.admitted = admitted
+        self.requestedContextLength = max(1, requestedContextLength)
+        self.admittedContextLength = max(0, admittedContextLength)
+        self.recommendsPlainKVCache = recommendsPlainKVCache
+        self.requestedMode = requestedMode
+        self.selectedMode = selectedMode
+        self.memoryPlan = memoryPlan
+        self.downgradeReasons = downgradeReasons
+        self.rejectedPaths = rejectedPaths
+        self.userMessage = userMessage
     }
 }
 
@@ -472,7 +698,12 @@ public struct TurboQuantAdmissionPlanner: Sendable {
         fallbackPolicy: TurboQuantFallbackPolicy = .compressedDecodeAllowed,
         preset: TurboQuantPreset = .turbo3_5,
         valueBits: Int? = nil,
+        precisionPolicy: TurboQuantKVPrecisionPolicy? = nil,
         groupSize: Int = 64,
+        kvCodec: TurboQuantKVCodec = .polarQJL,
+        turboQuantBackend: TurboQuantBackend = .metalPolarQJL,
+        kvLayerPolicy: KVLayerPolicy? = nil,
+        kvHeads: [Int]? = nil,
         memorySample: TurboQuantRuntimeMemorySample? = nil
     ) -> TurboQuantAdmission {
         let sample =
@@ -486,6 +717,9 @@ public struct TurboQuantAdmissionPlanner: Sendable {
         let requestedContext = max(1, requestedContextLength)
         let requestedValueBits = min(
             8, max(options.minimumValueBits, valueBits ?? preset.defaultValueBits))
+        let requestedPrecisionPolicy =
+            precisionPolicy
+            ?? TurboQuantKVPrecisionPolicy.legacy(preset: preset, valueBits: requestedValueBits)
         var downgrades: [TurboQuantAdmissionDowngrade] = []
         var candidate = initialCandidate(
             requestedContextLength: requestedContext,
@@ -497,6 +731,10 @@ public struct TurboQuantAdmissionPlanner: Sendable {
             lowPowerModeEnabled: sample.lowPowerModeEnabled,
             downgrades: &downgrades
         )
+        if requestedPrecisionPolicy.key == .affineQ8 {
+            candidate.preset = .turbo8
+            candidate.valueBits = requestedPrecisionPolicy.resolvedValueBits ?? requestedValueBits
+        }
 
         var plan = memoryPlan(
             profile: profile,
@@ -504,9 +742,28 @@ public struct TurboQuantAdmissionPlanner: Sendable {
             candidate: candidate,
             requestedMode: userMode,
             fallbackPolicy: fallbackPolicy,
+            precisionPolicy: requestedPrecisionPolicy,
             groupSize: groupSize,
+            kvCodec: kvCodec,
+            turboQuantBackend: turboQuantBackend,
+            kvLayerPolicy: kvLayerPolicy,
+            kvHeads: kvHeads,
             sample: sample
         )
+        // Prefer plain FP16 KV when it fits the live budget at the full requested context: it is
+        // strictly faster and higher quality than the compressed codec. Because FP16 KV is larger
+        // than compressed, "FP16 fits" implies "compressed fits", so this is the right first check.
+        // `.maxContext` skips it — reaching as far as possible via compression is the point there.
+        if userMode != .maxContext, plan.rawSDPAFits(contextLength: requestedContext) {
+            return admittedResult(
+                requestedContextLength: requestedContext,
+                requestedMode: userMode,
+                plan: plan,
+                downgrades: downgrades,
+                recommendsPlainKVCache: true
+            )
+        }
+
         if plan.fitsRuntimeBudget {
             return admittedResult(
                 requestedContextLength: requestedContext,
@@ -530,7 +787,12 @@ public struct TurboQuantAdmissionPlanner: Sendable {
                 candidate: candidate,
                 requestedMode: userMode,
                 fallbackPolicy: fallbackPolicy,
+                precisionPolicy: requestedPrecisionPolicy,
                 groupSize: groupSize,
+                kvCodec: kvCodec,
+                turboQuantBackend: turboQuantBackend,
+                kvLayerPolicy: kvLayerPolicy,
+                kvHeads: kvHeads,
                 sample: sample
             )
             if plan.fitsRuntimeBudget {
@@ -557,7 +819,12 @@ public struct TurboQuantAdmissionPlanner: Sendable {
                 candidate: candidate,
                 requestedMode: userMode,
                 fallbackPolicy: fallbackPolicy,
+                precisionPolicy: requestedPrecisionPolicy,
                 groupSize: groupSize,
+                kvCodec: kvCodec,
+                turboQuantBackend: turboQuantBackend,
+                kvLayerPolicy: kvLayerPolicy,
+                kvHeads: kvHeads,
                 sample: sample
             )
             if plan.fitsRuntimeBudget {
@@ -586,7 +853,12 @@ public struct TurboQuantAdmissionPlanner: Sendable {
                 candidate: candidate,
                 requestedMode: userMode,
                 fallbackPolicy: fallbackPolicy,
+                precisionPolicy: requestedPrecisionPolicy,
                 groupSize: groupSize,
+                kvCodec: kvCodec,
+                turboQuantBackend: turboQuantBackend,
+                kvLayerPolicy: kvLayerPolicy,
+                kvHeads: kvHeads,
                 sample: sample
             )
             if plan.fitsRuntimeBudget {
@@ -617,7 +889,12 @@ public struct TurboQuantAdmissionPlanner: Sendable {
                 candidate: candidate,
                 requestedMode: userMode,
                 fallbackPolicy: fallbackPolicy,
+                precisionPolicy: requestedPrecisionPolicy,
                 groupSize: groupSize,
+                kvCodec: kvCodec,
+                turboQuantBackend: turboQuantBackend,
+                kvLayerPolicy: kvLayerPolicy,
+                kvHeads: kvHeads,
                 sample: sample
             )
             if plan.fitsRuntimeBudget {
@@ -636,7 +913,12 @@ public struct TurboQuantAdmissionPlanner: Sendable {
             candidate: candidate,
             requestedMode: userMode,
             fallbackPolicy: fallbackPolicy,
+            precisionPolicy: requestedPrecisionPolicy,
             groupSize: groupSize,
+            kvCodec: kvCodec,
+            turboQuantBackend: turboQuantBackend,
+            kvLayerPolicy: kvLayerPolicy,
+            kvHeads: kvHeads,
             sample: sample
         )
         if reducedContext < candidate.contextLength, reducedContext >= options.minimumContextLength
@@ -654,7 +936,12 @@ public struct TurboQuantAdmissionPlanner: Sendable {
                 candidate: candidate,
                 requestedMode: userMode,
                 fallbackPolicy: fallbackPolicy,
+                precisionPolicy: requestedPrecisionPolicy,
                 groupSize: groupSize,
+                kvCodec: kvCodec,
+                turboQuantBackend: turboQuantBackend,
+                kvLayerPolicy: kvLayerPolicy,
+                kvHeads: kvHeads,
                 sample: sample
             )
             if plan.fitsRuntimeBudget {
@@ -681,7 +968,12 @@ public struct TurboQuantAdmissionPlanner: Sendable {
             candidate: candidate,
             requestedMode: userMode,
             fallbackPolicy: fallbackPolicy,
+            precisionPolicy: requestedPrecisionPolicy,
             groupSize: groupSize,
+            kvCodec: kvCodec,
+            turboQuantBackend: turboQuantBackend,
+            kvLayerPolicy: kvLayerPolicy,
+            kvHeads: kvHeads,
             sample: sample
         )
         if plan.fitsRuntimeBudget {
@@ -788,13 +1080,13 @@ public struct TurboQuantAdmissionPlanner: Sendable {
             contextLength = min(requestedContextLength, options.fastestContextCap)
             selectedPreset = preset
             selectedValueBits = max(valueBits, preset.defaultValueBits)
-            usesRawShadow = true
+            usesRawShadow = false
             packedFallbackEnabled = false
         case .balanced:
             contextLength = requestedContextLength
             selectedPreset = preset
             selectedValueBits = valueBits
-            usesRawShadow = true
+            usesRawShadow = false
             packedFallbackEnabled = fallbackPolicy == .packedAllowed
         case .maxContext:
             contextLength = requestedContextLength
@@ -821,13 +1113,244 @@ public struct TurboQuantAdmissionPlanner: Sendable {
         )
     }
 
+    private struct PolicyKVBytesPerToken {
+        var compressed: Int
+        var compressedKey: Int
+        var compressedValue: Int
+        var raw: Int
+        var boundary: Int
+        var rawBoundaryLayerCount: Int
+    }
+
+    private struct LayerKVBytesPerToken {
+        var total: Int
+        var key: Int
+        var value: Int
+    }
+
+    private func usesPolarWHTStorage(
+        kvCodec: TurboQuantKVCodec,
+        backend: TurboQuantBackend
+    ) -> Bool {
+        kvCodec == .polarWHT
+            || backend == .metalPolarWHT
+            || backend == .polarWHTReference
+    }
+
+    private func defaultCompressedLayerBytes(
+        profile: ModelMemoryProfile,
+        candidate: Candidate,
+        precisionPolicy: TurboQuantKVPrecisionPolicy,
+        footprint: TurboQuantLayerCacheFootprint,
+        kvCodec: TurboQuantKVCodec,
+        backend: TurboQuantBackend
+    ) -> LayerKVBytesPerToken {
+        let valueBits = precisionPolicy.resolvedValueBits ?? candidate.valueBits
+        let usesAffineK8Vx =
+            (precisionPolicy.key == .affineQ8 || precisionPolicy.key == .fp16OrQ8)
+            && candidate.preset == .turbo8
+            && TurboQuantKVCodec.affineK8VxSupportedValueBits.contains(valueBits)
+        if usesPolarWHTStorage(kvCodec: kvCodec, backend: backend) {
+            let existingKeyBytes =
+                usesAffineK8Vx
+                ? profile.affineK8VxKeyValueBytesPerTokenPerLayer(valueBits: valueBits).key
+                : footprint.keyBytesPerTokenPerLayer
+            let keyBytes = existingKeyBytes
+                + profile.polarWHTKeyBytesPerTokenPerLayer(preset: candidate.preset)
+            let valueBytes = profile.polarWHTValueBytesPerTokenPerLayer(valueBits: valueBits)
+            return LayerKVBytesPerToken(
+                total: keyBytes + valueBytes,
+                key: keyBytes,
+                value: valueBytes
+            )
+        }
+        if usesAffineK8Vx {
+            let bytes = profile.affineK8VxKeyValueBytesPerTokenPerLayer(valueBits: valueBits)
+            return LayerKVBytesPerToken(total: bytes.total, key: bytes.key, value: bytes.value)
+        }
+        return LayerKVBytesPerToken(
+            total: footprint.bytesPerTokenPerLayer,
+            key: footprint.keyBytesPerTokenPerLayer,
+            value: footprint.valueBytesPerTokenPerLayer
+        )
+    }
+
+    private func policyKVBytesPerToken(
+        profile: ModelMemoryProfile,
+        candidate: Candidate,
+        precisionPolicy: TurboQuantKVPrecisionPolicy,
+        groupSize: Int,
+        kvCodec: TurboQuantKVCodec,
+        turboQuantBackend: TurboQuantBackend,
+        kvLayerPolicy: KVLayerPolicy?,
+        kvHeads: [Int]?
+    ) -> PolicyKVBytesPerToken? {
+        guard let kvLayerPolicy else { return nil }
+        let attentionLayerIndexes: [Int]
+        if let kvHeads, !kvHeads.isEmpty {
+            attentionLayerIndexes = kvHeads.enumerated().compactMap { index, heads in
+                heads > 0 ? index : nil
+            }
+        } else {
+            attentionLayerIndexes = Array(0 ..< max(0, profile.layerCount))
+        }
+        guard !attentionLayerIndexes.isEmpty else { return nil }
+
+        let rawBytesPerToken = profile.kvCacheBytes(contextLength: 1)
+        let rawBytesPerTokenPerLayer =
+            profile.layerCount > 0 ? rawBytesPerToken / max(1, profile.layerCount) : 0
+        let defaultFootprint = profile.turboQuantLayerCacheFootprint(
+            preset: candidate.preset,
+            valueBits: candidate.valueBits,
+            groupSize: groupSize
+        )
+        let defaultLayerBytes = defaultCompressedLayerBytes(
+            profile: profile,
+            candidate: candidate,
+            precisionPolicy: precisionPolicy,
+            footprint: defaultFootprint,
+            kvCodec: kvCodec,
+            backend: turboQuantBackend
+        )
+        let protected = precisionPolicy.protectedBoundaryLayerIndexes(
+            layerCount: attentionLayerIndexes.count
+        )
+        var compressed = 0
+        var compressedKey = 0
+        var compressedValue = 0
+        var raw = 0
+        var boundary = 0
+        var rawBoundaryLayerCount = 0
+
+        func addCompressed(total: Int, key: Int? = nil, value: Int? = nil) {
+            compressed += total
+            compressedKey += key ?? (total / 2)
+            compressedValue += value ?? (total - (total / 2))
+        }
+
+        func addTurboQuant(
+            preset: TurboQuantPreset,
+            valueBits: Int?,
+            groupSize: Int,
+            backend: TurboQuantBackend
+        ) {
+            let resolvedValueBits = valueBits ?? precisionPolicy.resolvedValueBits
+                ?? candidate.valueBits
+            let footprint = profile.turboQuantLayerCacheFootprint(
+                preset: preset,
+                valueBits: resolvedValueBits,
+                groupSize: groupSize
+            )
+            let layerCandidate = Candidate(
+                contextLength: candidate.contextLength,
+                mode: candidate.mode,
+                preset: preset,
+                valueBits: resolvedValueBits,
+                usesRawShadow: candidate.usesRawShadow,
+                packedFallbackEnabled: candidate.packedFallbackEnabled,
+                usesRollingSummaryMemory: candidate.usesRollingSummaryMemory
+            )
+            let layerBytes = defaultCompressedLayerBytes(
+                profile: profile,
+                candidate: layerCandidate,
+                precisionPolicy: precisionPolicy,
+                footprint: footprint,
+                kvCodec: turboQuantCompressedKVCodec(backend: backend),
+                backend: backend
+            )
+            compressed += layerBytes.total
+            compressedKey += layerBytes.key
+            compressedValue += layerBytes.value
+        }
+
+        func addInheritedLayer(attentionOrdinal: Int) {
+            guard protected.contains(attentionOrdinal) else {
+                compressed += defaultLayerBytes.total
+                compressedKey += defaultLayerBytes.key
+                compressedValue += defaultLayerBytes.value
+                return
+            }
+            switch precisionPolicy.boundaryCachePrecision {
+            case .affineK8V4:
+                let bytes = profile.affineK8VxKeyValueBytesPerTokenPerLayer()
+                boundary += bytes.total
+                addCompressed(total: bytes.total, key: bytes.key, value: bytes.value)
+            case .raw:
+                boundary += rawBytesPerTokenPerLayer
+                raw += rawBytesPerTokenPerLayer
+                rawBoundaryLayerCount += 1
+            }
+        }
+
+        for (attentionOrdinal, layerIndex) in attentionLayerIndexes.enumerated() {
+            switch kvLayerPolicy.codec(forLayerIndex: layerIndex) {
+            case .inherit:
+                addInheritedLayer(attentionOrdinal: attentionOrdinal)
+            case .rawFP16:
+                raw += rawBytesPerTokenPerLayer
+                boundary += rawBytesPerTokenPerLayer
+                rawBoundaryLayerCount += 1
+            case .mlxAffine(let bits, let groupSize):
+                addCompressed(total: packedFallbackBytesPerToken(
+                    profile: profile,
+                    bits: bits,
+                    groupSize: groupSize
+                ) / max(1, profile.layerCount))
+            case .affineK8V4:
+                let bytes = profile.affineK8VxKeyValueBytesPerTokenPerLayer()
+                addCompressed(total: bytes.total, key: bytes.key, value: bytes.value)
+            case .affineK8Vx(let valueBits):
+                let bytes = profile.affineK8VxKeyValueBytesPerTokenPerLayer(valueBits: valueBits)
+                addCompressed(total: bytes.total, key: bytes.key, value: bytes.value)
+            case .affineK8VxResidual(let valueBits, let residualsPerGroup):
+                let bytes = profile.affineK8VxKeyValueBytesPerTokenPerLayer(valueBits: valueBits)
+                let groupsPerToken = max(
+                    1,
+                    profile.headDimension / TurboQuantKVCodec.affineK8V4ValueGroupSize
+                )
+                let residualBytes = residualsPerGroup > 0 ? groupsPerToken * 3 : 0
+                addCompressed(
+                    total: bytes.total + residualBytes,
+                    key: bytes.key,
+                    value: bytes.value + residualBytes
+                )
+            case .affineInt4:
+                addCompressed(total: packedFallbackBytesPerToken(
+                    profile: profile,
+                    bits: TurboQuantKVCodec.affineInt4Bits,
+                    groupSize: TurboQuantKVCodec.affineInt4DefaultGroupSize
+                ) / max(1, profile.layerCount))
+            case .turboQuant(let preset, let valueBits, let groupSize, let backend):
+                addTurboQuant(
+                    preset: preset,
+                    valueBits: valueBits,
+                    groupSize: groupSize,
+                    backend: backend
+                )
+            }
+        }
+        return PolicyKVBytesPerToken(
+            compressed: compressed,
+            compressedKey: compressedKey,
+            compressedValue: compressedValue,
+            raw: raw,
+            boundary: boundary,
+            rawBoundaryLayerCount: rawBoundaryLayerCount
+        )
+    }
+
     private func memoryPlan(
         profile: ModelMemoryProfile,
         requestedContextLength: Int,
         candidate: Candidate,
         requestedMode: TurboQuantUserMode,
         fallbackPolicy: TurboQuantFallbackPolicy,
+        precisionPolicy: TurboQuantKVPrecisionPolicy,
         groupSize: Int,
+        kvCodec: TurboQuantKVCodec,
+        turboQuantBackend: TurboQuantBackend,
+        kvLayerPolicy: KVLayerPolicy?,
+        kvHeads: [Int]?,
         sample: TurboQuantRuntimeMemorySample
     ) -> TurboQuantMemoryPlan {
         let footprint = profile.turboQuantLayerCacheFootprint(
@@ -835,13 +1358,86 @@ public struct TurboQuantAdmissionPlanner: Sendable {
             valueBits: candidate.valueBits,
             groupSize: groupSize
         )
-        let compressedKVBytes = footprint.bytesPerTokenAllLayers * candidate.contextLength
+        let defaultLayerBytes = defaultCompressedLayerBytes(
+            profile: profile,
+            candidate: candidate,
+            precisionPolicy: precisionPolicy,
+            footprint: footprint,
+            kvCodec: kvCodec,
+            backend: turboQuantBackend
+        )
         let rawBytesPerToken = profile.kvCacheBytes(contextLength: 1)
+        let rawBytesPerTokenPerLayer =
+            profile.layerCount > 0 ? rawBytesPerToken / max(1, profile.layerCount) : 0
+        let protectedLayerCount = precisionPolicy
+            .protectedBoundaryLayerIndexes(layerCount: profile.layerCount)
+            .count
+        let compressedLayerCount = max(0, profile.layerCount - protectedLayerCount)
+        let compressedMiddleKVBytes =
+            defaultLayerBytes.total * compressedLayerCount * candidate.contextLength
+        let boundaryCachePrecision = precisionPolicy.boundaryCachePrecision
+        let boundaryBytesPerTokenPerLayer: Int
+        let boundaryKeyBytesPerTokenPerLayer: Int
+        let boundaryValueBytesPerTokenPerLayer: Int
+        switch boundaryCachePrecision {
+        case .affineK8V4:
+            let boundaryBytes = profile.affineK8VxKeyValueBytesPerTokenPerLayer()
+            boundaryBytesPerTokenPerLayer = boundaryBytes.total
+            boundaryKeyBytesPerTokenPerLayer = boundaryBytes.key
+            boundaryValueBytesPerTokenPerLayer = boundaryBytes.value
+        case .raw:
+            boundaryBytesPerTokenPerLayer = rawBytesPerTokenPerLayer
+            boundaryKeyBytesPerTokenPerLayer = 0
+            boundaryValueBytesPerTokenPerLayer = 0
+        }
+        let boundaryKVBytes =
+            boundaryBytesPerTokenPerLayer * protectedLayerCount * candidate.contextLength
+        let rawBoundaryKVBytes =
+            boundaryCachePrecision == .raw ? boundaryKVBytes : 0
+        var compressedKVBytes =
+            compressedMiddleKVBytes
+                + (boundaryCachePrecision == .affineK8V4 ? boundaryKVBytes : 0)
+        var compressedKeyBytes =
+            defaultLayerBytes.key
+                * compressedLayerCount
+                * candidate.contextLength
+        var compressedValueBytes =
+            defaultLayerBytes.value
+                * compressedLayerCount
+                * candidate.contextLength
+        if boundaryCachePrecision == .affineK8V4 {
+            compressedKeyBytes +=
+                boundaryKeyBytesPerTokenPerLayer * protectedLayerCount * candidate.contextLength
+            compressedValueBytes +=
+                boundaryValueBytesPerTokenPerLayer * protectedLayerCount * candidate.contextLength
+        }
+        var mixedRawBoundaryKVBytes = rawBoundaryKVBytes
+        var mixedBoundaryKVBytes = boundaryKVBytes
+        var mixedRawBoundaryLayerCount = boundaryCachePrecision == .raw ? protectedLayerCount : 0
+        var compressedBytesPerToken = defaultLayerBytes.total * compressedLayerCount
+        if let policyBytes = policyKVBytesPerToken(
+            profile: profile,
+            candidate: candidate,
+            precisionPolicy: precisionPolicy,
+            groupSize: groupSize,
+            kvCodec: kvCodec,
+            turboQuantBackend: turboQuantBackend,
+            kvLayerPolicy: kvLayerPolicy,
+            kvHeads: kvHeads
+        ) {
+            compressedKVBytes = policyBytes.compressed * candidate.contextLength
+            compressedKeyBytes = policyBytes.compressedKey * candidate.contextLength
+            compressedValueBytes = policyBytes.compressedValue * candidate.contextLength
+            mixedRawBoundaryKVBytes = policyBytes.raw * candidate.contextLength
+            mixedBoundaryKVBytes = policyBytes.boundary * candidate.contextLength
+            mixedRawBoundaryLayerCount = policyBytes.rawBoundaryLayerCount
+            compressedBytesPerToken = policyBytes.compressed
+        }
         let rawShadowTokens =
             candidate.usesRawShadow
             ? min(candidate.contextLength, options.rawShadowPrefillChunkLength)
             : 0
-        let rawShadowBytes = rawBytesPerToken * rawShadowTokens
+        let rawShadowBytes = rawBytesPerToken * rawShadowTokens + mixedRawBoundaryKVBytes
         let packedFallbackBytesPerToken = packedFallbackBytesPerToken(
             profile: profile,
             bits: candidate.valueBits,
@@ -894,9 +1490,19 @@ public struct TurboQuantAdmissionPlanner: Sendable {
             valueBits: candidate.valueBits,
             groupSize: max(1, groupSize),
             fallbackPolicy: fallbackPolicy,
+            precisionPolicy: precisionPolicy,
+            kvLayerPolicyHash: kvLayerPolicy?.stableHash,
+            kvLayerPolicySummary: kvLayerPolicy?.summary(),
             rawBytesPerToken: rawBytesPerToken,
             packedFallbackBytesPerToken: packedFallbackBytesPerToken,
-            compressedBytesPerToken: footprint.bytesPerTokenAllLayers,
+            compressedBytesPerToken: compressedBytesPerToken,
+            compressedKeyBytes: compressedKeyBytes,
+            compressedValueBytes: compressedValueBytes,
+            boundaryLayerCount: protectedLayerCount,
+            boundaryKVBytes: mixedBoundaryKVBytes,
+            boundaryCachePrecision: boundaryCachePrecision,
+            rawBoundaryLayerCount: mixedRawBoundaryLayerCount,
+            rawBoundaryKVBytes: mixedRawBoundaryKVBytes,
             layerFootprint: footprint,
             usesRawShadow: candidate.usesRawShadow,
             packedFallbackEnabled: candidate.packedFallbackEnabled,
@@ -922,7 +1528,7 @@ public struct TurboQuantAdmissionPlanner: Sendable {
             guard profile.layerCount > 0 else { return rawBytesPerToken * max(0, contextLength) }
             let decodedLayers = min(profile.layerCount, options.exactFallbackDecodeLayerCount)
             return (rawBytesPerToken / max(1, profile.layerCount)) * decodedLayers
-                * max(1, min(contextLength, options.rawShadowPrefillChunkLength))
+                * max(0, contextLength)
         case .fatalOnFailure:
             return 0
         }
@@ -970,7 +1576,12 @@ public struct TurboQuantAdmissionPlanner: Sendable {
         candidate: Candidate,
         requestedMode: TurboQuantUserMode,
         fallbackPolicy: TurboQuantFallbackPolicy,
+        precisionPolicy: TurboQuantKVPrecisionPolicy,
         groupSize: Int,
+        kvCodec: TurboQuantKVCodec,
+        turboQuantBackend: TurboQuantBackend,
+        kvLayerPolicy: KVLayerPolicy?,
+        kvHeads: [Int]?,
         sample: TurboQuantRuntimeMemorySample
     ) -> Int {
         var low = 0
@@ -985,7 +1596,12 @@ public struct TurboQuantAdmissionPlanner: Sendable {
                 candidate: candidate,
                 requestedMode: requestedMode,
                 fallbackPolicy: fallbackPolicy,
+                precisionPolicy: precisionPolicy,
                 groupSize: groupSize,
+                kvCodec: kvCodec,
+                turboQuantBackend: turboQuantBackend,
+                kvLayerPolicy: kvLayerPolicy,
+                kvHeads: kvHeads,
                 sample: sample
             )
             if plan.fitsRuntimeBudget {
@@ -1001,7 +1617,8 @@ public struct TurboQuantAdmissionPlanner: Sendable {
         requestedContextLength: Int,
         requestedMode: TurboQuantUserMode,
         plan: TurboQuantMemoryPlan,
-        downgrades: [TurboQuantAdmissionDowngrade]
+        downgrades: [TurboQuantAdmissionDowngrade],
+        recommendsPlainKVCache: Bool = false
     ) -> TurboQuantAdmission {
         let contextPart =
             plan.admittedContextLength == requestedContextLength
@@ -1020,8 +1637,10 @@ public struct TurboQuantAdmissionPlanner: Sendable {
             memoryPlan: plan,
             downgradeReasons: downgrades,
             rejectedPaths: [],
-            userMessage:
-                "TurboQuant can run \(contextPart) in \(plan.effectiveMode.rawValue) mode. \(downgradePart)"
+            userMessage: recommendsPlainKVCache
+                ? "Plain FP16 attention fits \(contextPart); using full precision (faster). \(downgradePart)"
+                : "TurboQuant can run \(contextPart) in \(plan.effectiveMode.rawValue) mode. \(downgradePart)",
+            recommendsPlainKVCache: recommendsPlainKVCache
         )
     }
 

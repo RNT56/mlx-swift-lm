@@ -233,6 +233,16 @@ class GLM4MoELiteAttention: Module {
     func callAsFunction(
         _ x: MLXArray, mask: MLXFast.ScaledDotProductAttentionMaskMode, cache: KVCache?
     ) -> MLXArray {
+        do {
+            return try callThrowing(x, mask: mask, cache: cache)
+        } catch {
+            nonThrowingLanguageModelRuntimeFailure(error, owner: type(of: self))
+        }
+    }
+
+    func callThrowing(
+        _ x: MLXArray, mask: MLXFast.ScaledDotProductAttentionMaskMode, cache: KVCache?
+    ) throws -> MLXArray {
         let (B, L, _) = (x.dim(0), x.dim(1), x.dim(2))
 
         var q: MLXArray
@@ -276,7 +286,7 @@ class GLM4MoELiteAttention: Module {
             keyLength: attentionKeyLengthAfterUpdate(cache: cache, keys: keys)
         )
 
-        var output = attentionWithCacheUpdate(
+        var output = try attentionWithCacheUpdateReturningStateThrowing(
             queries: queries,
             keys: keys,
             values: values,
@@ -284,6 +294,7 @@ class GLM4MoELiteAttention: Module {
             scale: scale,
             mask: adjustedMask
         )
+        .output
 
         // Transform output through unembed_out
         output = callMultiLinear(unembedOut, output)
@@ -409,7 +420,7 @@ class GLM4MoELiteMoE: Module, UnaryLayer {
     func callAsFunction(_ x: MLXArray) -> MLXArray {
         let (inds, scores) = gate(x)
         var y = switchMLP(x, inds)
-        y = (y * scores[.ellipsis, .newAxis]).sum(axis: -2).asType(y.dtype)
+        y = weightedExpertSum(y, scores).asType(y.dtype)
         if let sharedExperts {
             y = y + sharedExperts(x)
         }
@@ -445,7 +456,17 @@ class GLM4MoELiteDecoderLayer: Module {
     func callAsFunction(
         _ x: MLXArray, mask: MLXFast.ScaledDotProductAttentionMaskMode, cache: KVCache?
     ) -> MLXArray {
-        let r = attention(inputLayerNorm(x), mask: mask, cache: cache)
+        do {
+            return try callThrowing(x, mask: mask, cache: cache)
+        } catch {
+            nonThrowingLanguageModelRuntimeFailure(error, owner: type(of: self))
+        }
+    }
+
+    func callThrowing(
+        _ x: MLXArray, mask: MLXFast.ScaledDotProductAttentionMaskMode, cache: KVCache?
+    ) throws -> MLXArray {
+        let r = try attention.callThrowing(inputLayerNorm(x), mask: mask, cache: cache)
         let h = x + r
         let r2 = mlp(postAttentionLayerNorm(h))
         return h + r2
@@ -476,16 +497,24 @@ public class GLM4MoELiteModelInner: Module, LayerPartitionable, StreamableMoE {
     }
 
     func callAsFunction(_ inputs: MLXArray, cache: [KVCache]? = nil) -> MLXArray {
+        do {
+            return try callThrowing(inputs, cache: cache)
+        } catch {
+            nonThrowingLanguageModelRuntimeFailure(error, owner: type(of: self))
+        }
+    }
+
+    func callThrowing(_ inputs: MLXArray, cache: [KVCache]? = nil) throws -> MLXArray {
         var h = embedTokens(inputs)
 
         let mask = createAttentionMask(h: h, cache: cache?.first)
 
         for (i, layer) in layers.enumerated() {
-            h = partitionedLayerCall(
+            h = try partitionedLayerCallThrowing(
                 index: i, gpuLayerCount: gpuLayerCount, stream: streamExperts,
                 cacheToEval: cache?[i]
             ) {
-                layer(h, mask: mask, cache: cache?[i])
+                try layer.callThrowing(h, mask: mask, cache: cache?[i])
             }
         }
 
@@ -493,7 +522,7 @@ public class GLM4MoELiteModelInner: Module, LayerPartitionable, StreamableMoE {
     }
 }
 
-public class GLM4MoELiteModel: Module, LLMModel, KVCacheDimensionProvider {
+public class GLM4MoELiteModel: Module, LLMModel, KVCacheDimensionProvider, ThrowingLanguageModel {
     public let vocabularySize: Int
     public let kvHeads: [Int]
 
@@ -512,13 +541,23 @@ public class GLM4MoELiteModel: Module, LLMModel, KVCacheDimensionProvider {
     }
 
     public func callAsFunction(_ inputs: MLXArray, cache: [KVCache]?) -> MLXArray {
-        let out = model(inputs, cache: cache)
+        do {
+            return try callAsFunctionThrowing(inputs, cache: cache)
+        } catch {
+            nonThrowingLanguageModelRuntimeFailure(error, owner: type(of: self))
+        }
+    }
+
+    public func callAsFunctionThrowing(_ inputs: MLXArray, cache: [KVCache]?) throws -> MLXArray {
+        let out = try model.callThrowing(inputs, cache: cache)
         return lmHead(out)
     }
 
     public func newCache(parameters: GenerateParameters?) -> [KVCache] {
-        (0 ..< configuration.hiddenLayers).map { _ in
-            makeAttentionKVCache(parameters: parameters)
+        (0 ..< configuration.hiddenLayers).map { layerIndex in
+            makeAttentionKVCache(
+                parameters: parameters, layerIndex: layerIndex,
+                layerCount: configuration.hiddenLayers)
         }
     }
 

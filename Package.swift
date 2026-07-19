@@ -34,15 +34,42 @@ let package = Package(
         .library(
             name: "IntegrationTestHelpers",
             targets: ["IntegrationTestHelpers"]),
+        .library(
+            name: "TurboQuantBench",
+            targets: ["TurboQuantBench"]),
         .executable(
             name: "TurboQuantModelBenchmark",
             targets: ["TurboQuantModelBenchmark"]),
+        .executable(
+            name: "TurboQuantQwenProof",
+            targets: ["TurboQuantQwenProof"]),
+        .executable(
+            name: "TurboQuantInferenceParity",
+            targets: ["TurboQuantInferenceParity"]),
+        .executable(
+            name: "TurboQuantNativeVxBenchmark",
+            targets: ["TurboQuantNativeVxBenchmark"]),
+        .executable(
+            name: "TurboQuantAcceptanceHarness",
+            targets: ["TurboQuantAcceptanceHarness"]),
+        .executable(
+            name: "TurboQuantHeadBenchmark",
+            targets: ["TurboQuantHeadBenchmark"]),
+        .executable(
+            name: "TurboQuantCacheUpdateBenchmark",
+            targets: ["TurboQuantCacheUpdateBenchmark"]),
+        .executable(
+            name: "TurboQuantLowerV2Calibrate",
+            targets: ["TurboQuantLowerV2Calibrate"]),
     ],
     dependencies: [
         .package(
             url: "https://github.com/RNT56/mlx-swift",
-            revision: "21a897c5d1ae1930bd7c7a47bb3ed6c9fe8c8772"),
-        .package(url: "https://github.com/swiftlang/swift-syntax.git", "600.0.0" ..< "604.0.0"),
+            revision: "bcf93af23f11428f6f01efb0bb4b9020cd2eb383"),
+        // 602.0.0 floor: swift.org publishes signed prebuilt swift-syntax artifacts only for
+        // >= 602 tags on current toolchains; a 600.x/601.x resolution falls back to the full
+        // source compile of swift-syntax.
+        .package(url: "https://github.com/swiftlang/swift-syntax.git", "602.0.0" ..< "604.0.0"),
     ],
     targets: [
         .target(
@@ -99,6 +126,7 @@ let package = Package(
             name: "BenchmarkHelpers",
             dependencies: [
                 "MLXLMCommon",
+                "IntegrationTestHelpers",
                 "MLXLLM",
                 "MLXVLM",
                 "MLXEmbedders",
@@ -118,6 +146,14 @@ let package = Package(
             path: "Libraries/IntegrationTestHelpers",
             exclude: ["README.md"]
         ),
+        .target(
+            name: "TurboQuantBench",
+            dependencies: [
+                "MLXLMCommon",
+                .product(name: "MLX", package: "mlx-swift"),
+            ],
+            path: "Libraries/TurboQuantBench"
+        ),
         .executableTarget(
             name: "TurboQuantModelBenchmark",
             dependencies: [
@@ -125,6 +161,62 @@ let package = Package(
                 .product(name: "MLX", package: "mlx-swift"),
             ],
             path: "tools/TurboQuantModelBenchmark"
+        ),
+        .executableTarget(
+            name: "TurboQuantQwenProof",
+            dependencies: [
+                "MLXLMCommon",
+                .product(name: "MLX", package: "mlx-swift"),
+            ],
+            path: "tools/TurboQuantQwenProof"
+        ),
+        .executableTarget(
+            name: "TurboQuantInferenceParity",
+            dependencies: [
+                "IntegrationTestHelpers",
+                "MLXLLM",
+                "MLXLMCommon",
+                .product(name: "MLX", package: "mlx-swift"),
+            ],
+            path: "tools/TurboQuantInferenceParity"
+        ),
+        .executableTarget(
+            name: "TurboQuantNativeVxBenchmark",
+            dependencies: [
+                .product(name: "MLX", package: "mlx-swift"),
+            ],
+            path: "tools/TurboQuantNativeVxBenchmark"
+        ),
+        .executableTarget(
+            name: "TurboQuantAcceptanceHarness",
+            dependencies: [
+                "MLXLLM",
+                "MLXLMCommon",
+                .product(name: "MLX", package: "mlx-swift"),
+            ],
+            path: "tools/TurboQuantAcceptanceHarness"
+        ),
+        .executableTarget(
+            name: "TurboQuantHeadBenchmark",
+            dependencies: [
+                .product(name: "MLX", package: "mlx-swift"),
+            ],
+            path: "tools/TurboQuantHeadBenchmark"
+        ),
+        .executableTarget(
+            name: "TurboQuantCacheUpdateBenchmark",
+            dependencies: [
+                "MLXLMCommon",
+                .product(name: "MLX", package: "mlx-swift"),
+            ],
+            path: "tools/TurboQuantCacheUpdateBenchmark"
+        ),
+        .executableTarget(
+            name: "TurboQuantLowerV2Calibrate",
+            dependencies: [
+                "MLXLMCommon"
+            ],
+            path: "tools/TurboQuantLowerV2Calibrate"
         ),
         .testTarget(
             name: "MLXLMTests",
@@ -136,6 +228,8 @@ let package = Package(
                 "MLXLLM",
                 "MLXVLM",
                 "MLXEmbedders",
+                "IntegrationTestHelpers",
+                "TurboQuantBench",
             ],
             path: "Tests/MLXLMTests",
             exclude: [

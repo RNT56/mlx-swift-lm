@@ -4,6 +4,15 @@ import Foundation
 import MLX
 import MLXNN
 
+@inline(__always)
+private func withGenerationAutoreleasePool<T>(_ body: () throws -> T) rethrows -> T {
+    #if canImport(ObjectiveC)
+        return try autoreleasepool(invoking: body)
+    #else
+        return try body()
+    #endif
+}
+
 /// A `LogitSampler` is responsible for sampling `logits` produced by
 /// a ``LanguageModel`` to produce a token.
 ///
@@ -51,10 +60,39 @@ public protocol LogitProcessor {
 /// - ``LogitProcessor``
 ///
 /// for the `TokenIterator`.
+/// Draft-model-free self-speculation mode (lever ①). `.off` is ordinary decode.
+/// `.promptLookup` routes generation through ``NgramSpeculativeTokenIterator`` when the
+/// prompt is at/above ``GenerateParameters/selfSpeculationMinPromptTokens`` and the cache
+/// is trimmable — bit-exact for greedy/no-processor, falling back to exact decode otherwise.
+public enum SelfSpeculationMode: String, Sendable, Codable, CaseIterable {
+    case off
+    case promptLookup
+}
+
 public struct GenerateParameters: Sendable {
 
     /// Step size for processing the prompt
     public var prefillStepSize: Int
+
+    // ---- N2: draft-model-free self-speculation (lever ①) ----
+
+    /// Self-speculation mode. Default `.off` (ordinary decode).
+    public var selfSpeculationMode: SelfSpeculationMode
+
+    /// n-gram match-window size for prompt-lookup proposals (default 3).
+    public var selfSpeculationNgram: Int
+
+    /// Max proposed tokens per speculative round (default 4).
+    public var selfSpeculationMaxProposalTokens: Int
+
+    /// Use the N7 async optimistic-prefetch pipeline (default true). Long-context lever; the
+    /// admission floor below keeps it out of the short-context regime where it doesn't pay.
+    public var selfSpeculationPrefetch: Bool
+
+    /// Admission floor: only self-speculate when the prompt has at least this many tokens.
+    /// Speculation is a long-context lever (N1: crossover ≈12–16K; prefetch erases the ≥8K
+    /// regression) — this is an on-device tuning constant, re-measure per model/cache.
+    public var selfSpeculationMinPromptTokens: Int
 
     /// Maximum tokens to generate
     public var maxTokens: Int?
@@ -75,6 +113,19 @@ public struct GenerateParameters: Sendable {
     /// Strategy used to construct and dynamically convert KV caches.
     public var kvCacheStrategy: KVCacheStrategy
 
+    /// Optional per-model-layer KV policy. Explicit layer rules win over this default and over
+    /// the global ``kvCacheStrategy``.
+    public var kvLayerPolicy: KVLayerPolicy?
+
+    /// First-class KV codec selected by profile metadata. Old profiles default to Polar/QJL.
+    public var kvCodec: TurboQuantKVCodec
+
+    /// 2A spill: when set, the generate loop re-encodes the FP16 KV cache to compressed
+    /// mid-generation if live available process memory falls below this many bytes — even a
+    /// plain-FP16 (`.none`) cache that fit at admission but outgrew its projection. nil disables
+    /// memory-triggered spilling. The threshold is an on-device tuning constant (jetsam-dependent).
+    public var spillMemoryWatermarkBytes: Int?
+
     /// TurboQuant preset used when ``kvCacheStrategy`` is ``KVCacheStrategy/turboQuant``.
     public var turboQuantPreset: TurboQuantPreset
 
@@ -89,6 +140,42 @@ public struct GenerateParameters: Sendable {
 
     /// Bit width for TurboQuant values. Defaults to the preset recommendation.
     public var turboQuantValueBits: Int?
+
+    /// Value group size for affine K8/Vx values. nil preserves the K8/V4 default.
+    public var turboQuantValueGroupSize: Int?
+
+    /// Requested first-class TurboQuant runtime route.
+    public var turboQuantRuntimeMode: TurboQuantRuntimeMode
+
+    /// Runtime route selected after admission. nil means not resolved yet.
+    public var turboQuantResolvedRuntimeMode: TurboQuantRuntimeMode?
+
+    /// First-class K/V precision policy. nil preserves the legacy preset + value-bits path.
+    public var turboQuantPrecisionPolicy: TurboQuantKVPrecisionPolicy?
+
+    /// Precision policy after profile/admission defaults have been applied.
+    public var turboQuantResolvedPrecisionPolicy: TurboQuantKVPrecisionPolicy?
+
+    /// Sparse value-decode policy for capacity TurboQuant attention.
+    public var turboQuantSparseValuePolicy: TurboQuantSparseValuePolicy
+
+    /// Sparse value-decode selection mode for capacity TurboQuant attention.
+    public var turboQuantSparseValueSelection: TurboQuantSparseValueSelection
+
+    /// Sparse value-decode policy after runtime/admission gates have been applied.
+    public var turboQuantResolvedSparseValuePolicy: TurboQuantSparseValuePolicy?
+
+    /// Sparse value-decode selection after runtime/admission gates have been applied.
+    public var turboQuantResolvedSparseValueSelection: TurboQuantSparseValueSelection?
+
+    /// Token interval for synchronizing long compressed decode command buffers.
+    ///
+    /// nil uses the automatic policy. A value <= 0 disables this explicit decode
+    /// synchronization and leaves the normal async evaluation pipeline unchanged.
+    public var turboQuantDecodeSynchronizationInterval: Int?
+
+    /// Reason the requested runtime mode could not be honored exactly.
+    public var turboQuantRuntimeFallbackReason: String?
 
     /// Admission behavior for TurboQuant caches during generation.
     public var turboQuantAdmissionPolicy: TurboQuantAdmissionPolicy
@@ -105,6 +192,41 @@ public struct GenerateParameters: Sendable {
     /// Requested context length for automatic TurboQuant admission. Defaults to ``maxKVSize`` or a conservative 4k plan.
     public var turboQuantRequestedContextLength: Int?
 
+    /// Raw-SDPA token threshold used by ``KVCacheStrategy/adaptiveTurboQuant`` before converting to TurboQuant.
+    ///
+    /// Adaptive routing keeps raw KV and MLX SDPA on the hot path while this
+    /// window is admitted. If raw SDPA does not fit the sampled memory budget,
+    /// or the prompt already exceeds this threshold, routing starts directly in
+    /// compressed TurboQuant instead.
+    public var turboQuantRawSDPAThreshold: Int
+
+    /// Keep prompt prefill on raw KV/SDPA, then commit to TurboQuant storage before decode.
+    public var turboQuantExactPrefill: Bool
+
+    /// Exact raw tail size used by ``KVCacheStrategy/hybridTurboQuant``. nil means runtime automatic.
+    public var turboQuantHotWindowTokens: Int?
+
+    /// Fixed cold block size used when sealing old raw KV into TurboQuant storage.
+    public var turboQuantColdBlockTokens: Int
+
+    /// Normal selected cold-token budget per decode step for hybrid TurboQuant.
+    public var turboQuantColdBudgetTokens: Int
+
+    /// Maximum selected cold-token budget used when selector confidence is low.
+    public var turboQuantMaxColdBudgetTokens: Int
+
+    /// Cold-context attention behavior for hybrid TurboQuant.
+    public var turboQuantColdAttentionMode: TurboQuantColdAttentionMode
+
+    /// Layer-level cold-context policy for hybrid TurboQuant.
+    public var turboQuantLayerPolicy: TurboQuantLayerPolicy
+
+    /// Budgeted cold-block selector policy for hybrid TurboQuant.
+    public var turboQuantColdSelectorPolicy: TurboQuantColdSelectorPolicy
+
+    /// Host-provided lexical/semantic/anchor hints for hybrid TurboQuant cold blocks.
+    public var turboQuantColdSelectorHints: [TurboQuantColdSelectorHint]
+
     /// Prompt token count included in automatic admission estimates.
     public var turboQuantPromptTokenCount: Int
 
@@ -113,6 +235,11 @@ public struct GenerateParameters: Sendable {
 
     /// Fallback policy used for automatic admission.
     public var turboQuantFallbackPolicy: TurboQuantFallbackPolicy
+
+    /// KV cache compression scheme. Overrides kvBits when set.
+    /// Built-in: "affine4", "affine8" (equivalent to kvBits 4/8).
+    /// Extensible for custom schemes (e.g. WHT-based compression).
+    public var kvScheme: String?
 
     /// Sampling temperature
     public var temperature: Float
@@ -151,19 +278,43 @@ public struct GenerateParameters: Sendable {
         kvGroupSize: Int = 64,
         quantizedKVStart: Int = 0,
         kvCacheStrategy: KVCacheStrategy = .mlxAffine,
+        kvLayerPolicy: KVLayerPolicy? = nil,
+        kvCodec: TurboQuantKVCodec = .polarQJL,
         turboQuantPreset: TurboQuantPreset = .turbo3_5,
         turboQuantBackend: TurboQuantBackend = .metalPolarQJL,
         turboQuantOptimizationPolicy: TurboQuantOptimizationPolicy = .auto,
         turboQuantSeed: UInt64? = nil,
         turboQuantValueBits: Int? = nil,
+        turboQuantValueGroupSize: Int? = nil,
+        turboQuantRuntimeMode: TurboQuantRuntimeMode = .auto,
+        turboQuantResolvedRuntimeMode: TurboQuantRuntimeMode? = nil,
+        turboQuantPrecisionPolicy: TurboQuantKVPrecisionPolicy? = nil,
+        turboQuantResolvedPrecisionPolicy: TurboQuantKVPrecisionPolicy? = nil,
+        turboQuantSparseValuePolicy: TurboQuantSparseValuePolicy = .off,
+        turboQuantSparseValueSelection: TurboQuantSparseValueSelection = .off,
+        turboQuantResolvedSparseValuePolicy: TurboQuantSparseValuePolicy? = nil,
+        turboQuantResolvedSparseValueSelection: TurboQuantSparseValueSelection? = nil,
+        turboQuantDecodeSynchronizationInterval: Int? = nil,
+        turboQuantRuntimeFallbackReason: String? = nil,
         turboQuantAdmissionPolicy: TurboQuantAdmissionPolicy = .automatic,
         turboQuantAdmission: TurboQuantAdmission? = nil,
         turboQuantPerCacheResidentBudgetBytes: Int? = nil,
         turboQuantAdmissionProfile: ModelMemoryProfile? = nil,
         turboQuantRequestedContextLength: Int? = nil,
+        turboQuantRawSDPAThreshold: Int = 16_384,
+        turboQuantExactPrefill: Bool = false,
+        turboQuantHotWindowTokens: Int? = nil,
+        turboQuantColdBlockTokens: Int = 1024,
+        turboQuantColdBudgetTokens: Int = 4096,
+        turboQuantMaxColdBudgetTokens: Int = 8192,
+        turboQuantColdAttentionMode: TurboQuantColdAttentionMode = .selected,
+        turboQuantLayerPolicy: TurboQuantLayerPolicy = .auto,
+        turboQuantColdSelectorPolicy: TurboQuantColdSelectorPolicy = .automatic,
+        turboQuantColdSelectorHints: [TurboQuantColdSelectorHint] = [],
         turboQuantPromptTokenCount: Int = 0,
         turboQuantUserMode: TurboQuantUserMode = .balanced,
         turboQuantFallbackPolicy: TurboQuantFallbackPolicy = .compressedDecodeAllowed,
+        kvScheme: String? = nil,
         temperature: Float = 0.6,
         topP: Float = 1.0,
         topK: Int = 0,
@@ -174,7 +325,17 @@ public struct GenerateParameters: Sendable {
         presenceContextSize: Int = 20,
         frequencyPenalty: Float? = nil,
         frequencyContextSize: Int = 20,
-        prefillStepSize: Int = 512
+        prefillStepSize: Int = 512,
+        spillMemoryWatermarkBytes: Int? = nil,
+        selfSpeculationMode: SelfSpeculationMode = .off,
+        selfSpeculationNgram: Int = 3,
+        selfSpeculationMaxProposalTokens: Int = 4,
+        // Default false: the P4 promotion campaign (2026-07-12, artifacts/
+        // n7-promotion-20260711/) found prefetch level-to-worse vs plain
+        // synchronous speculation with wider CIs; sync spec is what opt-in
+        // promptLookup users should get unless they explicitly ask for prefetch.
+        selfSpeculationPrefetch: Bool = false,
+        selfSpeculationMinPromptTokens: Int = 8192
     ) {
         self.maxTokens = maxTokens
         self.maxKVSize = maxKVSize
@@ -182,19 +343,47 @@ public struct GenerateParameters: Sendable {
         self.kvGroupSize = kvGroupSize
         self.quantizedKVStart = quantizedKVStart
         self.kvCacheStrategy = kvCacheStrategy
+        self.kvLayerPolicy = kvLayerPolicy
+        self.kvCodec = kvCodec
+        self.spillMemoryWatermarkBytes = spillMemoryWatermarkBytes
         self.turboQuantPreset = turboQuantPreset
         self.turboQuantBackend = turboQuantBackend
         self.turboQuantOptimizationPolicy = turboQuantOptimizationPolicy
         self.turboQuantSeed = turboQuantSeed
         self.turboQuantValueBits = turboQuantValueBits
+        self.turboQuantValueGroupSize = turboQuantValueGroupSize
+        self.turboQuantRuntimeMode = turboQuantRuntimeMode
+        self.turboQuantResolvedRuntimeMode = turboQuantResolvedRuntimeMode
+        self.turboQuantPrecisionPolicy = turboQuantPrecisionPolicy
+        self.turboQuantResolvedPrecisionPolicy = turboQuantResolvedPrecisionPolicy
+        self.turboQuantSparseValuePolicy = turboQuantSparseValuePolicy
+        self.turboQuantSparseValueSelection = turboQuantSparseValueSelection
+        self.turboQuantResolvedSparseValuePolicy = turboQuantResolvedSparseValuePolicy
+        self.turboQuantResolvedSparseValueSelection = turboQuantResolvedSparseValueSelection
+        self.turboQuantDecodeSynchronizationInterval = turboQuantDecodeSynchronizationInterval
+        self.turboQuantRuntimeFallbackReason = turboQuantRuntimeFallbackReason
         self.turboQuantAdmissionPolicy = turboQuantAdmissionPolicy
         self.turboQuantAdmission = turboQuantAdmission
         self.turboQuantPerCacheResidentBudgetBytes = turboQuantPerCacheResidentBudgetBytes
         self.turboQuantAdmissionProfile = turboQuantAdmissionProfile
         self.turboQuantRequestedContextLength = turboQuantRequestedContextLength
+        self.turboQuantRawSDPAThreshold = max(0, turboQuantRawSDPAThreshold)
+        self.turboQuantExactPrefill = turboQuantExactPrefill
+        self.turboQuantHotWindowTokens = turboQuantHotWindowTokens.map { max(0, $0) }
+        self.turboQuantColdBlockTokens = max(1, turboQuantColdBlockTokens)
+        self.turboQuantColdBudgetTokens = max(0, turboQuantColdBudgetTokens)
+        self.turboQuantMaxColdBudgetTokens = max(
+            max(0, turboQuantColdBudgetTokens),
+            turboQuantMaxColdBudgetTokens
+        )
+        self.turboQuantColdAttentionMode = turboQuantColdAttentionMode
+        self.turboQuantLayerPolicy = turboQuantLayerPolicy
+        self.turboQuantColdSelectorPolicy = turboQuantColdSelectorPolicy
+        self.turboQuantColdSelectorHints = turboQuantColdSelectorHints.filter { !$0.isEmpty }
         self.turboQuantPromptTokenCount = turboQuantPromptTokenCount
         self.turboQuantUserMode = turboQuantUserMode
         self.turboQuantFallbackPolicy = turboQuantFallbackPolicy
+        self.kvScheme = kvScheme
         self.temperature = temperature
         self.topP = topP
         self.topK = topK
@@ -206,6 +395,11 @@ public struct GenerateParameters: Sendable {
         self.frequencyPenalty = frequencyPenalty
         self.frequencyContextSize = frequencyContextSize
         self.prefillStepSize = prefillStepSize
+        self.selfSpeculationMode = selfSpeculationMode
+        self.selfSpeculationNgram = max(1, selfSpeculationNgram)
+        self.selfSpeculationMaxProposalTokens = max(1, selfSpeculationMaxProposalTokens)
+        self.selfSpeculationPrefetch = selfSpeculationPrefetch
+        self.selfSpeculationMinPromptTokens = max(0, selfSpeculationMinPromptTokens)
     }
 
     public func sampler() -> LogitSampler {
@@ -275,6 +469,10 @@ public enum TurboQuantRuntimeControl {
     public static func enabled(_ name: String) -> Bool {
         ProcessInfo.processInfo.environment[name] == "1"
     }
+
+    public static func intValue(_ name: String) -> Int? {
+        ProcessInfo.processInfo.environment[name].flatMap(Int.init)
+    }
 }
 
 public enum TurboQuantGenerationError: Error, CustomStringConvertible, Equatable {
@@ -298,12 +496,38 @@ public enum TurboQuantGenerationError: Error, CustomStringConvertible, Equatable
 }
 
 extension GenerateParameters {
-    private func automaticTurboQuantAdmission(layerCount: Int?) -> TurboQuantAdmission {
+    public var effectiveTurboQuantPrecisionPolicy: TurboQuantKVPrecisionPolicy {
+        turboQuantResolvedPrecisionPolicy
+            ?? turboQuantPrecisionPolicy
+            ?? TurboQuantKVPrecisionPolicy.legacy(
+                preset: turboQuantPreset,
+                valueBits: turboQuantValueBits
+            )
+    }
+
+    public var effectiveTurboQuantSparseValuePolicy: TurboQuantSparseValuePolicy {
+        turboQuantResolvedSparseValuePolicy ?? turboQuantSparseValuePolicy
+    }
+
+    public var effectiveTurboQuantSparseValueSelection: TurboQuantSparseValueSelection {
+        turboQuantResolvedSparseValueSelection ?? turboQuantSparseValueSelection
+    }
+
+    private func automaticTurboQuantAdmission(
+        layerCount: Int?,
+        kvHeads: [Int]? = nil
+    ) -> TurboQuantAdmission {
         let requestedContext =
             turboQuantRequestedContextLength
             ?? maxKVSize
             ?? maxTokens
             ?? 4096
+        let precisionPolicy =
+            turboQuantPrecisionPolicy
+            ?? TurboQuantKVPrecisionPolicy.legacy(
+                preset: turboQuantPreset,
+                valueBits: turboQuantValueBits
+            )
         let profile =
             turboQuantAdmissionProfile
             ?? ModelMemoryProfile(
@@ -323,14 +547,209 @@ extension GenerateParameters {
             promptTokenCount: turboQuantPromptTokenCount,
             userMode: turboQuantUserMode,
             fallbackPolicy: turboQuantFallbackPolicy,
-            preset: turboQuantPreset,
-            valueBits: turboQuantValueBits,
-            groupSize: kvGroupSize
+            preset: precisionPolicy.compressedKeyPreset,
+            valueBits: precisionPolicy.resolvedValueBits ?? turboQuantValueBits,
+            precisionPolicy: precisionPolicy,
+            groupSize: kvGroupSize,
+            kvCodec: kvCodec,
+            turboQuantBackend: turboQuantBackend,
+            kvLayerPolicy: kvLayerPolicy,
+            kvHeads: kvHeads
         )
     }
 
+    private func resolvingTurboQuantRuntimeMode(
+        admission: TurboQuantAdmission
+    ) throws -> (
+        mode: TurboQuantRuntimeMode,
+        route: TurboQuantRuntimeRoute,
+        fallbackReason: String?
+    ) {
+        let requestedContext = max(1, admission.requestedContextLength)
+        let rawThreshold = max(0, turboQuantRawSDPAThreshold)
+        let rawFits = admission.memoryPlan.rawSDPAFits(contextLength: requestedContext)
+        let thresholdRawFits =
+            rawThreshold > 0
+            && admission.memoryPlan.rawSDPAFits(contextLength: min(requestedContext, rawThreshold))
+        let throughputFits = admission.memoryPlan.throughputFits(contextLength: requestedContext)
+
+        func throughputOrCapacity(_ reason: String?) throws -> (
+            TurboQuantRuntimeMode,
+            TurboQuantRuntimeRoute,
+            String?
+        ) {
+            if throughputFits {
+                return (.throughputTurboQuant, .throughputTurboQuantNativeSDPA, reason)
+            }
+            if turboQuantRuntimeMode == .throughputTurboQuant,
+                turboQuantAdmissionPolicy == .required
+            {
+                throw TurboQuantGenerationError.admissionRejected(
+                    "throughputTurboQuant requires decoded active KV plus compressed backing, but the admitted memory plan does not fit both"
+                )
+            }
+            return (
+                .capacityTurboQuant,
+                .capacityTurboQuantCompressed,
+                reason ?? "decoded active KV did not fit; using capacity TurboQuant"
+            )
+        }
+
+        switch turboQuantRuntimeMode {
+        case .rawPreferred:
+            if rawFits {
+                return (.rawPreferred, .rawSDPA, nil)
+            }
+            return try throughputOrCapacity("rawPreferred requested but raw KV did not fit")
+
+        case .throughputTurboQuant:
+            return try throughputOrCapacity(nil)
+
+        case .capacityTurboQuant:
+            return (.capacityTurboQuant, .capacityTurboQuantCompressed, nil)
+
+        case .auto:
+            if kvCacheStrategy == .adaptiveTurboQuant,
+                requestedContext <= rawThreshold,
+                thresholdRawFits
+            {
+                return (.rawPreferred, .rawSDPA, nil)
+            }
+            return try throughputOrCapacity(nil)
+        }
+    }
+
+    private func applyingTurboQuantAdmission(
+        _ admission: TurboQuantAdmission,
+        layerCount: Int?
+    ) throws -> GenerateParameters {
+        var resolved = self
+        var admission = admission
+        let precisionPolicy =
+            turboQuantPrecisionPolicy
+            ?? TurboQuantKVPrecisionPolicy.legacy(
+                preset: admission.memoryPlan.preset,
+                valueBits: admission.memoryPlan.valueBits
+            )
+        let runtimeSelection = try resolvingTurboQuantRuntimeMode(admission: admission)
+        admission.memoryPlan.requestedRuntimeMode = turboQuantRuntimeMode
+        admission.memoryPlan.resolvedRuntimeMode = runtimeSelection.mode
+        admission.memoryPlan.precisionPolicy = precisionPolicy
+        admission.memoryPlan.sparseValuePolicy = turboQuantSparseValuePolicy
+        admission.memoryPlan.runtimeFallbackReason = runtimeSelection.fallbackReason
+        admission.memoryPlan.decodedActiveKVBytes =
+            runtimeSelection.route == .throughputTurboQuantNativeSDPA
+            ? admission.memoryPlan.rawBytesPerToken * admission.memoryPlan.admittedContextLength
+            : 0
+        resolved.maxKVSize = min(
+            resolved.maxKVSize ?? admission.admittedContextLength,
+            admission.admittedContextLength
+        )
+        resolved.turboQuantPreset = precisionPolicy.compressedKeyPreset
+        resolved.turboQuantValueBits = precisionPolicy.resolvedValueBits ?? admission.memoryPlan.valueBits
+        resolved.turboQuantResolvedPrecisionPolicy = precisionPolicy
+        resolved.turboQuantResolvedRuntimeMode = runtimeSelection.mode
+        resolved.turboQuantResolvedSparseValuePolicy =
+            turboQuantSparseValuePolicy.resolvedThreshold(
+                runtimeMode: runtimeSelection.mode,
+                contextLength: admission.admittedContextLength
+            ) == nil
+            ? .off
+            : turboQuantSparseValuePolicy
+        resolved.turboQuantResolvedSparseValueSelection =
+            turboQuantSparseValueSelection.resolved(
+                runtimeMode: runtimeSelection.mode,
+                contextLength: admission.admittedContextLength,
+                policy: turboQuantSparseValuePolicy
+            )
+        resolved.turboQuantRuntimeFallbackReason = runtimeSelection.fallbackReason
+        resolved.turboQuantAdmission = admission
+        switch admission.selectedMode {
+        case .fastest:
+            resolved.turboQuantOptimizationPolicy = .preferThroughput
+        case .balanced:
+            break
+        case .maxContext, .batterySaver:
+            resolved.turboQuantOptimizationPolicy = .preferMemory
+        }
+        if let layerCount, layerCount > 0 {
+            let residentBudget =
+                admission.memoryPlan.runtimeZones.compressedKVBytes
+                + admission.memoryPlan.runtimeZones.rawShadowBytes
+                + admission.memoryPlan.runtimeZones.fallbackReserveBytes
+                + (admission.memoryPlan.decodedActiveKVBytes ?? 0)
+            resolved.turboQuantPerCacheResidentBudgetBytes = max(1, residentBudget / layerCount)
+        }
+        if runtimeSelection.route == .rawSDPA {
+            resolved.kvCacheStrategy = .mlxAffine
+            resolved.kvBits = nil
+            resolved.turboQuantPerCacheResidentBudgetBytes = nil
+            return resolved
+        }
+        if kvCacheStrategy == .adaptiveTurboQuant,
+            runtimeSelection.route == .throughputTurboQuantNativeSDPA
+        {
+            resolved.kvCacheStrategy = .affineK8V4
+            resolved.kvCodec = .affineK8V4
+            resolved.kvBits = TurboQuantKVCodec.affineK8V4KeyBits
+            resolved.kvGroupSize = TurboQuantKVCodec.affineK8V4KeyGroupSize
+            resolved.turboQuantBackend = .mlxPacked
+            resolved.turboQuantValueBits = TurboQuantKVCodec.affineK8V4ValueBits
+            resolved.quantizedKVStart = max(
+                resolved.quantizedKVStart,
+                resolved.turboQuantRawSDPAThreshold
+            )
+            resolved.turboQuantRuntimeFallbackReason =
+                runtimeSelection.fallbackReason
+                ?? "adaptive throughput route selected native affine K8/V4; Polar/QJL TurboQuant remains reserved for capacity mode"
+            resolved.turboQuantPerCacheResidentBudgetBytes = nil
+            return resolved
+        }
+        if turboQuantExactPrefill {
+            resolved.kvCacheStrategy = .adaptiveTurboQuant
+            resolved.quantizedKVStart = 0
+        } else {
+            resolved.kvCacheStrategy = .turboQuant
+            resolved.quantizedKVStart = 0
+        }
+        return resolved
+    }
+
+    private func resolvingAdaptiveTurboQuantRoute(
+        admission: TurboQuantAdmission,
+        layerCount: Int?
+    ) throws -> GenerateParameters {
+        try applyingTurboQuantAdmission(admission, layerCount: layerCount)
+    }
+
+    private func resolvingAffineK8VxLayerPolicy(
+        layerCount: Int?,
+        kvLayerTopology: KVLayerTopology?
+    ) -> GenerateParameters {
+        var resolved = self
+        guard resolved.kvCacheStrategy == .affineK8Vx,
+            resolved.kvLayerPolicy == nil,
+            let valueBits = resolved.turboQuantValueBits,
+            valueBits != TurboQuantKVCodec.affineK8V4ValueBits
+        else {
+            return resolved
+        }
+        let precisionPolicy = resolved.effectiveTurboQuantPrecisionPolicy
+        guard precisionPolicy.requiresBoundaryProtection else { return resolved }
+        let policyLayerCount = kvLayerTopology?.modelLayerCount ?? layerCount
+        guard let policyLayerCount, policyLayerCount > 0 else { return resolved }
+        resolved.kvLayerPolicy = KVLayerPolicy.affineK8VxProtectedLayers(
+            layerCount: policyLayerCount,
+            valueBits: valueBits,
+            boundaryPolicy: precisionPolicy.resolvedBoundaryPolicy(layerCount: policyLayerCount),
+            boundaryCachePrecision: precisionPolicy.boundaryCachePrecision
+        )
+        return resolved
+    }
+
     public func resolvedForTurboQuantRuntime(
-        layerCount: Int? = nil
+        layerCount: Int? = nil,
+        kvLayerTopology: KVLayerTopology? = nil
     ) throws -> GenerateParameters {
         var resolved = self
         if turboQuantAdmissionPolicy == .disabled
@@ -338,56 +757,123 @@ extension GenerateParameters {
             || TurboQuantRuntimeControl.enabled("TURBOQUANT_FORCE_BASELINE")
         {
             resolved.kvCacheStrategy = .none
+            resolved.kvLayerPolicy = nil
             resolved.turboQuantPerCacheResidentBudgetBytes = nil
             return resolved
         }
         if TurboQuantRuntimeControl.enabled("TURBOQUANT_FORCE_PACKED") {
             resolved.kvCacheStrategy = .mlxAffine
+            resolved.kvLayerPolicy = nil
             resolved.kvBits = resolved.turboQuantPreset.effectiveBits
             resolved.turboQuantPerCacheResidentBudgetBytes = nil
             return resolved
         }
+        if TurboQuantRuntimeControl.enabled("TURBOQUANT_FORCE_AFFINE_K8V4")
+            || TurboQuantRuntimeControl.enabled("TURBOQUANT_FAST_AFFINE_K8V4")
+            || TurboQuantRuntimeControl.enabled("TURBOQUANT_FORCE_AFFINE_K8VX")
+            || TurboQuantRuntimeControl.intValue("TURBOQUANT_AFFINE_VALUE_BITS") != nil
+        {
+            let forceK8V4 = TurboQuantRuntimeControl.enabled("TURBOQUANT_FORCE_AFFINE_K8V4")
+                || TurboQuantRuntimeControl.enabled("TURBOQUANT_FAST_AFFINE_K8V4")
+            let requestedValueBits =
+                forceK8V4
+                ? TurboQuantKVCodec.affineK8V4ValueBits
+                : (
+                    TurboQuantRuntimeControl.intValue("TURBOQUANT_AFFINE_VALUE_BITS")
+                        ?? resolved.turboQuantValueBits
+                        ?? TurboQuantKVCodec.affineK8V4ValueBits
+                )
+            let valueBits = (
+                TurboQuantKVCodec.affineK8VxSupportedValueBits.contains(requestedValueBits)
+                    ? requestedValueBits : TurboQuantKVCodec.affineK8V4ValueBits
+            )
+            let usesLowerValueBits = valueBits != TurboQuantKVCodec.affineK8V4ValueBits
+            resolved.kvCacheStrategy = usesLowerValueBits ? .affineK8Vx : .affineK8V4
+            let protectedLayerCount = kvLayerTopology?.modelLayerCount ?? layerCount ?? 0
+            let defaultProtectedEdges = TurboQuantProfile.defaultAffineK8VxProtectedEdgeLayers(
+                valueBits: valueBits
+            )
+            let protectedEdges =
+                protectedLayerCount > 0
+                ? min(defaultProtectedEdges, max(1, protectedLayerCount / 4))
+                : defaultProtectedEdges
+            resolved.kvLayerPolicy =
+                usesLowerValueBits && protectedLayerCount > 0
+                ? KVLayerPolicy.affineK8VxProtectedEdges(
+                    layerCount: protectedLayerCount,
+                    valueBits: valueBits,
+                    first: protectedEdges,
+                    last: protectedEdges
+                )
+                : nil
+            resolved.kvCodec = usesLowerValueBits ? .affineK8Vx : .affineK8V4
+            resolved.kvBits = TurboQuantKVCodec.affineK8V4KeyBits
+            resolved.kvGroupSize = TurboQuantKVCodec.affineK8V4KeyGroupSize
+            resolved.turboQuantBackend = .mlxPacked
+            resolved.turboQuantValueBits = valueBits
+            resolved.turboQuantPrecisionPolicy =
+                usesLowerValueBits
+                ? TurboQuantKVPrecisionPolicy(
+                    key: .affineQ8,
+                    value: .compressed(bits: valueBits),
+                    boundary: .protectedEdges(first: protectedEdges, last: protectedEdges),
+                    boundaryCachePrecision: .affineK8V4
+                )
+                : nil
+            resolved.quantizedKVStart = max(
+                resolved.quantizedKVStart,
+                resolved.turboQuantRawSDPAThreshold
+            )
+            resolved.turboQuantPerCacheResidentBudgetBytes = nil
+            return resolved
+        }
+        if TurboQuantRuntimeControl.enabled("TURBOQUANT_FORCE_AFFINE_INT4")
+            || TurboQuantRuntimeControl.enabled("TURBOQUANT_FAST_AFFINE_INT4")
+        {
+            resolved.kvCacheStrategy = .affineInt4
+            resolved.kvLayerPolicy = nil
+            resolved.kvCodec = .affineInt4
+            resolved.kvBits = TurboQuantKVCodec.affineInt4Bits
+            resolved.kvGroupSize = TurboQuantKVCodec.affineInt4DefaultGroupSize
+            resolved.turboQuantBackend = .mlxPacked
+            resolved.turboQuantValueBits = TurboQuantKVCodec.affineInt4Bits
+            resolved.turboQuantPerCacheResidentBudgetBytes = nil
+            return resolved
+        }
         if TurboQuantRuntimeControl.enabled("TURBOQUANT_FORCE_TWO_STAGE") {
-            resolved.turboQuantOptimizationPolicy = .conservative
+            resolved.turboQuantOptimizationPolicy = .preferThroughput
         }
         if TurboQuantRuntimeControl.enabled("TURBOQUANT_FORCE_FUSED") {
             resolved.turboQuantOptimizationPolicy = .preferThroughput
         }
-        guard resolved.kvCacheStrategy == .turboQuant else {
+        if resolved.kvCacheStrategy == .affineK8Vx {
+            return resolved.resolvingAffineK8VxLayerPolicy(
+                layerCount: layerCount,
+                kvLayerTopology: kvLayerTopology
+            )
+        }
+        guard resolved.kvCacheStrategy.canUseTurboQuant else {
             return resolved
         }
         if resolved.turboQuantAdmission == nil,
             resolved.turboQuantAdmissionPolicy == .automatic
         {
             resolved.turboQuantAdmission = resolved.automaticTurboQuantAdmission(
-                layerCount: layerCount)
+                layerCount: layerCount,
+                kvHeads: kvLayerTopology?.kvHeads
+            )
         }
         if let admission = resolved.turboQuantAdmission {
             guard admission.admitted else {
                 throw TurboQuantGenerationError.admissionRejected(admission.userMessage)
             }
-            resolved.maxKVSize = min(
-                resolved.maxKVSize ?? admission.admittedContextLength,
-                admission.admittedContextLength
-            )
-            resolved.turboQuantPreset = admission.memoryPlan.preset
-            resolved.turboQuantValueBits = admission.memoryPlan.valueBits
-            switch admission.selectedMode {
-            case .fastest:
-                resolved.turboQuantOptimizationPolicy = .preferThroughput
-            case .balanced:
-                break
-            case .maxContext, .batterySaver:
-                resolved.turboQuantOptimizationPolicy = .preferMemory
+            if resolved.kvCacheStrategy == .adaptiveTurboQuant {
+                return try resolved.resolvingAdaptiveTurboQuantRoute(
+                    admission: admission,
+                    layerCount: layerCount
+                )
             }
-            if let layerCount, layerCount > 0 {
-                let residentBudget =
-                    admission.memoryPlan.runtimeZones.compressedKVBytes
-                    + admission.memoryPlan.runtimeZones.rawShadowBytes
-                    + admission.memoryPlan.runtimeZones.fallbackReserveBytes
-                resolved.turboQuantPerCacheResidentBudgetBytes = max(1, residentBudget / layerCount)
-            }
-            return resolved
+            return try resolved.applyingTurboQuantAdmission(admission, layerCount: layerCount)
         }
         if resolved.turboQuantAdmissionPolicy == .required {
             throw TurboQuantGenerationError.admissionRequired
@@ -396,13 +882,29 @@ extension GenerateParameters {
     }
 }
 
-private func resolvedGenerationParameters(
+func resolvedGenerationParameters(
     for model: any LanguageModel,
     parameters: GenerateParameters
 ) throws -> GenerateParameters {
-    let layerCount = (model as? any KVCacheDimensionProvider)?.kvHeads.count
-    let resolved = try parameters.resolvedForTurboQuantRuntime(layerCount: layerCount)
-    if resolved.kvCacheStrategy == .turboQuant, !(model is any ThrowingLanguageModel) {
+    let topology = (model as? any KVCacheDimensionProvider).map {
+        KVLayerTopology(kvHeads: $0.kvHeads)
+    }
+    let resolved = try parameters.resolvedForTurboQuantRuntime(
+        layerCount: topology?.admissionLayerCount,
+        kvLayerTopology: topology
+    )
+    if let policy = resolved.kvLayerPolicy {
+        let errors = policy.validationErrors(layerCount: topology?.modelLayerCount)
+        if !errors.isEmpty {
+            throw TurboQuantGenerationError.admissionRejected(
+                "invalid KV layer policy: \(errors.joined(separator: "; "))"
+            )
+        }
+    }
+    if (resolved.kvCacheStrategy.canUseTurboQuant
+        || resolved.kvLayerPolicy?.requiresThrowingAttention == true),
+        !(model is any ThrowingLanguageModel)
+    {
         throw TurboQuantGenerationError.modelRequiresThrowingAttention(
             String(describing: type(of: model)))
     }
@@ -591,14 +1093,14 @@ public struct RepetitionContext: LogitProcessor {
 
     public func process(logits: MLXArray) -> MLXArray {
         guard let indices = ring.validTokens?.asType(.uint32) else { return logits }
-        var selectedLogits = logits[0..., indices]
+        let broadcastIndices = indices[.newAxis, 0...]
+        var selectedLogits = takeAlong(logits, broadcastIndices, axis: -1)
 
         selectedLogits = MLX.where(
             selectedLogits .< 0, selectedLogits * repetitionPenalty,
             selectedLogits / repetitionPenalty)
 
-        logits[0..., indices] = selectedLogits
-        return logits
+        return putAlong(logits, broadcastIndices, values: selectedLogits, axis: -1)
     }
 
     mutating public func didSample(token: MLXArray) {
@@ -625,8 +1127,9 @@ public struct PresencePenaltyContext: LogitProcessor {
 
     public func process(logits: MLXArray) -> MLXArray {
         guard let indices = ring.validTokens?.asType(.uint32) else { return logits }
-        logits[0..., indices] = logits[0..., indices] - presencePenalty
-        return logits
+        let broadcastIndices = indices[.newAxis, 0...]
+        let selectedLogits = takeAlong(logits, broadcastIndices, axis: -1) - presencePenalty
+        return putAlong(logits, broadcastIndices, values: selectedLogits, axis: -1)
     }
 
     mutating public func didSample(token: MLXArray) {
@@ -710,10 +1213,50 @@ public protocol TokenIteratorProtocol: Sequence, IteratorProtocol where Element 
     var tokenCount: Int { get }
     var promptPrefillTime: TimeInterval { get }
     var speculativeAcceptanceMetrics: TurboQuantSpeculativeAcceptanceMetrics? { get }
+    var speculativeDecodingTelemetry: SpeculativeDecodingTelemetry? { get }
+    mutating func discardGeneratedToken()
 }
 
 extension TokenIteratorProtocol {
     public var speculativeAcceptanceMetrics: TurboQuantSpeculativeAcceptanceMetrics? { nil }
+    public var speculativeDecodingTelemetry: SpeculativeDecodingTelemetry? { nil }
+    public mutating func discardGeneratedToken() {}
+}
+
+private func turboQuantEnvironmentInt(_ name: String) -> Int? {
+    ProcessInfo.processInfo.environment[name].flatMap { Int($0.trimmingCharacters(in: .whitespaces)) }
+}
+
+private func turboQuantDecodeSynchronizationInterval(
+    for parameters: GenerateParameters?
+) -> Int? {
+    guard let parameters else { return nil }
+    if let explicit = parameters.turboQuantDecodeSynchronizationInterval {
+        return explicit > 0 ? explicit : nil
+    }
+    if let env = turboQuantEnvironmentInt("TQ_DECODE_SYNC_INTERVAL")
+        ?? turboQuantEnvironmentInt("TURBOQUANT_DECODE_SYNC_INTERVAL")
+    {
+        return env > 0 ? env : nil
+    }
+
+    let requestedContext = max(
+        parameters.maxKVSize ?? 0,
+        parameters.turboQuantRequestedContextLength ?? 0,
+        parameters.turboQuantPromptTokenCount
+    )
+    guard requestedContext >= 65_536 else { return nil }
+
+    switch parameters.kvCacheStrategy {
+    case .none:
+        return nil
+    case .mlxAffine, .affineK8V4, .affineK8Vx, .affineInt4,
+        .adaptiveTurboQuant, .hybridTurboQuant, .turboQuant:
+        // Long compressed decode kernels are heavy enough that batching several
+        // tokens into one command buffer can trip macOS' interactivity watchdog.
+        // Keep the default conservative; callers can opt out with interval 0.
+        return 1
+    }
 }
 
 /// Generator of tokens.
@@ -755,15 +1298,37 @@ public struct TokenIterator: TokenIteratorProtocol {
     let kvBits: Int?
     let kvGroupSize: Int
     let quantizedKVStart: Int
+    let kvScheme: String?
     let kvCacheStrategy: KVCacheStrategy
+    let kvLayerPolicy: KVLayerPolicy?
+    let kvCodec: TurboQuantKVCodec
+    let spillMemoryWatermarkBytes: Int?
     let turboQuantPreset: TurboQuantPreset
     let turboQuantBackend: TurboQuantBackend
     let turboQuantOptimizationPolicy: TurboQuantOptimizationPolicy
+    let turboQuantFallbackPolicy: TurboQuantFallbackPolicy
     let turboQuantSeed: UInt64?
     let turboQuantValueBits: Int?
+    let turboQuantPrecisionPolicy: TurboQuantKVPrecisionPolicy?
+    let turboQuantValueGroupSize: Int?
+    let turboQuantSparseValuePolicy: TurboQuantSparseValuePolicy
+    let turboQuantSparseValueSelection: TurboQuantSparseValueSelection
     let turboQuantResidentBudgetBytes: Int?
+    let generationSynchronizationInterval: Int?
+    private var requiresSynchronousGenerationEval = false
     private var runtimeError: Error?
     public var lastRuntimeError: Error? { runtimeError }
+    public var turboQuantAttentionDiagnostics: [TurboQuantAttentionDiagnostics] {
+        cache.compactMap { item in
+            if let compressedCache = item as? any TurboQuantCompressedKVCacheProtocol {
+                return compressedCache.attentionDiagnostics
+            }
+            if let affineCache = item as? any NativeAffineK8V4KVCacheProtocol {
+                return affineCache.attentionDiagnostics
+            }
+            return nil
+        }
+    }
 
     // Internal metrics
     public var promptPrefillTime: TimeInterval = 0.0
@@ -793,13 +1358,25 @@ public struct TokenIterator: TokenIteratorProtocol {
         self.kvBits = runtimeParameters.kvBits
         self.kvGroupSize = runtimeParameters.kvGroupSize
         self.quantizedKVStart = runtimeParameters.quantizedKVStart
+        self.kvScheme = runtimeParameters.kvScheme
         self.kvCacheStrategy = runtimeParameters.kvCacheStrategy
+        self.kvLayerPolicy = runtimeParameters.kvLayerPolicy
+        self.kvCodec = runtimeParameters.kvCodec
+        self.spillMemoryWatermarkBytes = runtimeParameters.spillMemoryWatermarkBytes
         self.turboQuantPreset = runtimeParameters.turboQuantPreset
         self.turboQuantBackend = runtimeParameters.turboQuantBackend
         self.turboQuantOptimizationPolicy = runtimeParameters.turboQuantOptimizationPolicy
+        self.turboQuantFallbackPolicy = runtimeParameters.turboQuantFallbackPolicy
         self.turboQuantSeed = runtimeParameters.turboQuantSeed
         self.turboQuantValueBits = runtimeParameters.turboQuantValueBits
+        self.turboQuantPrecisionPolicy = runtimeParameters.effectiveTurboQuantPrecisionPolicy
+        self.turboQuantValueGroupSize = runtimeParameters.turboQuantValueGroupSize
+        self.turboQuantSparseValuePolicy = runtimeParameters.effectiveTurboQuantSparseValuePolicy
+        self.turboQuantSparseValueSelection = runtimeParameters
+            .effectiveTurboQuantSparseValueSelection
         self.turboQuantResidentBudgetBytes = runtimeParameters.turboQuantPerCacheResidentBudgetBytes
+        self.generationSynchronizationInterval =
+            turboQuantDecodeSynchronizationInterval(for: runtimeParameters)
 
         self.promptPrefillTime = try measure {
             try prepare(input: .init(text: y), windowSize: runtimeParameters.prefillStepSize)
@@ -834,13 +1411,25 @@ public struct TokenIterator: TokenIteratorProtocol {
         self.kvBits = runtimeParameters.kvBits
         self.kvGroupSize = runtimeParameters.kvGroupSize
         self.quantizedKVStart = runtimeParameters.quantizedKVStart
+        self.kvScheme = runtimeParameters.kvScheme
         self.kvCacheStrategy = runtimeParameters.kvCacheStrategy
+        self.kvLayerPolicy = runtimeParameters.kvLayerPolicy
+        self.kvCodec = runtimeParameters.kvCodec
+        self.spillMemoryWatermarkBytes = runtimeParameters.spillMemoryWatermarkBytes
         self.turboQuantPreset = runtimeParameters.turboQuantPreset
         self.turboQuantBackend = runtimeParameters.turboQuantBackend
         self.turboQuantOptimizationPolicy = runtimeParameters.turboQuantOptimizationPolicy
+        self.turboQuantFallbackPolicy = runtimeParameters.turboQuantFallbackPolicy
         self.turboQuantSeed = runtimeParameters.turboQuantSeed
         self.turboQuantValueBits = runtimeParameters.turboQuantValueBits
+        self.turboQuantPrecisionPolicy = runtimeParameters.effectiveTurboQuantPrecisionPolicy
+        self.turboQuantValueGroupSize = runtimeParameters.turboQuantValueGroupSize
+        self.turboQuantSparseValuePolicy = runtimeParameters.effectiveTurboQuantSparseValuePolicy
+        self.turboQuantSparseValueSelection = runtimeParameters
+            .effectiveTurboQuantSparseValueSelection
         self.turboQuantResidentBudgetBytes = runtimeParameters.turboQuantPerCacheResidentBudgetBytes
+        self.generationSynchronizationInterval =
+            turboQuantDecodeSynchronizationInterval(for: runtimeParameters)
 
         self.promptPrefillTime = try measure {
             try prepare(input: input, windowSize: runtimeParameters.prefillStepSize)
@@ -877,15 +1466,29 @@ public struct TokenIterator: TokenIteratorProtocol {
         self.kvBits = runtimeCacheParameters?.kvBits
         self.kvGroupSize = runtimeCacheParameters?.kvGroupSize ?? 64
         self.quantizedKVStart = runtimeCacheParameters?.quantizedKVStart ?? 0
+        self.kvScheme = runtimeCacheParameters?.kvScheme
         self.kvCacheStrategy = runtimeCacheParameters?.kvCacheStrategy ?? .none
+        self.kvLayerPolicy = runtimeCacheParameters?.kvLayerPolicy
+        self.kvCodec = runtimeCacheParameters?.kvCodec ?? .polarQJL
+        self.spillMemoryWatermarkBytes = runtimeCacheParameters?.spillMemoryWatermarkBytes
         self.turboQuantPreset = runtimeCacheParameters?.turboQuantPreset ?? .turbo3_5
         self.turboQuantBackend = runtimeCacheParameters?.turboQuantBackend ?? .metalPolarQJL
         self.turboQuantOptimizationPolicy =
             runtimeCacheParameters?.turboQuantOptimizationPolicy ?? .auto
+        self.turboQuantFallbackPolicy =
+            runtimeCacheParameters?.turboQuantFallbackPolicy ?? .compressedDecodeAllowed
         self.turboQuantSeed = runtimeCacheParameters?.turboQuantSeed
         self.turboQuantValueBits = runtimeCacheParameters?.turboQuantValueBits
+        self.turboQuantPrecisionPolicy = runtimeCacheParameters?.effectiveTurboQuantPrecisionPolicy
+        self.turboQuantValueGroupSize = runtimeCacheParameters?.turboQuantValueGroupSize
+        self.turboQuantSparseValuePolicy = runtimeCacheParameters?
+            .effectiveTurboQuantSparseValuePolicy ?? .off
+        self.turboQuantSparseValueSelection = runtimeCacheParameters?
+            .effectiveTurboQuantSparseValueSelection ?? .off
         self.turboQuantResidentBudgetBytes =
             runtimeCacheParameters?.turboQuantPerCacheResidentBudgetBytes
+        self.generationSynchronizationInterval =
+            turboQuantDecodeSynchronizationInterval(for: runtimeCacheParameters)
 
         self.promptPrefillTime = try measure {
             try prepare(input: input, windowSize: prefillStepSize)
@@ -902,14 +1505,18 @@ public struct TokenIterator: TokenIteratorProtocol {
             // evaluate the remainder of the prompt -- this primes the pump
             let token = try step(previous: y)
             y = .init(tokens: token)
-            asyncEval(y.tokens)
+            evaluateGeneratedToken(y.tokens)
 
         case .logits(let result):
             y = .init(tokens: convertToToken(logits: result.logits))
-            asyncEval(y.tokens)
+            if materializeRecurrentKVCacheState(cache) {
+                requiresSynchronousGenerationEval = true
+            }
+            evaluateGeneratedToken(y.tokens)
 
             break
         }
+        quantizeDynamicKVCache()
     }
 
     mutating func convertToToken(logits: MLXArray) -> MLXArray {
@@ -927,32 +1534,61 @@ public struct TokenIterator: TokenIteratorProtocol {
 
     /// Evaluate the next token and return the new token (y), updating cache state
     mutating func step(previous: LMInput.Text) throws -> MLXArray {
-        let result: LMOutput
-        if let throwingModel = model as? any ThrowingLanguageModel {
-            result = try throwingModel.callAsFunctionThrowing(
-                previous[text: .newAxis], cache: cache.isEmpty ? nil : cache, state: state)
-        } else {
-            result = model(
-                previous[text: .newAxis], cache: cache.isEmpty ? nil : cache, state: state)
+        let result = try withPreparedCache(cache, lengths: previous.sequenceLengths) {
+            if let throwingModel = model as? any ThrowingLanguageModel {
+                return try throwingModel.callAsFunctionThrowing(
+                    previous[text: .newAxis], cache: cache.isEmpty ? nil : cache, state: state)
+            }
+            return model(previous[text: .newAxis], cache: cache.isEmpty ? nil : cache, state: state)
         }
         self.state = result.state
 
         // Apply dynamic cache quantization after each step
+        quantizeDynamicKVCache()
+
+        return convertToToken(logits: result.logits)
+    }
+
+    private mutating func quantizeDynamicKVCache() {
         maybeQuantizeKVCache(
             cache: &cache,
             kvBits: kvBits,
             kvGroupSize: kvGroupSize,
             quantizedKVStart: quantizedKVStart,
             kvCacheStrategy: kvCacheStrategy,
+            kvCodec: kvCodec,
             turboQuantPreset: turboQuantPreset,
             turboQuantBackend: turboQuantBackend,
             turboQuantOptimizationPolicy: turboQuantOptimizationPolicy,
+            turboQuantFallbackPolicy: turboQuantFallbackPolicy,
             turboQuantSeed: turboQuantSeed,
             turboQuantValueBits: turboQuantValueBits,
-            turboQuantResidentBudgetBytes: turboQuantResidentBudgetBytes
+            turboQuantPrecisionPolicy: turboQuantPrecisionPolicy,
+            turboQuantValueGroupSize: turboQuantValueGroupSize,
+            turboQuantSparseValuePolicy: turboQuantSparseValuePolicy,
+            turboQuantSparseValueSelection: turboQuantSparseValueSelection,
+            turboQuantResidentBudgetBytes: turboQuantResidentBudgetBytes,
+            spillMemoryWatermarkBytes: spillMemoryWatermarkBytes,
+            kvLayerPolicy: kvLayerPolicy,
+            kvScheme: kvScheme
         )
+        // N6: don't synchronize/clearCache here — `evaluateGeneratedToken` does a single
+        // synchronize()+clearCache() over the generated token below, which also drains the
+        // (already-materialized) recurrent state. Folds two per-token barriers into one on the
+        // hybrid recurrent path. `eval(state)` still runs, so the output is unchanged.
+        if materializeRecurrentKVCacheState(cache, synchronize: false) {
+            requiresSynchronousGenerationEval = true
+        }
+    }
 
-        return convertToToken(logits: result.logits)
+    private func evaluateGeneratedToken(_ token: MLXArray) {
+        if requiresSynchronousGenerationEval {
+            eval(token)
+            Stream.gpu.synchronize()
+            Memory.clearCache()
+        } else {
+            asyncEval(token)
+        }
     }
 
     mutating public func next() -> Int? {
@@ -973,9 +1609,15 @@ public struct TokenIterator: TokenIteratorProtocol {
             return nil
         }
         y = .init(tokens: token)
-        asyncEval(token)
+        evaluateGeneratedToken(token)
 
         tokenCount += 1
+        if let interval = generationSynchronizationInterval,
+            interval > 0,
+            tokenCount % interval == 0
+        {
+            Stream.gpu.synchronize()
+        }
 
         return previousY.tokens.item(Int.self)
     }
@@ -1022,7 +1664,7 @@ public struct SpeculativeTokenIterator: TokenIteratorProtocol {
     var processor: LogitProcessor?
     let sampler: LogitSampler
 
-    public var tokenCount = 0
+    public var tokenCount: Int { telemetry.emittedTokenCount }
     public let maxTokens: Int?
     let numDraftTokens: Int
 
@@ -1030,10 +1672,16 @@ public struct SpeculativeTokenIterator: TokenIteratorProtocol {
     private var pendingTokens = [Int]()
     private var pendingIndex = 0
     private var runtimeError: Error?
+    private var requiresSynchronousMainGenerationEval = false
+    private var requiresSynchronousDraftGenerationEval = false
     public var lastRuntimeError: Error? { runtimeError }
 
     // Internal metrics
     public var promptPrefillTime: TimeInterval = 0.0
+    private var telemetry = SpeculativeDecodingTelemetry()
+    public var speculativeDecodingTelemetry: SpeculativeDecodingTelemetry? {
+        telemetry.roundCount > 0 ? telemetry : nil
+    }
     public private(set) var turboQuantSpeculativeMetrics =
         TurboQuantSpeculativeAcceptanceMetrics()
     public var speculativeAcceptanceMetrics: TurboQuantSpeculativeAcceptanceMetrics? {
@@ -1044,6 +1692,10 @@ public struct SpeculativeTokenIterator: TokenIteratorProtocol {
     }
     public var totalDraftTokens: Int {
         turboQuantSpeculativeMetrics.proposedDraftTokens
+    }
+
+    public mutating func discardGeneratedToken() {
+        telemetry.discardGeneratedToken()
     }
 
     /// Initialize a `SpeculativeTokenIterator` with the given input.
@@ -1093,13 +1745,24 @@ public struct SpeculativeTokenIterator: TokenIteratorProtocol {
                 kvGroupSize: mainRuntimeParameters.kvGroupSize,
                 quantizedKVStart: mainRuntimeParameters.quantizedKVStart,
                 kvCacheStrategy: mainRuntimeParameters.kvCacheStrategy,
+                kvCodec: mainRuntimeParameters.kvCodec,
                 turboQuantPreset: mainRuntimeParameters.turboQuantPreset,
                 turboQuantBackend: mainRuntimeParameters.turboQuantBackend,
                 turboQuantOptimizationPolicy: mainRuntimeParameters.turboQuantOptimizationPolicy,
+                turboQuantFallbackPolicy: mainRuntimeParameters.turboQuantFallbackPolicy,
                 turboQuantSeed: mainRuntimeParameters.turboQuantSeed,
                 turboQuantValueBits: mainRuntimeParameters.turboQuantValueBits,
+                turboQuantPrecisionPolicy: mainRuntimeParameters.effectiveTurboQuantPrecisionPolicy,
+                turboQuantValueGroupSize: mainRuntimeParameters.turboQuantValueGroupSize,
+                turboQuantSparseValuePolicy: mainRuntimeParameters
+                    .effectiveTurboQuantSparseValuePolicy,
+                turboQuantSparseValueSelection: mainRuntimeParameters
+                    .effectiveTurboQuantSparseValueSelection,
                 turboQuantResidentBudgetBytes: mainRuntimeParameters
-                    .turboQuantPerCacheResidentBudgetBytes
+                    .turboQuantPerCacheResidentBudgetBytes,
+                spillMemoryWatermarkBytes: mainRuntimeParameters.spillMemoryWatermarkBytes,
+                kvLayerPolicy: mainRuntimeParameters.kvLayerPolicy,
+                kvScheme: mainRuntimeParameters.kvScheme
             )
         }
 
@@ -1134,7 +1797,17 @@ public struct SpeculativeTokenIterator: TokenIteratorProtocol {
             logits = processor?.process(logits: logits) ?? logits
             let token = sampler.sample(logits: logits)
             draftY = .init(tokens: token)
-            asyncEval(draftY.tokens)
+            evaluateDraftGeneratedToken(draftY.tokens)
+        }
+        quantizeKVCache(&mainCache)
+        quantizeKVCache(&draftCache)
+        if materializeRecurrentKVCacheState(mainCache) {
+            requiresSynchronousMainGenerationEval = true
+            evaluateMainGeneratedToken(y.tokens)
+        }
+        if materializeRecurrentKVCacheState(draftCache) {
+            requiresSynchronousDraftGenerationEval = true
+            evaluateDraftGeneratedToken(draftY.tokens)
         }
     }
 
@@ -1151,25 +1824,37 @@ public struct SpeculativeTokenIterator: TokenIteratorProtocol {
         // Draft generation: autoregressive loop with draft model
         var draftProcessor = processor  // Copy to discard later
         var draftTokens = [MLXArray]()
+        var draftState: LMOutput.State?
         do {
             for _ in 0 ..< numDraft {
-                let draftResult: LMOutput
-                if let throwingDraftModel = draftModel as? any ThrowingLanguageModel {
-                    draftResult = try throwingDraftModel.callAsFunctionThrowing(
+                let draftResult = try withPreparedCache(
+                    draftCache,
+                    lengths: draftY.sequenceLengths
+                ) {
+                    if let throwingDraftModel = draftModel as? any ThrowingLanguageModel {
+                        return try throwingDraftModel.callAsFunctionThrowing(
+                            draftY[text: .newAxis],
+                            cache: draftCache,
+                            state: draftState
+                        )
+                    }
+                    return draftModel(
                         draftY[text: .newAxis],
                         cache: draftCache,
-                        state: nil
+                        state: draftState
                     )
-                } else {
-                    draftResult = draftModel(draftY[text: .newAxis], cache: draftCache, state: nil)
                 }
+                draftState = draftResult.state
                 var draftLogits = draftResult.logits[0..., -1, 0...]
                 draftLogits = draftProcessor?.process(logits: draftLogits) ?? draftLogits
                 let draftToken = sampler.sample(logits: draftLogits)
                 draftProcessor?.didSample(token: draftToken)
-                asyncEval(draftToken)
+                evaluateDraftGeneratedToken(draftToken)
                 draftTokens.append(draftToken)
                 draftY = .init(tokens: draftToken)
+                if materializeRecurrentKVCacheState(draftCache) {
+                    requiresSynchronousDraftGenerationEval = true
+                }
             }
         } catch {
             _ = try? TurboQuantSpeculativeVerifier.restore(draftCache, to: draftCheckpoint)
@@ -1189,19 +1874,22 @@ public struct SpeculativeTokenIterator: TokenIteratorProtocol {
             let verifyTokens = [y.tokens] + draftTokens
             let verifyInput = LMInput.Text(tokens: concatenated(verifyTokens))
             let verifyStart = verifyInput.tokens.dim(0) - (numDraft + 1)
-            let mainResult: LMOutput
-            if let throwingMainModel = mainModel as? any ThrowingLanguageModel {
-                mainResult = try throwingMainModel.callAsFunctionThrowing(
-                    verifyInput[text: .newAxis],
-                    cache: mainCache,
-                    state: mainState
-                )
-            } else {
-                mainResult = mainModel(
+            let mainResult = try withPreparedCache(mainCache, lengths: verifyInput.sequenceLengths) {
+                if let throwingMainModel = mainModel as? any ThrowingLanguageModel {
+                    return try throwingMainModel.callAsFunctionThrowing(
+                        verifyInput[text: .newAxis],
+                        cache: mainCache,
+                        state: mainState
+                    )
+                }
+                return mainModel(
                     verifyInput[text: .newAxis], cache: mainCache, state: mainState)
             }
             let mainLogits = mainResult.logits
             mainState = mainResult.state
+            if materializeRecurrentKVCacheState(mainCache) {
+                requiresSynchronousMainGenerationEval = true
+            }
 
             let mainTokens: MLXArray
             if var verifyProcessor = processor {
@@ -1255,6 +1943,11 @@ public struct SpeculativeTokenIterator: TokenIteratorProtocol {
                 expectedLogicalLengthDelta: draftExpectedDelta
             )
 
+            telemetry.recordRound(
+                drafted: numDraft,
+                accepted: accepted,
+                targetVerified: numDraft + 1
+            )
             turboQuantSpeculativeMetrics.recordRound(
                 draftedTokens: numDraft,
                 acceptedDraftTokens: accepted,
@@ -1266,6 +1959,12 @@ public struct SpeculativeTokenIterator: TokenIteratorProtocol {
             // Apply dynamic cache quantization after rewind
             quantizeKVCache(&mainCache)
             quantizeKVCache(&draftCache)
+            if materializeRecurrentKVCacheState(mainCache) {
+                requiresSynchronousMainGenerationEval = true
+            }
+            if materializeRecurrentKVCacheState(draftCache) {
+                requiresSynchronousDraftGenerationEval = true
+            }
 
             // Set y/draftY for the next round
             y = .init(tokens: finalToken)
@@ -1288,6 +1987,26 @@ public struct SpeculativeTokenIterator: TokenIteratorProtocol {
         }
     }
 
+    private func evaluateMainGeneratedToken(_ token: MLXArray) {
+        if requiresSynchronousMainGenerationEval {
+            eval(token)
+            Stream.gpu.synchronize()
+            Memory.clearCache()
+        } else {
+            asyncEval(token)
+        }
+    }
+
+    private func evaluateDraftGeneratedToken(_ token: MLXArray) {
+        if requiresSynchronousDraftGenerationEval {
+            eval(token)
+            Stream.gpu.synchronize()
+            Memory.clearCache()
+        } else {
+            asyncEval(token)
+        }
+    }
+
     mutating public func next() -> Int? {
         guard runtimeError == nil else { return nil }
         if let maxTokens, tokenCount >= maxTokens {
@@ -1298,7 +2017,7 @@ public struct SpeculativeTokenIterator: TokenIteratorProtocol {
         if pendingIndex < pendingTokens.count {
             let token = pendingTokens[pendingIndex]
             pendingIndex += 1
-            tokenCount += 1
+            telemetry.recordGeneratedToken()
             return token
         }
 
@@ -1318,7 +2037,7 @@ public struct SpeculativeTokenIterator: TokenIteratorProtocol {
 
         let token = pendingTokens[pendingIndex]
         pendingIndex += 1
-        tokenCount += 1
+        telemetry.recordGeneratedToken()
         return token
     }
 }
@@ -1350,6 +2069,7 @@ public struct MTPTokenIterator: TokenIteratorProtocol {
     private var pendingTokens = [Int]()
     private var pendingIndex = 0
     private var runtimeError: Error?
+    private var requiresSynchronousGenerationEval = false
 
     public var acceptedDraftTokens = 0
     public var totalDraftTokens = 0
@@ -1409,13 +2129,23 @@ public struct MTPTokenIterator: TokenIteratorProtocol {
                 kvGroupSize: runtimeParameters.kvGroupSize,
                 quantizedKVStart: runtimeParameters.quantizedKVStart,
                 kvCacheStrategy: runtimeParameters.kvCacheStrategy,
+                kvCodec: runtimeParameters.kvCodec,
                 turboQuantPreset: runtimeParameters.turboQuantPreset,
                 turboQuantBackend: runtimeParameters.turboQuantBackend,
                 turboQuantOptimizationPolicy: runtimeParameters.turboQuantOptimizationPolicy,
+                turboQuantFallbackPolicy: runtimeParameters.turboQuantFallbackPolicy,
                 turboQuantSeed: runtimeParameters.turboQuantSeed,
                 turboQuantValueBits: runtimeParameters.turboQuantValueBits,
+                turboQuantPrecisionPolicy: runtimeParameters.effectiveTurboQuantPrecisionPolicy,
+                turboQuantValueGroupSize: runtimeParameters.turboQuantValueGroupSize,
+                turboQuantSparseValuePolicy: runtimeParameters.effectiveTurboQuantSparseValuePolicy,
+                turboQuantSparseValueSelection: runtimeParameters
+                    .effectiveTurboQuantSparseValueSelection,
                 turboQuantResidentBudgetBytes: runtimeParameters
-                    .turboQuantPerCacheResidentBudgetBytes
+                    .turboQuantPerCacheResidentBudgetBytes,
+                spillMemoryWatermarkBytes: runtimeParameters.spillMemoryWatermarkBytes,
+                kvLayerPolicy: runtimeParameters.kvLayerPolicy,
+                kvScheme: runtimeParameters.kvScheme
             )
         }
 
@@ -1437,6 +2167,18 @@ public struct MTPTokenIterator: TokenIteratorProtocol {
             processor?.didSample(token: token)
             y = .init(tokens: token)
             state = result.state
+        }
+        quantizeKVCache(&cache)
+        for i in mtpCaches.indices {
+            quantizeKVCache(&mtpCaches[i])
+        }
+        if materializeRecurrentKVCacheState(cache) {
+            requiresSynchronousGenerationEval = true
+        }
+        for mtpCache in mtpCaches {
+            if materializeRecurrentKVCacheState(mtpCache) {
+                requiresSynchronousGenerationEval = true
+            }
         }
     }
 
@@ -1473,6 +2215,14 @@ public struct MTPTokenIterator: TokenIteratorProtocol {
                 runtimeError = error
                 return
             }
+            if materializeRecurrentKVCacheState(cache) {
+                requiresSynchronousGenerationEval = true
+            }
+            for mtpCache in mtpCaches {
+                if materializeRecurrentKVCacheState(mtpCache) {
+                    requiresSynchronousGenerationEval = true
+                }
+            }
             guard !mtpResult.isEmpty else { return }
 
             var logits = mtpResult[0][0..., -1, 0...]
@@ -1494,6 +2244,14 @@ public struct MTPTokenIterator: TokenIteratorProtocol {
             for i in mtpCaches.indices {
                 quantizeKVCache(&mtpCaches[i])
             }
+            if materializeRecurrentKVCacheState(cache) {
+                requiresSynchronousGenerationEval = true
+            }
+            for mtpCache in mtpCaches {
+                if materializeRecurrentKVCacheState(mtpCache) {
+                    requiresSynchronousGenerationEval = true
+                }
+            }
             return
         }
 
@@ -1508,6 +2266,14 @@ public struct MTPTokenIterator: TokenIteratorProtocol {
         } catch {
             runtimeError = error
             return
+        }
+        if materializeRecurrentKVCacheState(cache) {
+            requiresSynchronousGenerationEval = true
+        }
+        for mtpCache in mtpCaches {
+            if materializeRecurrentKVCacheState(mtpCache) {
+                requiresSynchronousGenerationEval = true
+            }
         }
         guard !mtpResult.isEmpty else { return }
 
@@ -1614,6 +2380,14 @@ public struct MTPTokenIterator: TokenIteratorProtocol {
         quantizeKVCache(&cache)
         for i in mtpCaches.indices {
             quantizeKVCache(&mtpCaches[i])
+        }
+        if materializeRecurrentKVCacheState(cache) {
+            requiresSynchronousGenerationEval = true
+        }
+        for mtpCache in mtpCaches {
+            if materializeRecurrentKVCacheState(mtpCache) {
+                requiresSynchronousGenerationEval = true
+            }
         }
 
         y = .init(tokens: finalTokenOut)
@@ -2064,7 +2838,7 @@ public func generate(
     wiredMemoryTicket: WiredMemoryTicket? = nil,
     tools: [[String: any Sendable]]? = nil
 ) throws -> AsyncStream<Generation> {
-    let iterator = try TokenIterator(
+    let iterator = try makeGenerationIterator(
         input: input, model: context.model, cache: cache, parameters: parameters)
     let (stream, _) = generateTask(
         promptTokenCount: input.text.tokens.size,
@@ -2074,6 +2848,34 @@ public func generate(
         wiredMemoryTicket: wiredMemoryTicket,
         tools: tools)
     return stream
+}
+
+/// Build the generation iterator for ``GenerateParameters``, selecting draft-model-free
+/// self-speculation (lever ①, N2) when ``GenerateParameters/selfSpeculationMode`` is
+/// `.promptLookup`, the prompt meets ``GenerateParameters/selfSpeculationMinPromptTokens``,
+/// and the cache is trimmable. Falls back to an ordinary ``TokenIterator`` otherwise —
+/// including non-trimmable hybrid (MambaCache) caches, where speculation cannot run safely.
+public func makeGenerationIterator(
+    input: LMInput, model: any LanguageModel, cache: [KVCache]? = nil,
+    parameters: GenerateParameters
+) throws -> any TokenIteratorProtocol {
+    if parameters.selfSpeculationMode == .promptLookup,
+        input.text.tokens.size >= parameters.selfSpeculationMinPromptTokens
+    {
+        let runtime = try resolvedGenerationParameters(for: model, parameters: parameters)
+        let resolvedCache = cache ?? model.newCache(parameters: runtime)
+        if canTrimPromptCache(resolvedCache) {
+            return try NgramSpeculativeTokenIterator(
+                input: input, model: model, cache: resolvedCache, parameters: parameters,
+                ngram: parameters.selfSpeculationNgram,
+                maxProposalTokens: parameters.selfSpeculationMaxProposalTokens,
+                enablePrefetch: parameters.selfSpeculationPrefetch)
+        }
+        // Non-trimmable cache (e.g. hybrid MambaCache): exact decode, no speculation.
+        return try TokenIterator(
+            input: input, model: model, cache: resolvedCache, parameters: parameters)
+    }
+    return try TokenIterator(input: input, model: model, cache: cache, parameters: parameters)
 }
 
 /// Generates text and tool calls asynchronously using speculative decoding with a draft model.
@@ -2161,7 +2963,7 @@ public func generate(
         wiredMemoryTicket: wiredMemoryTicket,
         handler: TextToolTokenLoopHandler(
             tokenizer: context.tokenizer,
-            stopStrings: context.configuration.stopStrings,
+            stopStrings: context.configuration.effectiveStopStrings,
             format: context.configuration.toolCallFormat ?? .json
         )
     )
@@ -2205,7 +3007,7 @@ public func generateMTP(
         wiredMemoryTicket: wiredMemoryTicket,
         handler: TextToolTokenLoopHandler(
             tokenizer: context.tokenizer,
-            stopStrings: context.configuration.stopStrings,
+            stopStrings: context.configuration.effectiveStopStrings,
             format: context.configuration.toolCallFormat ?? .json
         )
     )
@@ -2263,7 +3065,7 @@ public func generateTask<TOKEN: TokenIteratorProtocol>(
         wiredMemoryTicket: wiredMemoryTicket,
         handler: TextToolTokenLoopHandler(
             tokenizer: tokenizer,
-            stopStrings: modelConfiguration.stopStrings,
+            stopStrings: modelConfiguration.effectiveStopStrings,
             format: modelConfiguration.toolCallFormat ?? .json,
             tools: tools
         )
@@ -2342,6 +3144,96 @@ public func generateTokens(
         draftCache: draftCache,
         parameters: parameters,
         numDraftTokens: numDraftTokens
+    )
+    let (stream, _) = generateLoopTask(
+        promptTokenCount: input.text.tokens.size,
+        modelConfiguration: context.configuration,
+        tokenizer: context.tokenizer,
+        iterator: iterator,
+        wiredMemoryTicket: wiredMemoryTicket,
+        handler: RawTokenLoopHandler()
+    )
+    return stream
+}
+
+/// Generates tokens asynchronously using MTP speculative decoding.
+///
+/// Parallel to ``generate(input:cache:parameters:context:draftModel:draftCache:numDraftTokens:wiredMemoryTicket:)``
+/// but for MTP drafters: the drafter shares K/V with the target model and
+/// produces a block of `blockSize - 1` candidate tokens per round in a
+/// single `draftBlock(...)` call. The drafter shares the target's
+/// tokenizer (via `context.tokenizer`).
+///
+/// - Parameters:
+///   - input: language model input for the main (verifier) model.
+///   - cache: optional ``KVCache`` for the main model.
+///   - parameters: generation parameters (sampling, max tokens, KV
+///     quantization, etc.).
+///   - context: model context for the main (verifier) model.
+///   - mtpDrafter: the ``MTPDrafterModel``. The target is threaded through
+///     ``MTPDrafterModel/draftBlock(target:lastToken:lastHidden:sharedKV:queryOffset:blockSize:sampler:)``
+///     per round; drafter instances hold no target-derived state and are safe
+///     to share across iterators.
+///   - blockSize: total tokens per round (`blockSize - 1` drafted plus the
+///     bonus from the previous verify). Mirrors mlx-vlm's
+///     `draft_block_size`. Default 4 matches mlx-vlm's example configs.
+///   - wiredMemoryTicket: optional wired memory ticket.
+/// - Returns: an `AsyncStream<Generation>` yielding chunks and tool calls.
+/// - Throws: an error if the iterator initialization fails.
+public func generate(
+    input: LMInput,
+    cache: [KVCache]? = nil,
+    parameters: GenerateParameters,
+    context: ModelContext,
+    mtpDrafter: any MTPDrafterModel,
+    blockSize: Int = 4,
+    wiredMemoryTicket: WiredMemoryTicket? = nil
+) throws -> AsyncStream<Generation> {
+    let iterator = try MTPSpeculativeTokenIterator(
+        input: input,
+        mainModel: context.model,
+        drafter: mtpDrafter,
+        mainCache: cache,
+        parameters: parameters,
+        blockSize: blockSize
+    )
+    let (stream, _) = generateLoopTask(
+        promptTokenCount: input.text.tokens.size,
+        modelConfiguration: context.configuration,
+        tokenizer: context.tokenizer,
+        iterator: iterator,
+        wiredMemoryTicket: wiredMemoryTicket,
+        handler: TextToolTokenLoopHandler(
+            tokenizer: context.tokenizer,
+            stopStrings: context.configuration.effectiveStopStrings,
+            format: context.configuration.toolCallFormat ?? .json
+        )
+    )
+    return stream
+}
+
+/// Generates raw token IDs asynchronously using MTP speculative decoding.
+///
+/// Parallels
+/// ``generateTokens(input:cache:parameters:context:draftModel:draftCache:numDraftTokens:wiredMemoryTicket:)``
+/// but for MTP drafters. Yields raw token IDs instead of decoded text or
+/// tool calls.
+public func generateTokens(
+    input: LMInput,
+    cache: [KVCache]? = nil,
+    parameters: GenerateParameters,
+    context: ModelContext,
+    mtpDrafter: any MTPDrafterModel,
+    blockSize: Int = 4,
+    wiredMemoryTicket: WiredMemoryTicket? = nil
+) throws -> AsyncStream<TokenGeneration> {
+    let iterator = try MTPSpeculativeTokenIterator(
+        input: input,
+        mainModel: context.model,
+        drafter: mtpDrafter,
+        mainCache: cache,
+        parameters: parameters,
+        blockSize: blockSize
     )
     let (stream, _) = generateLoopTask(
         promptTokenCount: input.text.tokens.size,
@@ -2456,7 +3348,10 @@ private func generateLoopTask<Handler: TokenLoopHandler>(
                 tokenizer: tokenizer
             )
 
-            tokenLoop: while let token = iterator.next() {
+            tokenLoop: while true {
+                guard let token = withGenerationAutoreleasePool({ iterator.next() }) else {
+                    break
+                }
                 // Check for cancellation on every loop iteration.
                 if Task.isCancelled {
                     stopReason = .cancelled
@@ -2473,7 +3368,9 @@ private func generateLoopTask<Handler: TokenLoopHandler>(
                 if token == tokenizer.unknownTokenId || stopTokenIds.contains(token) {
                     if includeStopToken {
                         tokenCount += 1
-                        switch handler.onStopToken(token, emit: continuation.yield) {
+                        switch withGenerationAutoreleasePool({
+                            handler.onStopToken(token, emit: continuation.yield)
+                        }) {
                         case .more:
                             break
                         case .stop:
@@ -2483,13 +3380,17 @@ private func generateLoopTask<Handler: TokenLoopHandler>(
                             stopReason = .cancelled
                             break tokenLoop
                         }
+                    } else {
+                        iterator.discardGeneratedToken()
                     }
                     stopReason = .stop
                     break
                 }
 
                 tokenCount += 1
-                switch handler.onToken(token, emit: continuation.yield) {
+                switch withGenerationAutoreleasePool({
+                    handler.onToken(token, emit: continuation.yield)
+                }) {
                 case .more:
                     break
                 case .stop:
@@ -2516,13 +3417,18 @@ private func generateLoopTask<Handler: TokenLoopHandler>(
             let now = Date.timeIntervalSinceReferenceDate
             let generateTime = now - start
 
+            let mtpStats = iterator as? MTPStatsCollecting
             let info = GenerateCompletionInfo(
                 promptTokenCount: promptTokenCount,
                 generationTokenCount: tokenCount,
                 promptTime: promptTime + iterator.promptPrefillTime,
                 generationTime: generateTime,
                 stopReason: stopReason ?? .cancelled,
-                speculativeAcceptanceMetrics: iterator.speculativeAcceptanceMetrics
+                speculativeAcceptanceMetrics: iterator.speculativeAcceptanceMetrics,
+                proposedDraftTokens: mtpStats?.proposedDraftTokens,
+                acceptedDraftTokens: mtpStats?.acceptedDraftTokens,
+                passthroughReason: mtpStats?.passthroughReason,
+                speculativeDecodingTelemetry: iterator.speculativeDecodingTelemetry
             )
             _ = continuation.yield(handler.infoEvent(info))
 
@@ -2595,6 +3501,26 @@ public struct GenerateCompletionInfo: Sendable {
     /// Optional speculative decoding acceptance and rollback metrics.
     public let speculativeAcceptanceMetrics: TurboQuantSpeculativeAcceptanceMetrics?
 
+    /// Total tokens proposed by the MTP drafter across all speculation rounds
+    /// in this stream, or nil for non-MTP iterators. Sourced from the
+    /// iterator's ``MTPStatsCollecting`` conformance when present.
+    public let proposedDraftTokens: Int?
+
+    /// Total tokens accepted by the target across all speculation rounds in
+    /// this stream, or nil for non-MTP iterators. The acceptance rate is
+    /// `Double(acceptedDraftTokens) / Double(proposedDraftTokens)` when both
+    /// are non-nil and proposed > 0.
+    public let acceptedDraftTokens: Int?
+
+    /// Non-nil when the MTP iterator transitioned into sticky-passthrough
+    /// mode for the remainder of the stream; carries the reason string
+    /// captured at the moment of engagement. Nil if the iterator stayed
+    /// speculative for the full stream or for non-MTP streams.
+    public let passthroughReason: String?
+
+    /// Speculative decoding telemetry, when generation used speculative decoding.
+    public let speculativeDecodingTelemetry: SpeculativeDecodingTelemetry?
+
     /// The number of tokens processed per second during the prompt phase.
     public var promptTokensPerSecond: Double {
         Double(promptTokenCount) / promptTime
@@ -2611,7 +3537,11 @@ public struct GenerateCompletionInfo: Sendable {
         promptTime: TimeInterval,
         generationTime: TimeInterval,
         stopReason: GenerateStopReason = .stop,
-        speculativeAcceptanceMetrics: TurboQuantSpeculativeAcceptanceMetrics? = nil
+        speculativeAcceptanceMetrics: TurboQuantSpeculativeAcceptanceMetrics? = nil,
+        proposedDraftTokens: Int? = nil,
+        acceptedDraftTokens: Int? = nil,
+        passthroughReason: String? = nil,
+        speculativeDecodingTelemetry: SpeculativeDecodingTelemetry? = nil
     ) {
         self.promptTokenCount = promptTokenCount
         self.generationTokenCount = generationTokenCount
@@ -2619,6 +3549,10 @@ public struct GenerateCompletionInfo: Sendable {
         self.generateTime = generationTime
         self.stopReason = stopReason
         self.speculativeAcceptanceMetrics = speculativeAcceptanceMetrics
+        self.proposedDraftTokens = proposedDraftTokens
+        self.acceptedDraftTokens = acceptedDraftTokens
+        self.passthroughReason = passthroughReason
+        self.speculativeDecodingTelemetry = speculativeDecodingTelemetry
     }
 
     public func summary() -> String {
@@ -2745,18 +3679,17 @@ private protocol TokenLoopHandler {
     func infoEvent(_ info: GenerateCompletionInfo) -> Output
 }
 
-private struct StopStringFilter {
+struct StopStringFilter {
     let stopStrings: [String]
-    private var buffer = ""
-    private var stopped = false
+    var buffer = ""
+    var stopped = false
 
     init(stopStrings: Set<String>) {
         self.stopStrings = stopStrings.filter { !$0.isEmpty }.sorted {
             if $0.count == $1.count {
-                $0 < $1
-            } else {
-                $0.count > $1.count
+                return $0 < $1
             }
+            return $0.count > $1.count
         }
     }
 
@@ -2886,9 +3819,15 @@ private struct TextToolTokenLoopHandler: TokenLoopHandler {
             }
         }
 
-        toolCallProcessor.processEOS()
+        if let bufferedText = toolCallProcessor.processEOS(returnBufferedText: true),
+            !bufferedText.isEmpty
+        {
+            if case .terminated = emit(.chunk(bufferedText)) {
+                return
+            }
+        }
 
-        for toolCall in toolCallProcessor.toolCalls {
+        for toolCall in toolCallProcessor.drainToolCalls() {
             if case .terminated = emit(.toolCall(toolCall)) {
                 break
             }
@@ -2913,7 +3852,7 @@ private struct TextToolTokenLoopHandler: TokenLoopHandler {
             }
         }
 
-        if let toolCall = toolCallProcessor.toolCalls.popLast() {
+        for toolCall in toolCallProcessor.drainToolCalls() {
             if case .terminated = emit(.toolCall(toolCall)) {
                 return .cancelled
             }

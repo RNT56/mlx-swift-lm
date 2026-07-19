@@ -108,6 +108,37 @@ Quality object is defined by Pines `QualityGate.v1`, but LM benchmark output sho
 
 The benchmark computes the synthetic reference by decoding the compressed cache state and running exact SDPA over that decoded state, then compares compressed attention output against that reference. That populates the fallback-equivalence suite and intentionally reports `prefillExact = false`, so the quality gate fails closed until a real prefill-logit exactness suite is run. Snapshot roundtrip remains optional and unpopulated here because W14 snapshot activation is out of scope.
 
+`TurboQuantInferenceParity --quality-gates` provides the current real-model
+`real-model-inference-v1` quality surface. It runs exact prefill, converts the
+cache through the same path used by generation, decodes one compressed token, and
+compares candidate logits against FP16. The wired labels include `affineK8V4`,
+`affineK8V3`, `affineK8V3-optimized`, `affineK8V2`, `mlxAffine-q8`,
+`affineInt4`, `turbo4v2`, `turbo3_5`, and `turbo8`; `--list-configs` prints
+the canonical labels.
+
+Current diagnostics also include path-selection evidence. Quality rows now
+encode `selectedAttentionPaths`, `codecCounts`, `rawFallbackAllocated`, and
+`fallbackReasons`; quality attempts encode selected paths and codec counts when
+the measurement succeeds. Promotion blocks compressed candidates if the quality
+gate passes numerically but did not select the matching native compressed path,
+for example `affineK8V4Native` for affine K8/V4 or
+`metalHybridK8PolarWHTValue` for hybrid K8+PolarWHT-V.
+
+Some June 7 artifacts were produced before the final quality path fields were
+encoded in JSON. Treat them as logit-quality or schema-smoke evidence only. The
+first required rerun for continuation is recorded in
+[TurboQuant Continuation Handoff - 2026-06-07](continuation-handoff-2026-06-07.md).
+
+Earlier K8/Vx baseline context from
+`/Users/mt/Programming/Schtack/pines/docs/turboquant-implementation/baselines/20260601T144308Z-k8vx-realmodel-quality-speed.md`:
+dense K8/V4 passes the active 32K/64K FP16-referenced real-model gate. Raw K8/V3
+and K8/V2 preserve top-1 but fail P95 max-logit-error thresholds. The guarded
+`affineK8V3-optimized` route protects the first and last 5 Qwen3.5/Qwen3.6
+layers with K8/V4 while keeping middle layers at V3; it still needs the full
+32K+ retrieval, task, perplexity, and throughput matrix before promotion. At
+128K, the current Mac uses dense K8/V4 as the reference because FP16 raw KV
+alone is approximately 16 GiB before model/runtime overhead.
+
 ## Tests
 
 Profile tests:
@@ -146,6 +177,38 @@ swift build --target MLXLMCommon
 swift build --target TurboQuantModelBenchmark
 swift test --filter TurboQuantProfileTests
 swift run TurboQuantModelBenchmark --iterations 1 --head-dims 64 --contexts 1 --query-lengths 1
+swift run TurboQuantInferenceParity --model-dir /path/to/mlx-model --contexts 32768 --generate-tokens 2 --configs fp16,affineK8V4 --quality-gates --quality-contexts 32768
 ```
 
 All four commands passed locally on 2026-05-25. The benchmark run emitted aggregate and per-result quality blocks; it is still evidence input, not a product compatibility claim.
+
+Additional June 7 validation for the current quality/promotion gate work:
+
+```sh
+swift test --filter TurboQuantInferenceParitySparseVTests
+swift build -c release --product TurboQuantInferenceParity
+```
+
+These commands passed locally after adding quality path diagnostics and
+promotion blockers for compressed candidates that do not use the expected native
+quality path.
+
+## Qwen Larger-Context Proof Rows
+
+`TurboQuantQwenProof` keeps `--contexts` as the production strict-gate matrix.
+Use `--experimental-contexts 65536,131072,262144` for 64K/128K/256K stress
+experiments that should be reported but not production-certified. Experimental
+rows are emitted with `gateScope = "largeContextExperiment"`,
+`strictGateRequired = false`, and
+`certificationStatus = "experiment-only-not-production-certified"`. They are
+excluded from `summary.strictPassed` unless `--require-experimental-gates` is
+specified. `--warmup` controls unmeasured per-case warmup iterations so Metal
+compile and first-use cache effects stay out of reported p50/p95 timing. These
+fields are part of `TurboQuantQwenProof` report schema v2.
+
+With `mlx-swift` `cff5d0ad87f79585ac778224c21a5278d25a4e79`, the Mac proof
+uses the grouped-query block fused kernel for Qwen decode. Local results keep
+32K production proof rows above the 20 tok/s p95 gate for Turbo8, Turbo4V2, and
+Turbo3.5. The 64K row remains experiment-only: Turbo4V2 p50 was around 20 tok/s,
+but p95 was still below the promotion floor during the sustained pinned-package
+run, so 64K is not production-certified.

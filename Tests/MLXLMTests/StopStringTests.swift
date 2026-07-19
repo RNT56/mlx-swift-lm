@@ -2,71 +2,10 @@
 
 import Foundation
 import MLXLLM
-import MLXLMCommon
 import MLXVLM
 import XCTest
 
-private struct FixedTokenIterator: TokenIteratorProtocol {
-    let tokens: [Int]
-    let maxTokens: Int?
-    let promptPrefillTime: TimeInterval = 0
-
-    private var index = 0
-    private(set) var tokenCount = 0
-
-    init(tokens: [Int], maxTokens: Int? = nil) {
-        self.tokens = tokens
-        self.maxTokens = maxTokens
-    }
-
-    mutating func next() -> Int? {
-        guard index < tokens.count else {
-            return nil
-        }
-        let token = tokens[index]
-        index += 1
-        tokenCount += 1
-        return token
-    }
-}
-
-private struct FixedTextTokenizer: Tokenizer {
-    let vocabulary: [Int: String]
-    let tokenIds: [String: Int]
-
-    let bosToken: String? = nil
-    let eosToken: String? = "<eos>"
-    let unknownToken: String? = "<unk>"
-
-    init(vocabulary: [Int: String]) {
-        self.vocabulary = vocabulary
-        self.tokenIds = Dictionary(uniqueKeysWithValues: vocabulary.map { ($0.value, $0.key) })
-    }
-
-    func encode(text: String, addSpecialTokens: Bool) -> [Int] {
-        []
-    }
-
-    func decode(tokenIds: [Int], skipSpecialTokens: Bool) -> String {
-        tokenIds.map { vocabulary[$0] ?? "" }.joined()
-    }
-
-    func convertTokenToId(_ token: String) -> Int? {
-        tokenIds[token]
-    }
-
-    func convertIdToToken(_ id: Int) -> String? {
-        vocabulary[id]
-    }
-
-    func applyChatTemplate(
-        messages: [[String: any Sendable]],
-        tools: [[String: any Sendable]]?,
-        additionalContext: [String: any Sendable]?
-    ) throws -> [Int] {
-        []
-    }
-}
+@testable import MLXLMCommon
 
 final class StopStringTests: XCTestCase {
 
@@ -99,11 +38,10 @@ final class StopStringTests: XCTestCase {
         XCTAssertEqual(config.stopStrings, ["<turn|>", "<fallback>"])
     }
 
-    func testModelConfigurationResolutionPreservesStopStrings() {
+    func testModelConfigurationResolutionFallsBackToExtraEOSTokens() {
         let config = ModelConfiguration(
             id: "org/model",
             extraEOSTokens: ["<extra>"],
-            stopStrings: ["<stop>"],
             eosTokenIds: [7]
         )
 
@@ -112,61 +50,110 @@ final class StopStringTests: XCTestCase {
             tokenizerDirectory: URL(filePath: "/tmp/tokenizer")
         )
 
+        XCTAssertNil(config.stopStrings)
+        XCTAssertEqual(config.effectiveStopStrings, ["<extra>"])
         XCTAssertEqual(resolved.extraEOSTokens, ["<extra>"])
-        XCTAssertEqual(resolved.stopStrings, ["<stop>"])
+        XCTAssertEqual(resolved.stopStrings, ["<extra>"])
         XCTAssertEqual(resolved.eosTokenIds, [7])
     }
 
-    func testStopStringSplitAcrossChunksStopsAndIsNotEmitted() async {
-        let tokenizer = FixedTextTokenizer(vocabulary: [
+    func testModelConfigurationResolutionPreservesExplicitStopStrings() {
+        let config = ModelConfiguration(
+            id: "org/model",
+            extraEOSTokens: ["<extra>"],
+            stopStrings: ["<stop>"]
+        )
+
+        let resolved = config.resolved(
+            modelDirectory: URL(filePath: "/tmp/model"),
+            tokenizerDirectory: URL(filePath: "/tmp/tokenizer")
+        )
+
+        XCTAssertEqual(config.stopStrings, Set(["<stop>"]))
+        XCTAssertEqual(config.effectiveStopStrings, ["<stop>"])
+        XCTAssertEqual(resolved.stopStrings, ["<stop>"])
+    }
+
+    func testModelConfigurationResolutionPreservesExplicitEmptyStopStrings() {
+        let config = ModelConfiguration(
+            id: "org/model",
+            extraEOSTokens: ["<extra>"],
+            stopStrings: []
+        )
+
+        let resolved = config.resolved(
+            modelDirectory: URL(filePath: "/tmp/model"),
+            tokenizerDirectory: URL(filePath: "/tmp/tokenizer")
+        )
+
+        XCTAssertEqual(config.stopStrings, Set<String>())
+        XCTAssertEqual(config.effectiveStopStrings, [])
+        XCTAssertEqual(resolved.stopStrings, [])
+    }
+
+    func testStopStringSplitAcrossChunksStopsAndIsNotEmitted() {
+        var filter = StopStringFilter(stopStrings: ["<stop>"])
+
+        let first = filter.process("hel")
+        let second = filter.process("lo<")
+        let third = filter.process("stop")
+        let fourth = filter.process(">hidden")
+        let fifth = filter.process("tail")
+
+        XCTAssertEqual(first.text, "hel")
+        XCTAssertFalse(first.stopped)
+        XCTAssertEqual(second.text, "lo")
+        XCTAssertFalse(second.stopped)
+        XCTAssertNil(third.text)
+        XCTAssertFalse(third.stopped)
+        XCTAssertNil(fourth.text)
+        XCTAssertTrue(fourth.stopped)
+        XCTAssertNil(fifth.text)
+        XCTAssertTrue(fifth.stopped)
+    }
+
+    func testTokenLoopStopsOnStopStringAcrossDecodedTokenChunks() {
+        let tokenizer = DeterministicStopStringTokenizer(decoding: [
             1: "hel",
             2: "lo<",
             3: "stop",
             4: ">hidden",
             5: "tail",
-            98: "<unk>",
-            99: "<eos>",
         ])
-        let configuration = ModelConfiguration(id: "test", stopStrings: ["<stop>"])
-        let iterator = FixedTokenIterator(tokens: [1, 2, 3, 4, 5])
-
-        let (output, info) = await collectGeneration(
-            configuration: configuration,
+        let result = runStopStringLoop(
+            tokens: [1, 2, 3, 4, 5],
             tokenizer: tokenizer,
-            iterator: iterator
+            stopStrings: ["<stop>"]
         )
 
-        XCTAssertEqual(output, "hello")
-        XCTAssertEqual(info?.stopReason, .stop)
+        XCTAssertEqual(result.chunks, ["hel", "lo"])
+        XCTAssertEqual(result.consumedTokens, 4)
+        guard case .stop = result.stopReason else {
+            XCTFail("expected stop reason, got \(result.stopReason)")
+            return
+        }
     }
 
-    func testEOSTokenIdsAndExtraEOSTokensStillStopGeneration() async {
-        let tokenizer = FixedTextTokenizer(vocabulary: [
-            1: "a",
-            2: "b",
-            7: "<config-eos>",
-            42: "<extra>",
-            98: "<unk>",
-            99: "<eos>",
-        ])
+    func testStopStringFilterFlushesBufferedSuffixWhenNoStopArrives() {
+        var filter = StopStringFilter(stopStrings: ["<stop>"])
 
-        let eosConfiguration = ModelConfiguration(id: "test", eosTokenIds: [7])
-        let (eosOutput, eosInfo) = await collectGeneration(
-            configuration: eosConfiguration,
-            tokenizer: tokenizer,
-            iterator: FixedTokenIterator(tokens: [1, 7, 2])
-        )
-        XCTAssertEqual(eosOutput, "a")
-        XCTAssertEqual(eosInfo?.stopReason, .stop)
+        let first = filter.process("hello<")
+        let second = filter.process("world")
 
-        let extraConfiguration = ModelConfiguration(id: "test", extraEOSTokens: ["<extra>"])
-        let (extraOutput, extraInfo) = await collectGeneration(
-            configuration: extraConfiguration,
-            tokenizer: tokenizer,
-            iterator: FixedTokenIterator(tokens: [1, 42, 2])
-        )
-        XCTAssertEqual(extraOutput, "a")
-        XCTAssertEqual(extraInfo?.stopReason, .stop)
+        XCTAssertEqual(first.text, "hello")
+        XCTAssertFalse(first.stopped)
+        XCTAssertEqual(second.text, "<world")
+        XCTAssertFalse(second.stopped)
+        XCTAssertNil(filter.finish())
+    }
+
+    func testEmptyStopStringsAreIgnored() {
+        var filter = StopStringFilter(stopStrings: [""])
+
+        let result = filter.process("visible")
+
+        XCTAssertEqual(result.text, "visible")
+        XCTAssertFalse(result.stopped)
     }
 
     func testKnownRegistryEntriesExposeFamilyStopDefaults() {
@@ -181,39 +168,9 @@ final class StopStringTests: XCTestCase {
         assertStops(LLMRegistry.llama3_2_3B_4bit, "<|eot_id|>")
 
         assertStops(VLMRegistry.gemma3_4B_qat_4bit, "<end_of_turn>")
-        assertStops(VLMRegistry.gemma4_E2B_it_4bit, "<end_of_turn>")
         assertStops(VLMRegistry.qwen2VL2BInstruct4Bit, "<|im_end|>")
         assertStops(VLMRegistry.qwen3VL4BInstruct8Bit, "<|im_end|>")
         assertStops(VLMRegistry.qwen3_5_27B_4bit, "<|im_end|>")
-    }
-
-    private func collectGeneration<TOKEN: TokenIteratorProtocol>(
-        configuration: ModelConfiguration,
-        tokenizer: Tokenizer,
-        iterator: consuming TOKEN
-    ) async -> (String, GenerateCompletionInfo?) {
-        let (stream, task) = generateTask(
-            promptTokenCount: 0,
-            modelConfiguration: configuration,
-            tokenizer: tokenizer,
-            iterator: iterator
-        )
-
-        var output = ""
-        var info: GenerateCompletionInfo?
-        for await event in stream {
-            switch event {
-            case .chunk(let text):
-                output += text
-            case .info(let completionInfo):
-                info = completionInfo
-            case .toolCall:
-                XCTFail("Unexpected tool call")
-            }
-        }
-        await task.value
-
-        return (output, info)
     }
 
     private func assertStops(
@@ -223,6 +180,70 @@ final class StopStringTests: XCTestCase {
         line: UInt = #line
     ) {
         XCTAssertTrue(configuration.extraEOSTokens.contains(token), file: file, line: line)
-        XCTAssertTrue(configuration.stopStrings.contains(token), file: file, line: line)
+        XCTAssertTrue(configuration.effectiveStopStrings.contains(token), file: file, line: line)
+        XCTAssertNil(configuration.stopStrings, file: file, line: line)
+    }
+}
+
+private func runStopStringLoop(
+    tokens: [Int],
+    tokenizer: Tokenizer,
+    stopStrings: Set<String>
+) -> (chunks: [String], consumedTokens: Int, stopReason: GenerateStopReason) {
+    var detokenizer = NaiveStreamingDetokenizer(tokenizer: tokenizer)
+    var filter = StopStringFilter(stopStrings: stopStrings)
+    var chunks: [String] = []
+    var consumedTokens = 0
+
+    for token in tokens {
+        consumedTokens += 1
+        detokenizer.append(token: token)
+        guard let chunk = detokenizer.next() else {
+            continue
+        }
+        let result = filter.process(chunk)
+        if let text = result.text {
+            chunks.append(text)
+        }
+        if result.stopped {
+            return (chunks, consumedTokens, .stop)
+        }
+    }
+
+    if let text = filter.finish() {
+        chunks.append(text)
+    }
+    return (chunks, consumedTokens, .length)
+}
+
+private struct DeterministicStopStringTokenizer: Tokenizer {
+    let decoding: [Int: String]
+
+    func encode(text: String, addSpecialTokens: Bool) -> [Int] {
+        []
+    }
+
+    func decode(tokenIds: [Int], skipSpecialTokens: Bool) -> String {
+        tokenIds.map { decoding[$0] ?? "" }.joined()
+    }
+
+    func convertTokenToId(_ token: String) -> Int? {
+        nil
+    }
+
+    func convertIdToToken(_ id: Int) -> String? {
+        decoding[id]
+    }
+
+    var bosToken: String? { nil }
+    var eosToken: String? { nil }
+    var unknownToken: String? { nil }
+
+    func applyChatTemplate(
+        messages: [[String: any Sendable]],
+        tools: [[String: any Sendable]]?,
+        additionalContext: [String: any Sendable]?
+    ) throws -> [Int] {
+        []
     }
 }

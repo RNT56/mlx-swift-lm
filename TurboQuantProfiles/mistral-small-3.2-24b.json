@@ -1,5 +1,5 @@
 {
-  "schema_version": 2,
+  "schema_version": 4,
   "id": "mistral-small-3.2-24b",
   "exact_model_ids": [],
   "model_patterns": [
@@ -62,7 +62,7 @@
   ],
   "recommended_scheme": "turbo4v2",
   "fallback_scheme": "turbo3_5",
-  "key_bits": 3.5,
+  "key_bits": 4,
   "value_bits": 4,
   "group_size": 64,
   "safe_mask_modes": [
@@ -80,10 +80,10 @@
   "safe_context_length": 131072,
   "quality_profile": "balanced",
   "backend": "metalPolarQJL",
-  "optimization_policy": "preferMemory",
+  "optimization_policy": "conservative",
   "requires_metal_self_test": true,
   "requires_fused_attention_self_test": false,
-  "status": "experimental",
+  "status": "guarded",
   "source": "profile-audit-2026-05-23",
   "confidence": 0.75,
   "measured": {},

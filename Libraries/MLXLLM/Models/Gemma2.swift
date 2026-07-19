@@ -46,6 +46,16 @@ class Gemma2Attention: Module {
     public func callAsFunction(
         _ x: MLXArray, mask: MLXArray?, cache: KVCache?
     ) -> MLXArray {
+        do {
+            return try callThrowing(x, mask: mask, cache: cache)
+        } catch {
+            nonThrowingLanguageModelRuntimeFailure(error, owner: type(of: self))
+        }
+    }
+
+    public func callThrowing(
+        _ x: MLXArray, mask: MLXArray?, cache: KVCache?
+    ) throws -> MLXArray {
         let (B, L) = (x.dim(0), x.dim(1))
         var queries = wq(x)
         var keys = wk(x)
@@ -58,15 +68,22 @@ class Gemma2Attention: Module {
         queries = applyRotaryPosition(rope, to: queries, offset: offset)
         keys = applyRotaryPosition(rope, to: keys, offset: offset)
 
-        if let output = withTurboQuantCompressedCacheUpdate(
-            queries: queries,
-            keys: keys,
-            values: values,
+        let turboQuantQueries = cache is TurboQuantCompressedKVCacheProtocol
+            ? queries.contiguous(stream: .gpu) : queries
+        let turboQuantKeys = cache is TurboQuantCompressedKVCacheProtocol
+            ? keys.contiguous(stream: .gpu) : keys
+        let turboQuantValues = cache is TurboQuantCompressedKVCacheProtocol
+            ? values.contiguous(stream: .gpu) : values
+
+        if let output = try withTurboQuantCompressedCacheUpdateThrowing(
+            queries: turboQuantQueries,
+            keys: turboQuantKeys,
+            values: turboQuantValues,
             cache: cache,
             mask: .none,
             { compressedKeys, compressedValues, _ in
                 var scores = try turboQuantMetalQK(
-                    queries: queries,
+                    queries: turboQuantQueries,
                     keyCode: compressedKeys,
                     scale: self.scale,
                     mask: .none
@@ -79,7 +96,7 @@ class Gemma2Attention: Module {
                 return try turboQuantMetalAV(
                     attentionWeights: scores,
                     valueCode: compressedValues,
-                    outputDType: queries.dtype
+                    outputDType: turboQuantQueries.dtype
                 )
             }
         ) {
@@ -175,7 +192,17 @@ class Gemma2TransformerBlock: Module {
     public func callAsFunction(
         _ x: MLXArray, mask: MLXArray?, cache: KVCache?
     ) -> MLXArray {
-        var r = attention(inputLayerNorm(x), mask: mask, cache: cache)
+        do {
+            return try callThrowing(x, mask: mask, cache: cache)
+        } catch {
+            nonThrowingLanguageModelRuntimeFailure(error, owner: type(of: self))
+        }
+    }
+
+    public func callThrowing(
+        _ x: MLXArray, mask: MLXArray?, cache: KVCache?
+    ) throws -> MLXArray {
+        var r = try attention.callThrowing(inputLayerNorm(x), mask: mask, cache: cache)
         let h = x + postAttentionLayerNorm(r)
         r = mlp(preFeedforwardLayerNorm(h))
         let out = h + postFeedforwardLayerNorm(r)
@@ -208,6 +235,14 @@ public class Gemma2ModelInner: Module {
     }
 
     public func callAsFunction(_ inputs: MLXArray, cache: [KVCache]? = nil) -> MLXArray {
+        do {
+            return try callThrowing(inputs, cache: cache)
+        } catch {
+            nonThrowingLanguageModelRuntimeFailure(error, owner: type(of: self))
+        }
+    }
+
+    public func callThrowing(_ inputs: MLXArray, cache: [KVCache]? = nil) throws -> MLXArray {
         var h = embedTokens(inputs)
         h = h * hiddenScale
 
@@ -215,7 +250,7 @@ public class Gemma2ModelInner: Module {
         let mask: MLXArray? = createAttentionMask(h: h, cache: cache)
 
         for (i, layer) in layers.enumerated() {
-            h = layer(h, mask: mask, cache: cache?[i])
+            h = try layer.callThrowing(h, mask: mask, cache: cache?[i])
         }
 
         return norm(h)
@@ -223,7 +258,7 @@ public class Gemma2ModelInner: Module {
 }
 
 // Uses Gemma2ModelInner, otherwise same as GemmaModel
-public class Gemma2Model: Module, LLMModel, KVCacheDimensionProvider {
+public class Gemma2Model: Module, LLMModel, KVCacheDimensionProvider, ThrowingLanguageModel {
     public let vocabularySize: Int
     public let kvHeads: [Int]
 
@@ -238,7 +273,15 @@ public class Gemma2Model: Module, LLMModel, KVCacheDimensionProvider {
     }
 
     public func callAsFunction(_ inputs: MLXArray, cache: [KVCache]?) -> MLXArray {
-        var out = model(inputs, cache: cache)
+        do {
+            return try callAsFunctionThrowing(inputs, cache: cache)
+        } catch {
+            nonThrowingLanguageModelRuntimeFailure(error, owner: type(of: self))
+        }
+    }
+
+    public func callAsFunctionThrowing(_ inputs: MLXArray, cache: [KVCache]?) throws -> MLXArray {
+        var out = try model.callThrowing(inputs, cache: cache)
         out = model.embedTokens.asLinear(out)
         out = tanh(out / logitSoftCap) * logitSoftCap
         return out

@@ -10,14 +10,14 @@ import MLX
 import MLXNN
 
 private let yarnTypes: Set<String> = ["yarn", "deepseek_yarn", "telechat3-yarn"]
-private let supportedRoPETypes = Set<String>([
-    "default", "linear", "dynamic", "proportional", "llama3", "longrope", "mrope",
+private let supportedRoPETypes: Set<String> = Set([
+    "default", "linear", "proportional", "llama3", "longrope", "mrope",
 ]).union(yarnTypes)
 
 private func ropeType(in scalingConfig: [String: StringOrNumber]?) -> String? {
     guard let value = scalingConfig?["type"] ?? scalingConfig?["rope_type"] else { return nil }
-    if case .string(let ropeType) = value { return ropeType }
-    return nil
+    guard case .string(let ropeType) = value else { return nil }
+    return ropeType
 }
 
 private func invalidRoPEConfiguration(_ context: String, _ message: String) -> ModelFactoryError {
@@ -31,15 +31,17 @@ public func linearRoPEScalingFactor(_ scalingConfig: [String: StringOrNumber]?) 
 
 public func validateRoPEConfiguration(
     _ scalingConfig: [String: StringOrNumber]?,
-    context: String = "rope_scaling"
+    context: String = "rope_scaling",
+    supportedTypes: Set<String>? = nil
 ) throws {
     guard let scalingConfig else { return }
+    let supportedTypes = supportedTypes ?? supportedRoPETypes
 
     if let typeValue = scalingConfig["type"] ?? scalingConfig["rope_type"] {
         guard case .string(let ropeType) = typeValue else {
             throw invalidRoPEConfiguration(context, "type must be a string")
         }
-        guard supportedRoPETypes.contains(ropeType) else {
+        guard supportedTypes.contains(ropeType) else {
             throw invalidRoPEConfiguration(context, "unsupported type '\(ropeType)'")
         }
     }
@@ -87,16 +89,24 @@ public func validateMROPESection(
 }
 
 public func cumulativeMROPESection(_ section: [Int]) -> [Int] {
-    Array(
-        sequence(state: (0, section.makeIterator())) { state in
-            guard let value = state.1.next() else { return nil }
-            state.0 += value * 2
-            return state.0
-        }.dropLast())
+    sequence(state: (0, section.makeIterator())) { state in
+        guard let value = state.1.next() else { return nil }
+        state.0 += value * 2
+        return state.0
+    }.dropLast()
 }
 
 public func fallbackMROPESection(headDim: Int) -> [Int] {
-    [headDim / 3, (2 * headDim) / 3]
+    let halfDim = max(headDim / 2, 3)
+    let defaultSection = [16, 24, 24]
+    if defaultSection.reduce(0, +) == halfDim {
+        return cumulativeMROPESection(defaultSection)
+    }
+
+    let first = max(1, halfDim / 3)
+    let second = max(1, halfDim / 3)
+    let third = max(1, halfDim - first - second)
+    return cumulativeMROPESection([first, second, third])
 }
 
 public class Llama3RoPE: Module, OffsetLayer, ArrayOffsetLayer {
@@ -116,7 +126,9 @@ public class Llama3RoPE: Module, OffsetLayer, ArrayOffsetLayer {
         self.maxPositionEmbeddings = maxPositionEmbeddings
         self.traditional = traditional
 
-        let scalingConfig = scalingConfig ?? [:]
+        guard let scalingConfig = scalingConfig else {
+            fatalError("Llama3RoPE requires scaling_config")
+        }
 
         let factor = scalingConfig["factor"]?.asFloat() ?? 1.0
         let lowFreqFactor = scalingConfig["low_freq_factor"]?.asFloat() ?? 1.0
@@ -482,12 +494,17 @@ public func initializeRope(
             mscaleAllDim: mscaleAllDim
         )
     } else if ropeType == "longrope" {
-        guard let config = scalingConfig,
-            let origMax = config["original_max_position_embeddings"]?.asInt(),
-            let shortFactor = config["short_factor"]?.asFloats(),
-            let longFactor = config["long_factor"]?.asFloats()
-        else {
-            return RoPE(dimensions: dims, traditional: traditional, base: base, scale: 1.0)
+        guard let config = scalingConfig else {
+            fatalError("longrope requires scaling_config")
+        }
+        guard let origMax = config["original_max_position_embeddings"]?.asInt() else {
+            fatalError("longrope requires original_max_position_embeddings")
+        }
+        guard let shortFactor = config["short_factor"]?.asFloats() else {
+            fatalError("longrope requires short_factor")
+        }
+        guard let longFactor = config["long_factor"]?.asFloats() else {
+            fatalError("longrope requires long_factor")
         }
 
         return SuScaledRoPE(
@@ -505,10 +522,13 @@ public func initializeRope(
         if let config = scalingConfig,
             let mropeSection = config["mrope_section"]?.asInts()
         {
-            _ = mropeSection.count == 3
+            precondition(
+                mropeSection.count == 3,
+                "MRoPE currently only supports 3 sections, got \(mropeSection.count)"
+            )
         }
         return RoPE(dimensions: dims, traditional: traditional, base: base, scale: 1.0)
     } else {
-        return RoPE(dimensions: dims, traditional: traditional, base: base, scale: 1.0)
+        fatalError("Unsupported RoPE type: \(ropeType)")
     }
 }

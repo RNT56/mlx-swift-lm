@@ -18,7 +18,11 @@ public struct ProcessedFrames {
 // scan accumulates thousands of cached intermediate surfaces and hits the
 // per-process IOSurface limit of 16384, crashing the render pipeline.
 // Batch-processing never re-renders the same frame twice, so the cache buys nothing.
-private let context = CIContext(options: [.cacheIntermediates: false])
+#if compiler(>=6.2)  // proxy check for macOS 26 SDK, where CIContext is Sendable
+    private let context = CIContext(options: [.cacheIntermediates: false])
+#else
+    nonisolated(unsafe) private let context = CIContext(options: [.cacheIntermediates: false])
+#endif
 
 /// Collection of methods for processing media (images, video, etc.).
 ///
@@ -534,8 +538,12 @@ public enum MediaProcessing {
         var temporaryURL: URL?
 
         switch audio {
+        case .array(let array):
+            return array.asType(.float32).asArray(Float.self)
+
         case .url(let audioURL):
             url = audioURL
+
         case .data(let data, let format):
             let fileURL = FileManager.default.temporaryDirectory
                 .appendingPathComponent(UUID().uuidString)

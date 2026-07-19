@@ -2,6 +2,10 @@
 
 This file preserves the `mlx-swift-lm` worker scope from the cross-repo plan.
 
+For current development state, artifacts, and the next rerun command, start with
+[TurboQuant Continuation Handoff - 2026-06-07](continuation-handoff-2026-06-07.md).
+The worker cards below are scope records, not the latest evidence summary.
+
 Use the Pines [Worker Launch Schedule](/Users/mt/Programming/Schtack/pines/docs/turboquant-implementation/14-worker-launch-schedule.md) for execution order. For `mlx-swift-lm`, the executable order is:
 
 | Wave | Worker | Can run when |

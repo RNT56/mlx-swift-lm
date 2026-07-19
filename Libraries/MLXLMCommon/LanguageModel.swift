@@ -17,6 +17,14 @@ public protocol BaseLanguageModel: Module {
     func sanitize(weights: [String: MLXArray], metadata: [String: String]) -> [String: MLXArray]
 }
 
+/// Optional metadata a model wants written into converted safetensors.
+///
+/// Model-specific metadata lets future loaders distinguish transformed MLX-native
+/// checkpoints from original upstream checkpoints without relying only on tensor shapes.
+public protocol ModelConversionMetadataProvider {
+    var modelConversionMetadata: [String: String] { get }
+}
+
 extension BaseLanguageModel {
     public func sanitize(weights: [String: MLXArray]) -> [String: MLXArray] {
         weights
@@ -88,6 +96,15 @@ public struct LMInput {
         ) -> Text {
             Text(tokens: tokens[indices, stream: stream], mask: mask)
         }
+
+        /// Per-batch sequence lengths derived from the optional attention mask.
+        public var sequenceLengths: [Int]? {
+            if let mask {
+                return mask.asType(.int32).sum(axis: -1).asArray(Int.self)
+            }
+            guard tokens.ndim == 2 else { return nil }
+            return Array(repeating: tokens.dim(1), count: tokens.dim(0))
+        }
     }
 
     /// Representation of prepared input image(s).
@@ -95,13 +112,16 @@ public struct LMInput {
 
         /// Concatenated pixels from one or more images
         public let pixels: MLXArray
+        /// Optional per-patch position ids for encoder-free vision embedders.
+        public let positionIds: MLXArray?
         /// Time, height, and width of the images
         public let frames: [THW]?
 
         public init(
-            pixels: MLXArray, frames: [THW]? = nil
+            pixels: MLXArray, positionIds: MLXArray? = nil, frames: [THW]? = nil
         ) {
             self.pixels = pixels
+            self.positionIds = positionIds
             self.frames = frames
         }
     }
@@ -111,17 +131,19 @@ public struct LMInput {
     public struct ProcessedVideo {
 
         public let pixels: MLXArray
+        public let positionIds: MLXArray?
         public let frames: [THW]?
 
         public init(
-            pixels: MLXArray, frames: [THW]? = nil
+            pixels: MLXArray, positionIds: MLXArray? = nil, frames: [THW]? = nil
         ) {
             self.pixels = pixels
+            self.positionIds = positionIds
             self.frames = frames
         }
     }
 
-    /// Representation of prepared input audio.
+    /// Representation of prepared audio features.
     public struct ProcessedAudio {
         public let features: MLXArray
         public let mask: MLXArray?
@@ -132,6 +154,10 @@ public struct LMInput {
             self.mask = mask
             self.seqLengths = seqLengths
         }
+
+        public init(samples: MLXArray) {
+            self.init(features: samples)
+        }
     }
 
     public init(tokens: MLXArray, mask: MLXArray? = nil) {
@@ -139,7 +165,8 @@ public struct LMInput {
     }
 
     public init(
-        text: LMInput.Text, image: LMInput.ProcessedImage? = nil,
+        text: LMInput.Text,
+        image: LMInput.ProcessedImage? = nil,
         video: LMInput.ProcessedVideo? = nil,
         audio: LMInput.ProcessedAudio? = nil
     ) {
@@ -160,11 +187,30 @@ public struct LMOutput {
     /// optional ``State`` to carry forward into the next step
     public let state: State?
 
-    public struct State {
-        public let crossAttentionStates: MLXArray?
+    /// typed key for use in ``State``
+    public struct Key<T>: Identifiable, Sendable {
+        public let id: String
 
-        public init(crossAttentionStates: MLXArray? = nil) {
-            self.crossAttentionStates = crossAttentionStates
+        public init(_ id: String) {
+            self.id = id
+        }
+    }
+
+    /// Dictionary of typed ``Key`` to carry state between steps.
+    public struct State {
+        private var contents: [String: Any]
+
+        public init() {
+            self.contents = [:]
+        }
+
+        public subscript<T>(_ key: Key<T>) -> T? {
+            get {
+                contents[key.id] as? T
+            }
+            set {
+                contents[key.id] = newValue
+            }
         }
     }
 
@@ -243,6 +289,10 @@ extension LanguageModel {
     }
 }
 
+public func nonThrowingLanguageModelRuntimeFailure(_ error: Error, owner: Any.Type) -> Never {
+    fatalError("Non-throwing language model compatibility wrapper for \(owner) has no recoverable output: \(error)")
+}
+
 /// Optional protocol that can be implemented by ``LanguageModel`` and will
 /// provide an automatic implementation of ``LanguageModel/newCache(parameters:)``
 public protocol KVCacheDimensionProvider {
@@ -253,57 +303,21 @@ extension LanguageModel where Self: KVCacheDimensionProvider {
     public func newCache(parameters: GenerateParameters?) -> [KVCache] {
         let parameters: GenerateParameters? =
             if let original = parameters {
-                (try? original.resolvedForTurboQuantRuntime(layerCount: kvHeads.count)) ?? original
+                {
+                    let topology = KVLayerTopology(kvHeads: kvHeads)
+                    return (try? original.resolvedForTurboQuantRuntime(
+                        layerCount: topology.admissionLayerCount,
+                        kvLayerTopology: topology
+                    ))
+                        ?? original
+                }()
             } else {
                 nil
             }
         // Create one cache per layer (kvHeads.count = number of layers)
         // The number of heads per layer (kvHeads[i]) is not used for cache creation
         let numLayers = kvHeads.count
-
-        if parameters?.kvCacheStrategy == .turboQuant {
-            let preset = parameters?.turboQuantPreset ?? .turbo3_5
-            let backend = parameters?.turboQuantBackend ?? .metalPolarQJL
-            let groupSize = parameters?.kvGroupSize ?? 64
-            let policy = parameters?.turboQuantOptimizationPolicy ?? .auto
-            let seed = parameters?.turboQuantSeed ?? defaultTurboQuantSeed
-            let valueBits = parameters?.turboQuantValueBits
-            if let maxKVSize = parameters?.maxKVSize {
-                return (0 ..< numLayers).map { _ in
-                    RotatingTurboQuantKVCache(
-                        maxSize: maxKVSize,
-                        keep: 4,
-                        preset: preset,
-                        groupSize: groupSize,
-                        backend: backend,
-                        optimizationPolicy: policy,
-                        seed: seed,
-                        valueBits: valueBits,
-                        residentBudgetBytes: parameters?.turboQuantPerCacheResidentBudgetBytes
-                    )
-                }
-            }
-            return (0 ..< numLayers).map { _ in
-                TurboQuantKVCache(
-                    preset: preset,
-                    groupSize: groupSize,
-                    backend: backend,
-                    optimizationPolicy: policy,
-                    seed: seed,
-                    valueBits: valueBits,
-                    residentBudgetBytes: parameters?.turboQuantPerCacheResidentBudgetBytes
-                )
-            }
-        }
-
-        // Follow Python logic: use RotatingKVCache if maxKVSize is provided
-        if let maxKVSize = parameters?.maxKVSize {
-            return (0 ..< numLayers).map { _ in
-                RotatingKVCache(maxSize: maxKVSize, keep: 4)
-            }
-        } else {
-            return (0 ..< numLayers).map { _ in KVCacheSimple() }
-        }
+        return makePromptCacheWithLayerCount(numLayers: numLayers, parameters: parameters)
     }
 }
 

@@ -42,21 +42,32 @@ App preflight code should use strict fingerprint-aware selection when enabling
 TurboQuant automatically; a fingerprint mismatch returns no TurboQuant profile so
 the caller keeps its baseline or packed-cache path instead of guessing.
 
-Bundled profiles keep the quality-first TurboQuant default of 3.5-bit keys,
-4-bit values, and group size 64. Per-profile optimization policy is then tuned
-from config-backed model shape and context metadata: small short-context dense
-profiles prefer throughput, large/long-context/MoE/VLM profiles prefer memory,
-and nonstandard split-dimension latent attention profiles use conservative
-compressed attention routing. Safe context lengths mirror the public model
-configuration or model card where available; callers should still apply their
-own memory-fit policy before admitting very long prompts.
+Bundled profiles keep the quality-first TurboQuant default of 4-bit V2 keys,
+4-bit values, and group size 64 except where device evidence makes that unsafe.
+Per-profile optimization policy is tuned from config-backed model shape, context
+metadata, and device evidence: Qwen3.5/Qwen3.6 use Turbo8 with exact initial
+prefill plus block-parallel fused compressed decode, while Gemma 3 1B
+and Llama 3.2 3B use Turbo8 with exact initial prefill and raw-free compressed
+decode; non-Qwen lower-bit guarded profiles use conservative routing. Safe context lengths mirror the
+public model configuration or model card where available; callers should still
+apply their own memory-fit policy before admitting very long prompts.
 
 Bundled Qwen3.5/Qwen3.6 profiles cover current MLX Community dense and MoE
 families with config-backed 256-dimensional KV head checks: `qwen3.5-0.8b`,
 `qwen3.5-2b`, `qwen3.5-4b`, `qwen3.5-9b`, `qwen3.5-27b`, `qwen3.6-27b`,
 `qwen3.5-40b`, `qwen3.6-40b`, `qwen3.5-35b-a3b`, `qwen3.6-35b-a3b`,
 `qwen3.5-97b-a10b`, `qwen3.5-122b-a10b`, and `qwen3.5-397b-a17b`.
-Qwen3.7 is intentionally not profiled until open MLX weights exist.
+The production precision for these profiles is Turbo8 with the `.preferThroughput`
+runtime policy. That policy keeps exact initial prefill, skips resident raw
+shadow decode, and routes decode through block-parallel fused compressed
+attention for Qwen-style 256-dimensional grouped-query heads. Turbo4V2 and
+Turbo3.5 are valid guarded proof candidates
+only: Turbo4V2 uses 4-bit key magnitudes and 4-bit values, while Turbo3.5 uses
+mixed 3/4-bit key magnitudes and 4-bit values. The profile API exposes both
+explicitly, but release tooling must promote them per model, device, OS, and
+context length only after the Qwen proof pipeline passes quality, memory, and
+throughput gates. Qwen3.7 is intentionally not profiled until open MLX weights
+exist.
 
 Bundled Gemma profiles cover config-backed MLX Community legacy Gemma, Gemma 2,
 Gemma 3, Gemma 3n, and Gemma 4 variants: `gemma-2b`, `gemma-7b`,
@@ -123,13 +134,56 @@ Use the benchmark entrypoints to generate profile evidence:
 ```sh
 swift run TurboQuantBenchmark --iterations 25
 swift run TurboQuantModelBenchmark --iterations 25
+swift run TurboQuantQwenProof --release-matrix --strict --iterations 25 --dtype float16 --min-extended-tokens-per-second 20
+swift run TurboQuantInferenceParity --model-dir /path/to/mlx-model --contexts 32768,65536 --configs fp16,affineK8V4,affineK8V3,affineK8V3-optimized,affineK8V2,mlxAffine-q8,affineInt4,turbo4v2,turbo3_5,turbo8 --quality-gates --quality-contexts 32768
 ```
 
 The core benchmark records kernel-level decode, matmul, QK/AV, and fused-attention
 behavior. The model benchmark records compressed prefill, decode attention, and
-rotating-cache growth. Promote bundled profile fields from pending to measured
-only when the JSON includes the model revision, device, OS, latency, memory, and
-quality data needed to reproduce the decision.
+rotating-cache growth. The Qwen proof benchmark records Qwen3.5/Qwen3.6 profile
+coverage, valid precision candidates, TurboQuant compressed attention vs plain
+attention quality, short-context plain-route speed parity, extended-context
+compressed decode p50/p95 throughput, and extended-context memory compression. Its release
+matrix is a decode-throughput gate at query length 1 and gates production
+throughput on the p95-latency token rate; use explicit
+`--query-lengths` values for wider prompt/prefill stress sweeps. Promote bundled profile fields from pending to measured only when
+the JSON includes the model revision, device, OS, latency, memory, and quality
+data needed to reproduce the decision.
+
+`TurboQuantInferenceParity` is the current real-model gate for compressed speed
+routes. It runs the full decode loop and can compare FP16, affine K8/V4,
+affine K8/V3, affine K8/V2, MLX affine Q8, affine int4, and Polar/QJL
+TurboQuant presets under one model. `--list-configs` prints the supported
+labels, and
+`scripts/run-turboquant-current-benchmarks.sh` runs the current core plus
+real-model matrix into a timestamped artifact directory. Evidence runs should
+use `--strict-configs` or `TQ_BENCH_STRICT=1` through the script so unknown
+config labels fail instead of shrinking the matrix.
+
+Production decode hardening keeps normal model attention layouts recoverable:
+Q/K/V tensors are canonicalized before compressed cache encode and compressed
+attention, compressed-update failures fall back to packed quantized attention
+when the selected policy allows it, compressed-decode profiles do not keep packed
+fallback caches resident on the hot path, and rotating single-token window masks
+match the raw rotating cache mask order after wraparound.
+
+The release matrix is intentionally capped at the current production throughput
+contexts. Run `swift run TurboQuantQwenProof --contexts 32768 --query-lengths 1
+--schemes turbo8,turbo4v2,turbo3_5 --dtype float16 --strict` as the 32K
+production gate. Use `--experimental-contexts 65536,131072,262144` to append
+64K/128K/256K proof rows for stress evidence without turning them into
+production certification gates. The proof report labels those rows with
+`gateScope = "largeContextExperiment"`, `strictGateRequired = false`, and
+`certificationStatus = "experiment-only-not-production-certified"`; pass
+`--require-experimental-gates` only when intentionally promoting those rows into
+the strict gate set. Use `--warmup` to keep first-use Metal compilation outside
+reported p50/p95 timing.
+
+The pinned core `cff5d0ad87f79585ac778224c21a5278d25a4e79` adds a Mac-gated
+GQA block-partials fused kernel for Qwen-style grouped-query decode. On the
+local Mac proof machine it keeps 32K production rows green for Turbo8,
+Turbo4V2, and Turbo3.5; 64K remains an experiment row because p95 is still not
+consistently above the 20 tok/s floor under sustained load.
 
 ## Converted Weights
 
@@ -146,7 +200,12 @@ guessed TurboQuant format.
 ## Scheme Aliases
 
 ``TurboQuantScheme/turbo4v2`` maps to the `.turbo4v2` runtime preset with
-the profile-declared key/value bit widths. It is the balanced default profile
-scheme. ``TurboQuantScheme/turbo3``
-maps to the more memory-oriented `.turbo2_5` runtime preset and should be reserved
-for memory-pressure profiles.
+4-bit key magnitudes and 4-bit values. It is the balanced default profile
+scheme. ``TurboQuantScheme/turbo3_5`` maps to mixed 3/4-bit key magnitudes and
+4-bit values. ``TurboQuantScheme/turbo2_5`` is the most memory-oriented scheme
+(2.5-bit key magnitudes, 2-bit values) and should be reserved for
+memory-pressure profiles.
+
+> Note: A former `turbo3` alias advertised 3.0-bit keys but always executed the
+> 2.5-bit `turbo2_5` codec. It has been removed; the legacy `"turbo3"` string
+> still decodes to `turbo2_5` so persisted configurations keep parsing.

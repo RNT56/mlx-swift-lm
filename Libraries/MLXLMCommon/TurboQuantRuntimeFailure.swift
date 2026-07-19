@@ -1,9 +1,11 @@
 import Foundation
+import MLX
 
 public enum TurboQuantRuntimeFailure: Error, Codable, Sendable, Equatable,
     CustomStringConvertible
 {
     case compressedAttentionUnavailable(String)
+    case unsupportedBackend(String)
     case packedFallbackUnavailable(String)
     case decodedFallbackUnavailable(String)
     case unsupportedAttentionShape(String)
@@ -29,14 +31,26 @@ public enum TurboQuantRuntimeFailure: Error, Codable, Sendable, Equatable,
             self = runtimeFailure
         } else if let attentionError = error as? TurboQuantAttentionStateError {
             self.init(attentionStateError: attentionError)
+        } else if let turboQuantError = error as? TurboQuantError {
+            self.init(turboQuantError)
         } else {
             self = TurboQuantRuntimeFailure.classify(message: String(describing: error))
         }
     }
 
+    public init(_ error: TurboQuantError) {
+        switch error {
+        case .unsupportedBackend(let backend, let message):
+            self = .unsupportedBackend("\(backend.rawValue): \(message)")
+        case .invalidGroupSize, .invalidMetalConfiguration, .invalidQualityInput,
+            .invalidReferenceCode:
+            self = TurboQuantRuntimeFailure.classify(message: error.description)
+        }
+    }
+
     public var pinesFailureKind: TurboQuantPinesFailureKind {
         switch self {
-        case .compressedAttentionUnavailable:
+        case .compressedAttentionUnavailable, .unsupportedBackend:
             .turboQuantPathUnavailable
         case .packedFallbackUnavailable, .decodedFallbackUnavailable, .noBudgetedFallback:
             .turboQuantFallbackUnavailable
@@ -61,6 +75,8 @@ public enum TurboQuantRuntimeFailure: Error, Codable, Sendable, Equatable,
         switch self {
         case .compressedAttentionUnavailable(let message):
             "TurboQuant compressed attention unavailable: \(message)"
+        case .unsupportedBackend(let message):
+            "TurboQuant unsupported backend: \(message)"
         case .packedFallbackUnavailable(let message):
             "TurboQuant packed fallback unavailable: \(message)"
         case .decodedFallbackUnavailable(let message):
@@ -86,6 +102,9 @@ public enum TurboQuantRuntimeFailure: Error, Codable, Sendable, Equatable,
 
     private static func classify(message: String) -> TurboQuantRuntimeFailure {
         let lowercased = message.lowercased()
+        if lowercased.contains("unsupported turboquant backend") {
+            return .unsupportedBackend(message)
+        }
         if lowercased.contains("resident bytes")
             && lowercased.contains("admitted budget")
         {
