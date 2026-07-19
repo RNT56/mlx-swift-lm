@@ -106,3 +106,25 @@ engagement-verified; `artifacts/coop-realmodel-ab-20260706/`):
 - One kernel source of truth ends the twin-sync failure class.
 - Swift-side kernel work stops accruing except where it feeds a native port.
 - The A-series device run remains the gate for all device/product claims.
+
+## Addendum 2026-07-19 (corrections, ruling otherwise unchanged)
+
+1. **"PORT (gated)" for coop is superseded** — resolved the same day by the
+   coalescing audit: the native compressed decode kernel already contained coop
+   (kernel kind 4, same source as kind 3), so the action became WIDEN, validated
+   +12.3% @32K by P3 (`artifacts/native-coop-ab-20260710/`) and shipped
+   default-ON above the 32768 floor. The coop workstream is CLOSED.
+2. **The retirement plan names the wrong qLen>8 survivor.** Code inspection
+   (TurboQuant.swift ~1861-1862, 2405-2515) shows `tiledOnlineFused` caps at
+   qLen<=8; the path that actually serves qLen>8 prefill is
+   `twoStageCompressed`. When the twin-retirement wave executes, the survivor
+   to preserve until native prefill coverage lands is `twoStageCompressed`, not
+   "the Swift tiled path" as written above.
+3. **Clone-divergence precondition.** The standalone workspace mlx clone
+   (802afe44 lineage) has diverged from the vendored mlx-swift submodule
+   (e230d124) that actually builds — including jit.h differences. The
+   submodule lineage must be fetched into the kernel-home clone and reconciled
+   BEFORE any retirement deletion, or the wave will operate on the wrong
+   lineage.
+4. The doc mirrors of this ruling committed in mlx (802afe44) and mlx-c
+   (044498f) do not carry this addendum; this file is canonical.

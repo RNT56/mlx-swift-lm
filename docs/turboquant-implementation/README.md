@@ -41,8 +41,14 @@ Current status:
   (with [inference-speed-roadmap](inference-speed-roadmap-2026-06-07.md) for the
   measured evidence and [overhaul-plan](overhaul-plan-2026-06-07.md) for the lever
   ladder). Start there for speed/throughput work. Lever ① (no-draft n-gram
-  self-speculation) is implemented and validated (byte-exact; 1.2–2.2× on
-  structured/long-context workloads).
+  self-speculation) is implemented and bit-exact, but the early 1.2–2.2× and
+  1.43–1.76× single-shot figures DID NOT REPRODUCE under the repeated-measurement
+  P4 campaign (2026-07-12): the validated effect is **+7–17% @16K** (code > doc
+  workloads, Qwen3-4B, bootstrap CIs), and optimistic prefetch (N7) was
+  promotion-DENIED (adds nothing over plain sync speculation). See
+  `artifacts/campaign-20260710-verdicts.md` (workspace root), the
+  [2026-07-10 architecture ruling](architecture-ruling-2026-07-10.md), and the
+  live [continuation handoff](continuation-handoff-2026-07-03.md).
 - The earlier same-day anchor
   [TurboQuant Continuation Handoff - 2026-06-07](continuation-handoff-2026-06-07.md)
   remains valid for the affine quality-gate work (state, artifacts, nonclaims).

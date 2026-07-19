@@ -789,3 +789,162 @@ Full data: `artifacts/campaign-20260710-verdicts.md` (+ per-phase artifact dirs)
 | P4 | Does N7 (optimistic prefetch) merit promotion? | **NO — bar not met.** Speculation itself = real bit-exact +7–17% @16K (code>doc, engagement-proven), but **prefetch adds nothing over plain sync speculation** (level-to-worse at 16K, wider CIs) and the old single-shot "1.43–1.76× @16K doc" DOES NOT REPRODUCE under repeats (1.072 measured). `selfSpeculationMode` stays default-OFF; sync-spec is the better-behaved opt-in for code-heavy greedy long-context. Revisit after hybrid MambaCache-rollback wiring broadens the surface. |
 
 **Build queue that follows:** (1) **F2** — restructure the mixed-quant pass-1 kernel at D=256 (BD=8, halve accumulators; mlx core kernels/sdpa_vector.h; M1 microbench = fast regression gate, parity run = promotion gate; no-regress check on the 0.6B kv8/hd128 affine WIN and the ≥32K watchdog path). (2) **F4** — host validation diet (cache env read, validate once per call, hoist Device check; ~0.3–0.6ms/token). (3) Hybrid N7 wiring (chip filed) + MTP-head exploration as the hybrid's native speculation route. (4) A-series device run — still the gate for all device claims.
+
+### 2026-07-19: F2 VERDICT — NO WIN; motivating M1 deficit UNSTABLE; edit secured + worktree cleaned
+
+The 2026-07-12 F2 session (built but never adjudicated in docs; the kernel edit sat
+UNCOMMITTED in the vendored mlx submodule `mlx-swift/Source/Cmlx/mlx` @e230d124 for a week)
+is now ruled on from its own artifact, `artifacts/f2-kernel-20260712/`:
+
+1. **F2 (BD=8 @ D>=256) shows NO reproducible win at the target shape.** The 4-round
+   interleaved metallib-swap A/B (il-r{1-4}-{clean,f2}-hd256.json) puts F2 statistically
+   indistinguishable from clean at hd256-8q2kv (median f2/clean ms ratio ~0.985 @16K,
+   ~0.981 @32K, round-to-round noise 0.66–1.22), and probably ~11–14% SLOWER at the
+   hd128-16q8kv guard shape @32K (slower in 3/4 rounds) — violating F2's own no-regress
+   condition on the 0.6B win shape. The initial before/after "0.272→0.732" was a
+   session-state artifact: the CLEAN metallib re-measured 0.876 minutes later
+   (cleanbase-hd256-8q2kv.json).
+2. **The motivating M1 deficit itself did not reproduce warm.** M1's 0.304× fp16 @16K
+   real-shape measurement (affine-occupancy-20260710/) vs 0.876–0.97 for the same clean
+   kernel in the warm 07-12 session. The H1b register-regime framing therefore rests on a
+   session-state-dependent number. **Deficit locus is OPEN again** (host-side refuted by
+   H1/H2/P1-1 causal A/Bs; kernel-internal now unstable). The 07-12 interleave also ran
+   WITHOUT bench-caffeinated.sh and on the synthetic float16 qLen=1 tool — protocol
+   violations that cap its authority; hence F2 is retired-pending, not final-discarded.
+3. **Actions taken (2026-07-19):** F2 edit preserved as
+   `artifacts/f2-kernel-20260712/f2-bd8-d256.patch` (git-apply round-trip verified);
+   vendored submodule worktree restored to clean @e230d124 so the unvalidated kernel
+   cannot silently ship; **"flagship build" designation withdrawn** (supersedes the M2
+   row above and the build-queue item (1)).
+4. **Next discriminator (queued, running under bench-caffeinated.sh):** 6-round
+   caffeinated repeated stability probe of the CLEAN kernel at the real shape
+   (hd256/8q/2kv, ctx 16384, 25 iters/round) → `artifacts/deficit-stability-20260719/`.
+   If all rounds sit ~0.85–1.0×, M1's 0.304× was a cold/session artifact and the
+   kernel-internal workstream (F2-class) is unmotivated; if rounds are bimodal (~0.3×
+   recurring), the deficit is real but state-dependent and the investigation shifts to
+   what session state triggers it.
+
+**PROBE RESULT (2026-07-19 03:13, 6/6 rounds valid, 0 sleep voids, AC, clean
+@e230d124):** speedRatioToFP16 = 0.683, 0.370, 0.621, 0.656, 0.340, 0.464 —
+a THIRD outcome:
+- The deficit is REAL on average: 6/6 rounds ≤ 0.68, median ~0.54, and the 07-12
+  "warm exoneration" value (0.876) did NOT reproduce either.
+- But the magnitude is UNMEASURABLE with this instrument: ±50% swing between
+  consecutive identical 25-iter rounds ~25 s apart (two loose clusters, 0.34–0.46
+  vs 0.62–0.68, no monotonic warm-up trend). M1's precise "0.304×" sizing, the F2
+  before/after delta, AND the 0.876 exoneration are all inside this noise band —
+  none of them was ever a real measurement of anything.
+- **Ruling: the isolated NativeVx microbench at the real shape is DISQUALIFIED as
+  an A/B instrument.** The reliable deficit ground truth remains the real-model
+  ratio (0.718, stable across the M2 arms). Any future kernel-internal work must
+  be adjudicated on real-model A/Bs or GPU driver-counter profiling
+  (external-intel P0-2), not this probe. F2 stays retired; the deficit-locus
+  question stays open but moves to real-model instrumentation.
+
+### 2026-07-19 (later): hygiene wave — prefetch default flipped, provenance fix, clone fetch; BLOCKER: model weights gone
+
+1. **`selfSpeculationPrefetch` default flipped true→false** (Evaluate.swift:333):
+   post-P4-denial, promptLookup opt-in users now get plain sync speculation (the
+   better-behaved variant); prefetch remains an explicit opt-in. The old default
+   silently routed every spec-decode user onto the promotion-denied pipeline.
+2. **Parity-tool provenance fixed** (TurboQuantInferenceParity/main.swift):
+   `repoCommits` now resolves mlx-swift from `Packages/mlx-swift` (the
+   `swift package edit` override) before `.build/checkouts/`, and additionally
+   records the vendored mlx submodule sha (`mlx-submodule`) — kernel provenance
+   was previously "unknown" in every artifact produced in package-edit mode.
+3. **Clone reconciliation unblocked**: the vendored lineage was fetched LOCALLY
+   into the workspace mlx clone as branch `vendored-e230d124`. Divergence is
+   mild: 802afe44 has 1 local-only commit (the ruling docs commit) vs 9 newer
+   vendored kernel commits. Remaining decision (user): rebase/merge the docs
+   commit onto e230d124 and re-point the kernel-home branch. jit.h line-506
+   `*2u`/`*3u` check still owed after that.
+4. **Doc reconciliation executed**: root CLAUDE.md now points at THIS handoff
+   (zero-byte-16K first-task text replaced); README spec figures corrected to
+   +7–17% (P4); external-intel-2026-07-05 carries a superseded-in-part
+   annotation; the ruling has a 2026-07-19 addendum (PORT→WIDEN; qLen>8
+   survivor is `twoStageCompressed`, not the tiled path; clone precondition).
+   The empty decoy dir `artifacts/turboquant-affine-16k-20260705/` (workspace
+   root) was removed. **turbo4v2 DECISION RECORDED (2026-07-19,
+   user-directed): memory-reach-only ACCEPTED and encoded as a promotion
+   gate** — `InferenceParityBenchmark` now block-reasons every `turbo4v2*`
+   candidate unless `TURBOQUANT_ENABLE_TURBO4V2_PROMOTION=1` (mirrors the
+   PolarWHT-hybrid gate). Tail-fix deferred; greedy-only bar re-scope
+   REJECTED for now (the 2.0 bar stands). `recommendedScheme` deliberately
+   left at `.turbo4v2`: the codec still WORKS for capacity reach — the gate
+   blocks promotion claims, not runtime use — so no downstream behavior
+   change.
+5. **BLOCKER for all real-model debts (three-debts session, F4 A/B, coop
+   transfer arm): the HuggingFace cache is GONE from disk** (`~/.cache/
+   huggingface` absent; Qwen3-0.6B-8bit and Qwen3.5-2B-4bit both missing).
+   Re-download needed before any parity run: `mlx-community/Qwen3-0.6B-8bit`
+   (~0.7 GB) and `mlx-community/Qwen3.5-2B-4bit` (~1.5 GB), snapshot pins in
+   `artifacts/campaign-20260710-verdicts.md` provenance block.
+5b. **Three-debts session EXECUTED (2026-07-19, models re-downloaded pinned:
+   0.6B@11de9687, 2B@674aaa72; artifacts/three-debts-20260719/, all runs
+   exit 0, 0 sleep voids, full repoCommits provenance incl. mlx-submodule):**
+   - **Debt 1 DISCHARGED — >=3-repeat combined affine 16K (Qwen3-0.6B-8bit),
+     `runA-qwen3-06b-16k-combined-r3.json`:** affine 47.72 vs fp16 31.64 tok/s
+     median (3 randomized repeats, tight spreads ±4%) = **1.508x native WIN**,
+     quality PASSED, selectedAttentionPaths=[affineK8V4Native] both legs,
+     residentKV 2.133x, no fallbacks. Confirms the 07-05 single-sample 1.686x
+     direction with proper repeats + provenance.
+   - **Debt 2 PARTIAL — first-ever production-model combined artifact
+     (Qwen3.5-2B @16K, `runB-qwen35-2b-16k-combined-r3.json`):** quality leg
+     VALID (passed, native path selected). Throughput leg CONTAMINATED: host
+     loadavg ~39 during the run (Unity shader compilers + rustc) — measured
+     0.869x median with huge spread (affine 36.6-49.4); NOT citable against
+     the campaign 0.718x. Idle rerun armed (below).
+   - **Debt 3 INVALID — F4 A/B (6 arms, order-alternated):** the fp16
+     NEGATIVE CONTROL moved as much as affine (ON/OFF 0.84 fp16 vs 0.80
+     affine; within-pair medians 0.94/1.01) — session drift under host load
+     swamps the ~12% expected effect. No verdict on F4 either way.
+   - **Infra hardened from the incident: bench-caffeinated.sh now refuses on
+     high host load** (1-min loadavg > ncpu/2, exit 5, TQ_BENCH_MAX_LOAD
+     override) and logs start load — the third machine-state guard after
+     battery and sleep-void.
+   - **Attempt 3 armed (driver3.sh, background):** waits for genuine idle
+     (load1 < ncpu/4 twice over 5-min checks, AC, 12h deadline), then reruns
+     Run B (r3 randomized) + F4 A/B (4 rounds) → `runB2-*-idle.json` /
+     `runC2-*-idle.json`.
+   - **ATTEMPT 3 RESULTS (idle confirmed load1=2.20 after a 100-min wait; 9
+     runs exit 0, 0 voids, per-arm load logged 1.8–5.7): ALL THREE DEBTS NOW
+     DISCHARGED.**
+     - **Debt 2 DISCHARGED — production deficit ground truth
+       (`runB2-qwen35-2b-16k-combined-r3-idle.json`): affine = 0.763× fp16
+       @16K** (fp16 72.07 [70.0–74.3], affine 55.02 [53.3–55.4] tok/s, tight
+       spreads, quality PASSED, affineK8V4Native selected, 2.133× KV). Fully
+       consistent with the campaign's 0.718 pre-F4 (same fp16 absolute ~70–72;
+       affine 55.0 vs 50.4 — the +9% delta is SUGGESTIVE of F4 but is a
+       cross-session comparison, not controlled).
+     - **Debt 3 DISCHARGED — F4 verdict: real but small.
+       (`runC2-r{1-4}-f4{on,off}-idle.json`, within-round pairs):** affine
+       ON/OFF = [1.042, 1.014, 1.046, 1.018] — 4/4 rounds positive, median
+       **+3.0%**. The fp16 negative control is dead-on 1.000 in the two
+       cleanest rounds (r1 0.9994, r4 1.0006; r2/r3 control inflation tracks
+       their elevated load 5.2–5.7). **F4 = low-single-digit affine win (~+2
+       to +4% @16K), NOT the ~12% the H2 diagnosis estimated.** Keep it
+       (committed, fail-closed, no downside); the remaining ~24% deficit at
+       16K stays with the open kernel/occupancy question — noting 16K is
+       fp16-admissible anyway, so the compressed path's product regime stays
+       ≥32K where native coop (+12.3%) is already default-on.
+     - Anomaly log: C2 r1-f4on wall-clock ~15 min (transient load 3.13 during
+       prefill; in-sample decode number normal, within-pair design absorbs
+       it); r3 pair ran at load 5.2–5.7 (slightly above the new refuse
+       threshold's intent — future drivers should re-check load per-arm, not
+       only at session start).
+6. **iOS buildability VERIFIED GREEN + two real blockers fixed** (2026-07-19):
+   `xcodebuild -scheme mlx-swift-lm-Package -destination 'generic/platform=iOS
+   Simulator'` now **BUILD SUCCEEDED** at pins bcf93af+e230d124+aeaa8e3 (the
+   app-facing `MLXLLM` scheme was already green). Fixes required: (a) four tool
+   targets used `@main` inside a file named `main.swift`, which xcodebuild
+   rejects — renamed (NativeVxBenchmark, InferenceParityMain, ModelBenchmark
+   untouched-name-wise but see (b), AcceptanceHarnessMain, LowerV2CalibrateMain;
+   `swift build` masked this on macOS); (b) two `gitCommit` helpers
+   (InferenceParity, ModelBenchmark) used `Process()`, unavailable on iOS — now
+   `#if os(macOS)`-guarded, returning "unknown" elsewhere. macOS release builds
+   of both tools re-verified green; model-free test suites (60 tests incl.
+   PromptLookupSpeculatorTests + TurboQuantProfileTests) pass with the prefetch
+   flip. Caveat: this is a package-edit-mode build (content equals the pins
+   since worktrees are clean at the pinned shas), so the fresh-checkout
+   Package.resolved graph verification is STILL OWED; physical-device evidence
+   remains the gate for any product claim.

@@ -1,5 +1,18 @@
 # External intel synthesis and evolved plan — 2026-07-05
 
+> **SUPERSEDED IN PART (annotated 2026-07-19).** This doc's central framing —
+> "the ≤32K deficit is HOST-side; the SDPA kernel is exonerated; stop attacking
+> it with kernel work" — was based on the favorable hd128/kv8 synthetic shape.
+> Later evidence: P1-1 fused-append falsified the host-ladder hypothesis
+> (2026-07-05/06), M1 measured the kernel at 0.304× fp16 at the real
+> 8q/2kv/hd256 shape (2026-07-10, `artifacts/affine-occupancy-20260710/`), and
+> the 2026-07-19 stability probe (`artifacts/deficit-stability-20260719/`)
+> showed the isolated microbench itself has ±50% round variance at that shape —
+> disqualifying it as an instrument. Current state: the deficit is real
+> (real-model 0.718× @16K is the reliable ground truth), its locus is OPEN, and
+> adjudication must use real-model A/Bs or driver counters. See the 2026-07-19
+> section of `continuation-handoff-2026-07-03.md`.
+
 Six external sources were deeply investigated by parallel research agents and
 cross-checked against local repo state (three additional grounding agents over
 docs, kernel trees, and the affine path). Full evidence reports are archived at:
