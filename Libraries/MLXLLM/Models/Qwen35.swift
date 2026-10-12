@@ -277,6 +277,14 @@ final class Qwen35GatedDeltaNet: Module {
 
     var hasFusedInputProjection: Bool { fusedInputProjection.isPrepared }
 
+    /// The fused projection as compile state for a trace that runs this
+    /// layer. It is not a registered child (the checkpoint topology stays the
+    /// four projections), so a trace would otherwise read its arrays as tape
+    /// constants, and MLX keeps such constants alive after the trace is erased.
+    var fusedProjectionTraceState: [Module] {
+        fusedInputProjection.fused.map { [$0] } ?? []
+    }
+
     /// Build one physical quantized projection while retaining the four named
     /// module paths as storage-sharing views. This runs at most once between
     /// parameter/module updates; failed eligibility checks are not repeated on
@@ -399,12 +407,15 @@ final class Qwen35GatedDeltaNet: Module {
 
         let dtype = q.dtype
         let invScale = pow(Float(headKDim), -0.5)
+        // rmsNorm adds eps to mean(x^2). The reference l2norm adds 1e-6 to
+        // sum(x^2), so divide the eps by the head dim.
+        let qkEps = 1e-6 / Float(headKDim)
         let qNormed =
             MLXArray(pow(invScale, 2)).asType(dtype)
-            * MLXFast.rmsNorm(q, weight: MLXArray.mlxNone, eps: 1e-6)
+            * MLXFast.rmsNorm(q, weight: MLXArray.mlxNone, eps: qkEps)
         let kNormed =
             MLXArray(invScale).asType(dtype)
-            * MLXFast.rmsNorm(k, weight: MLXArray.mlxNone, eps: 1e-6)
+            * MLXFast.rmsNorm(k, weight: MLXArray.mlxNone, eps: qkEps)
 
         let out: MLXArray
         let newRecState: MLXArray
@@ -421,7 +432,8 @@ final class Qwen35GatedDeltaNet: Module {
                 aLog: aLog,
                 dtBias: dtBias,
                 state: recState,
-                mask: prefixMask)
+                mask: prefixMask,
+                useKernel: !training)
             let (suffixOut, suffixState) = gatedDeltaUpdate(
                 q: qNormed[0..., split..., 0..., 0...],
                 k: kNormed[0..., split..., 0..., 0...],
@@ -431,7 +443,8 @@ final class Qwen35GatedDeltaNet: Module {
                 aLog: aLog,
                 dtBias: dtBias,
                 state: prefixState,
-                mask: suffixMask)
+                mask: suffixMask,
+                useKernel: !training)
             out = concatenated([prefixOut, suffixOut], axis: 1)
             newRecState = suffixState
 
@@ -455,7 +468,8 @@ final class Qwen35GatedDeltaNet: Module {
                 aLog: aLog,
                 dtBias: dtBias,
                 state: recState,
-                mask: mask)
+                mask: mask,
+                useKernel: !training)
             checkpoint = nil
         }
 
@@ -756,11 +770,13 @@ final class Qwen35DecoderLayer: Module {
 
     // Every body stays inside this layer, so each trace's default state (the
     // layer's own weights) is complete.
-    private let compiledLinearLayer = CompiledTrace<Qwen35DecoderLayer> { layer, arguments in
-        let (out, newConvState, newRecState) = layer.linearLayerBody(
-            x: arguments[0], convState: arguments[1], recState: arguments[2])
-        return [out, newConvState, newRecState]
-    }
+    private let compiledLinearLayer = CompiledTrace<Qwen35DecoderLayer>(
+        state: { [$0] + ($0.linearAttn?.fusedProjectionTraceState ?? []) },
+        body: { layer, arguments in
+            let (out, newConvState, newRecState) = layer.linearLayerBody(
+                x: arguments[0], convState: arguments[1], recState: arguments[2])
+            return [out, newConvState, newRecState]
+        })
 
     private let compiledAttentionPre = CompiledTrace<Qwen35DecoderLayer> { layer, arguments in
         let (queries, gate, keys, values) = layer.attentionPreBody(x: arguments[0])
@@ -884,9 +900,10 @@ public class Qwen35TextModelInner: Module {
         self.compiledSegments = CompiledDecodeSegmentCache(
             count: segments.count,
             state: { model, index in
-                // Everything `segmentBody` reads: the layers it runs, the
-                // embedding it starts from, the final norm it ends with.
-                var modules: [Module] = segments[index].layerIndices.map { model.layers[$0] }
+                // Everything `segmentBody` reads: the layers it runs (with a
+                // GDN layer's fused projection), the embedding it starts
+                // from, the final norm it ends with.
+                var modules = model.traceState(forLayers: segments[index].layerIndices)
                 if index == 0 {
                     modules.append(model.embedTokens)
                 }
@@ -992,6 +1009,15 @@ public class Qwen35TextModelInner: Module {
         return [hiddenStates] + states
     }
 
+    /// The compile state of a trace that runs `indices`: each layer and, for
+    /// a GDN layer, its fused projection.
+    func traceState(forLayers indices: [Int]) -> [Module] {
+        indices.flatMap { index -> [Module] in
+            let layer = layers[index]
+            return [layer] + (layer.linearAttn?.fusedProjectionTraceState ?? [])
+        }
+    }
+
     /// One decode step through the compiled segments, or nil when this is not
     /// the plain single-token case the schedule assumes — the caller then
     /// takes the general path. Segments split at each KV write: the cache
@@ -1091,6 +1117,18 @@ public class Qwen35TextModel: Module, LLMModel, KVCacheDimensionProvider {
     public func callAsFunction(
         _ input: LMInput.Text, cache: [KVCache]?, state: LMOutput.State?
     ) -> LMOutput {
+        forward(input, cache: cache, state: state, lastTokenOnly: false)
+    }
+
+    public func nextTokenLogits(
+        _ input: LMInput.Text, cache: [KVCache]?, state: LMOutput.State?
+    ) -> LMOutput {
+        forward(input, cache: cache, state: state, lastTokenOnly: true)
+    }
+
+    private func forward(
+        _ input: LMInput.Text, cache: [KVCache]?, state: LMOutput.State?, lastTokenOnly: Bool
+    ) -> LMOutput {
         let emitDrafterState = state?[mtpEmitFlagKey] ?? false
         let hiddenStates: MLXArray
         if emitDrafterState {
@@ -1102,11 +1140,16 @@ public class Qwen35TextModel: Module, LLMModel, KVCacheDimensionProvider {
             hiddenStates = model(input.tokens, cache: cache)
         }
 
+        let projection: Module = lmHead ?? model.embedTokens
+        let projectionInput =
+            lastTokenOnly && !emitDrafterState
+            ? quantizedVocabularyProjectionInput(hiddenStates, projection: projection)
+            : hiddenStates
         let logits: MLXArray
         if let lmHead {
-            logits = lmHead(hiddenStates)
+            logits = lmHead(projectionInput)
         } else {
-            logits = model.embedTokens.asLinear(hiddenStates)
+            logits = model.embedTokens.asLinear(projectionInput)
         }
 
         guard emitDrafterState else {
@@ -1142,6 +1185,14 @@ public class Qwen35TextModel: Module, LLMModel, KVCacheDimensionProvider {
         }
     }
 
+    public func prepareCheckpoint(_ checkpoint: ModelCheckpoint) throws -> ModelCheckpoint {
+        var checkpoint = try Qwen35CheckpointPolicy.prepareTarget(
+            checkpoint, layout: .text, tiedWordEmbeddings: configuration.tieWordEmbeddings)
+        checkpoint.weights = try sanitize(
+            weights: checkpoint.weights, metadata: checkpoint.metadata)
+        return checkpoint
+    }
+
     public func sanitize(weights: [String: MLXArray]) -> [String: MLXArray] {
         let hasUnsanitizedConv1d = weights.contains { key, value in
             key.contains("conv1d.weight") && value.dim(-1) != 1
@@ -1152,7 +1203,7 @@ public class Qwen35TextModel: Module, LLMModel, KVCacheDimensionProvider {
         // layout is the reliable signal on its own.
         let shouldShiftNormWeights = hasUnsanitizedConv1d
 
-        var weights = weights.filter { !$0.key.contains("mtp.") }
+        var weights = Qwen35CheckpointPolicy.targetWeights(weights)
 
         weights = filterLMHeadWeights(
             from: weights, tiedWordEmbeddings: configuration.tieWordEmbeddings)
@@ -1242,6 +1293,12 @@ public class Qwen35Model: Module, LLMModel, KVCacheDimensionProvider {
         languageModel(input, cache: cache, state: state)
     }
 
+    public func nextTokenLogits(
+        _ input: LMInput.Text, cache: [KVCache]?, state: LMOutput.State?
+    ) -> LMOutput {
+        languageModel.nextTokenLogits(input, cache: cache, state: state)
+    }
+
     public func newCache(parameters: GenerateParameters?) throws -> [KVCache] {
         try languageModel.newCache(parameters: parameters)
     }
@@ -1250,24 +1307,20 @@ public class Qwen35Model: Module, LLMModel, KVCacheDimensionProvider {
         try languageModel.prepare()
     }
 
-    public func sanitize(weights: [String: MLXArray]) -> [String: MLXArray] {
-        var sanitized = [String: MLXArray]()
-        for (key, value) in weights {
-            if key.hasPrefix("vision_tower") || key.hasPrefix("model.visual") {
-                continue
-            }
+    public func prepareCheckpoint(_ checkpoint: ModelCheckpoint) throws -> ModelCheckpoint {
+        var checkpoint = try Qwen35CheckpointPolicy.prepareTarget(
+            checkpoint, layout: .wrappedText,
+            tiedWordEmbeddings: languageModel.configuration.tieWordEmbeddings)
+        checkpoint.weights = try sanitize(
+            weights: checkpoint.weights, metadata: checkpoint.metadata)
+        return checkpoint
+    }
 
-            var key = key
-            if key.hasPrefix("model.language_model") {
-                key = key.replacingOccurrences(
-                    of: "model.language_model", with: "language_model.model")
-            } else if !key.hasPrefix("language_model.") {
-                key = "language_model." + key
-            }
-            sanitized[key] = value
-        }
-
-        return languageModel.sanitize(weights: sanitized)
+    public func sanitize(weights: [String: MLXArray]) throws -> [String: MLXArray] {
+        let checkpoint = try Qwen35CheckpointPolicy.prepareTarget(
+            .init(weights: weights), layout: .wrappedText,
+            tiedWordEmbeddings: languageModel.configuration.tieWordEmbeddings)
+        return languageModel.sanitize(weights: checkpoint.weights)
     }
 }
 

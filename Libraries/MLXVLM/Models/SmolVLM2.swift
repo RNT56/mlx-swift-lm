@@ -307,7 +307,8 @@ public struct SmolVLMProcessor: UserInputProcessor {
     }
 
     public func prepare(input: UserInput) async throws -> LMInput {
-        let messages = SmolVLM2MessageGenerator().generate(from: input)
+        let messages = SmolVLM2MessageGenerator().generate(
+          from: input.removingSpecialTokenLabels(using: tokenizer))
 
         if input.images.isEmpty && input.videos.isEmpty {
             // No image scenario
